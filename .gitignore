@@ -1,0 +1,43 @@
+# ===================================================================
+# WhisperInk .gitignore
+# ===================================================================
+
+# Build outputs
+bin/
+obj/
+_publish/
+_publish-fd/
+
+# .NET
+*.dll
+*.exe
+*.pdb
+*.cache
+*.log
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+
+# NuGet
+*.nupkg
+packages/
+project.nuget.cache
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Local config (user-specific, contains API keys)
+*.user.json
+
+# Additional build artifacts
+*.g.cs
+*.g.i.cs
+*.baml
