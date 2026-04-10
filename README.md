@@ -195,6 +195,49 @@ Multi-provider architecture defined in `ApiProvider`. Each provider configures:
 - `TranscriptionTemperature` (nullable double)
 - `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI `prompt` field) | `"cohere_terms"` (Cohere `context_bias_terms` JSON array)
 
+### Per-Model Parameter Profiles (New)
+
+WhisperInk now supports per-provider **transcription model profiles** so you can quickly switch between tuned parameter sets.
+
+Each provider can define multiple profiles, each with:
+- `DisplayName` and `ModelId`
+- Typed parameters:
+  - `SendLanguage` + `Language`
+  - `Temperature`
+  - `ContextBiasMode` (`inherit`, `none`, `whisper_prompt`, `cohere_terms`)
+  - `Prompt`
+  - `ContextBiasTerms`
+- `Hints` text for usage guidance
+- `RawOverrides` for advanced multipart key/value injection
+
+Profiles are configurable in **API Provider Settings** and switchable from the tray context menu under the Provider submenu.
+
+#### Advanced Raw Overrides
+
+Use raw overrides to inject provider/model-specific fields not covered by typed controls.
+
+- Override item fields:
+  - `Key`
+  - `Value`
+  - `ValueTypeHint` (`string`, `number`, `bool`, `json`)
+  - `Enabled`
+- Merge behavior:
+  - Typed profile fields are built first
+  - Raw overrides are applied afterward
+  - Raw overrides win on key collisions
+  - Protected key `file` cannot be overridden
+
+This makes WhisperInk a practical testbed for ASR parameter exploration across OpenAI, Mistral, Cohere, ElevenLabs, local servers, and ONNX-backed local inference.
+
+### Config Schema Version
+
+Config now includes `ConfigSchemaVersion` and stores profile definitions under each provider.
+
+Backward compatibility behavior:
+- Existing provider fields still load
+- If profiles are missing, WhisperInk synthesizes defaults and migrates legacy settings
+- Legacy `ContextBiasTerms` and provider-level temperature/context mode are preserved as fallback paths
+
 Default providers (in `ApiProvider.CreateDefaults()`):
 
 | Id | Name | Notes |

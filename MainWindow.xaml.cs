@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Globalization;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -140,6 +141,7 @@ namespace WhisperInk
         private string _chatApiUrl = "";
         private string _chatModel = "";
         private string _postProcessModel = "";
+        private TranscriptionModelProfile? _activeTranscriptionProfile;
         private string _activeApiKey = "";
         private bool _activeSupportsRealtime = false;
         private bool _activeSupportsTranscription = true;
@@ -312,10 +314,21 @@ namespace WhisperInk
                 provider = _providers[0];
             }
 
+            provider.EnsureTranscriptionProfiles(_contextBiasTerms);
+            _activeTranscriptionProfile = provider.GetActiveTranscriptionProfile();
+
             string baseUrl = provider.BaseUrl.TrimEnd('/');
             _audioApiUrl = provider.ResolvedTranscriptionUrl;
             _chatApiUrl = $"{baseUrl}/v1/chat/completions";
-            _audioModel = provider.TranscriptionModel;
+
+            string resolvedModel = string.IsNullOrWhiteSpace(_activeTranscriptionProfile?.ModelId)
+                ? provider.TranscriptionModel
+                : _activeTranscriptionProfile!.ModelId;
+            _audioModel = resolvedModel;
+
+            // Keep legacy provider-level model in sync with the active profile for backward compatibility.
+            provider.TranscriptionModel = _audioModel;
+
             _chatModel = provider.ChatModel;
             _postProcessModel = string.IsNullOrWhiteSpace(provider.PostProcessModel)
                 ? provider.ChatModel : provider.PostProcessModel;
@@ -325,7 +338,7 @@ namespace WhisperInk
             _activeAuthHeaderName = provider.AuthHeaderName ?? "";
             _activeModelFieldName = provider.ResolvedModelField;
 
-            Log($"Active provider: {provider.Name} → STT={_audioApiUrl}  (RT={_activeSupportsRealtime}, auth={(_activeAuthHeaderName == "" ? "Bearer" : _activeAuthHeaderName)}, modelField={_activeModelFieldName})");
+            Log($"Active provider: {provider.Name} → STT={_audioApiUrl} (profile={_activeTranscriptionProfile?.DisplayName ?? "none"}, model={_audioModel}, RT={_activeSupportsRealtime}, auth={(_activeAuthHeaderName == "" ? "Bearer" : _activeAuthHeaderName)}, modelField={_activeModelFieldName})");
         }
 
         private void SwitchProvider(string providerId)
@@ -348,7 +361,8 @@ namespace WhisperInk
             var provider = GetActiveProvider();
             string provTag = provider?.Name ?? "?";
             string modeTag = IsRealtimeMode ? "RT" : "Batch";
-            lblStatus.Content = $"{provTag} ({modeTag})";
+            string profileTag = provider?.GetActiveTranscriptionProfile()?.DisplayName ?? "default";
+            lblStatus.Content = $"{provTag}/{profileTag} ({modeTag})";
         }
 
         /// <summary>True when the active provider is the local Cohere ONNX model.</summary>
@@ -414,6 +428,47 @@ namespace WhisperInk
                                 p.TranscriptionTemperature = tt.GetDouble();
                             if (pEl.TryGetProperty("ContextBiasMode", out var cbm))
                                 p.ContextBiasMode = cbm.GetString() ?? "none";
+
+                            if (pEl.TryGetProperty("ActiveTranscriptionProfileId", out var apf))
+                                p.ActiveTranscriptionProfileId = apf.GetString() ?? "";
+
+                            if (pEl.TryGetProperty("TranscriptionProfiles", out var tps) && tps.ValueKind == JsonValueKind.Array)
+                            {
+                                p.TranscriptionProfiles = new List<TranscriptionModelProfile>();
+                                foreach (var profEl in tps.EnumerateArray())
+                                {
+                                    var profile = new TranscriptionModelProfile();
+                                    if (profEl.TryGetProperty("Id", out var pfId)) profile.Id = pfId.GetString() ?? profile.Id;
+                                    if (profEl.TryGetProperty("DisplayName", out var dn)) profile.DisplayName = dn.GetString() ?? profile.DisplayName;
+                                    if (profEl.TryGetProperty("ModelId", out var mi)) profile.ModelId = mi.GetString() ?? "";
+                                    if (profEl.TryGetProperty("SendLanguage", out var sl)) profile.SendLanguage = sl.GetBoolean();
+                                    if (profEl.TryGetProperty("Language", out var lang)) profile.Language = lang.GetString() ?? "en";
+                                    if (profEl.TryGetProperty("Temperature", out var temp) && temp.ValueKind != JsonValueKind.Null)
+                                        profile.Temperature = temp.GetDouble();
+                                    if (profEl.TryGetProperty("ContextBiasMode", out var pbm)) profile.ContextBiasMode = pbm.GetString() ?? "inherit";
+                                    if (profEl.TryGetProperty("Prompt", out var pr)) profile.Prompt = pr.GetString() ?? "";
+                                    if (profEl.TryGetProperty("ContextBiasTerms", out var cbtp)) profile.ContextBiasTerms = cbtp.GetString() ?? "";
+                                    if (profEl.TryGetProperty("Hints", out var h)) profile.Hints = h.GetString() ?? "";
+                                    if (profEl.TryGetProperty("Enabled", out var en)) profile.Enabled = en.GetBoolean();
+
+                                    if (profEl.TryGetProperty("RawOverrides", out var roEl) && roEl.ValueKind == JsonValueKind.Array)
+                                    {
+                                        profile.RawOverrides = new List<RawParameterOverride>();
+                                        foreach (var item in roEl.EnumerateArray())
+                                        {
+                                            var ov = new RawParameterOverride();
+                                            if (item.TryGetProperty("Key", out var k)) ov.Key = k.GetString() ?? "";
+                                            if (item.TryGetProperty("Value", out var v)) ov.Value = v.GetString() ?? "";
+                                            if (item.TryGetProperty("ValueTypeHint", out var vt)) ov.ValueTypeHint = vt.GetString() ?? "string";
+                                            if (item.TryGetProperty("Enabled", out var oen)) ov.Enabled = oen.GetBoolean();
+                                            profile.RawOverrides.Add(ov);
+                                        }
+                                    }
+
+                                    p.TranscriptionProfiles.Add(profile);
+                                }
+                            }
+
                             _providers.Add(p);
                         }
                     }
@@ -431,6 +486,16 @@ namespace WhisperInk
                             if (mistral != null) mistral.ApiKey = _mistralApiKey;
                         }
                         Log("Migrated legacy config → provider system");
+                    }
+
+                    // Normalize profile defaults and migrate legacy context terms into profile if needed.
+                    ApiProvider.NormalizeDefaults(_providers);
+                    foreach (var p in _providers)
+                    {
+                        if (p.TranscriptionProfiles.Count == 0)
+                            p.TranscriptionProfiles.Add(TranscriptionParameterCatalog.CreateFromLegacy(p, _contextBiasTerms));
+
+                        p.EnsureTranscriptionProfiles(_contextBiasTerms);
                     }
                 }
                 else
@@ -453,11 +518,14 @@ namespace WhisperInk
             {
                 if (!Directory.Exists(ConfigFolder)) Directory.CreateDirectory(ConfigFolder);
 
+                ApiProvider.NormalizeDefaults(_providers);
+
                 var mistralProvider = _providers.FirstOrDefault(p => p.Id == "mistral");
                 string legacyKey = mistralProvider?.ApiKey ?? _mistralApiKey;
 
                 var config = new
                 {
+                    ConfigSchemaVersion = 2,
                     MistralApiKey = legacyKey,
                     IsSoundEnabled = _isSoundEnabled,
                     SystemPrompt = _systemPrompt,
@@ -474,6 +542,67 @@ namespace WhisperInk
                 File.WriteAllText(ConfigFile, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch (Exception ex) { Log($"Config save error: {ex.Message}"); }
+        }
+
+        private static List<string> ParseTerms(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return new List<string>();
+
+            var terms = raw
+                .Split(new[] { ',', '\n', '\r', ';', '|' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(t => t.Trim())
+                .Where(t => !string.IsNullOrWhiteSpace(t))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return terms;
+        }
+
+        private static string ResolveProfileBiasMode(ApiProvider provider, TranscriptionModelProfile? profile)
+        {
+            if (profile == null) return provider.ContextBiasMode ?? "none";
+            string mode = (profile.ContextBiasMode ?? "inherit").Trim().ToLowerInvariant();
+            return mode == "inherit"
+                ? (provider.ContextBiasMode ?? "none")
+                : mode;
+        }
+
+        private static bool TryParseRawOverrideValue(RawParameterOverride ov, out HttpContent? content)
+        {
+            content = null;
+            if (!ov.Enabled || string.IsNullOrWhiteSpace(ov.Key)) return false;
+
+            string kind = (ov.ValueTypeHint ?? "string").Trim().ToLowerInvariant();
+            string value = ov.Value ?? "";
+
+            switch (kind)
+            {
+                case "number":
+                    if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var num))
+                    {
+                        content = new StringContent(num.ToString("0.########", CultureInfo.InvariantCulture));
+                        return true;
+                    }
+                    return false;
+
+                case "bool":
+                case "boolean":
+                    if (bool.TryParse(value, out var b))
+                    {
+                        content = new StringContent(b ? "true" : "false");
+                        return true;
+                    }
+                    return false;
+
+                case "json":
+                    // multipart string field carrying JSON payload
+                    content = new StringContent(value, Encoding.UTF8, "application/json");
+                    return true;
+
+                default:
+                    content = new StringContent(value);
+                    return true;
+            }
         }
 
         // ── Keyboard Hook ──────────────────────────────────────────────
@@ -1019,6 +1148,7 @@ namespace WhisperInk
 
             // ── HTTP providers ────────────────────────────────────────
             var activeProvider = GetActiveProvider();
+            var activeProfile = activeProvider?.GetActiveTranscriptionProfile();
 
             try
             {
@@ -1038,6 +1168,37 @@ namespace WhisperInk
                 var fileContent = new StreamContent(fileStream);
                 fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav");
 
+                var multipartFields = new Dictionary<string, (HttpContent Content, int Priority)>(StringComparer.OrdinalIgnoreCase);
+
+                void UpsertField(string key, HttpContent value, int priority)
+                {
+                    if (string.IsNullOrWhiteSpace(key)) return;
+                    if (string.Equals(key, "file", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Log("Skipped override for protected key: file");
+                        return;
+                    }
+
+                    if (multipartFields.TryGetValue(key, out var existing))
+                    {
+                        // Preserve established ordering when overriding an existing field.
+                        multipartFields[key] = (value, existing.Priority);
+                    }
+                    else
+                    {
+                        multipartFields[key] = (value, priority);
+                    }
+                }
+
+                int ResolvePriority(string key)
+                {
+                    if (key.Equals(_activeModelFieldName, StringComparison.OrdinalIgnoreCase)) return 10;
+                    if (key.Equals("language", StringComparison.OrdinalIgnoreCase)) return 20;
+                    if (key.Equals("temperature", StringComparison.OrdinalIgnoreCase)) return 30;
+                    if (key.Equals("prompt", StringComparison.OrdinalIgnoreCase) || key.Equals("context_bias_terms", StringComparison.OrdinalIgnoreCase)) return 35;
+                    return 40;
+                }
+
                 // ════════════════════════════════════════════════════
                 // FIELD ORDER MATTERS: Cohere v2 requires all string
                 // fields to appear BEFORE the file part in the body.
@@ -1045,45 +1206,77 @@ namespace WhisperInk
                 // ════════════════════════════════════════════════════
 
                 // ── 1. Model ──
-                if (!string.IsNullOrWhiteSpace(_audioModel))
-                    content.Add(new StringContent(_audioModel), _activeModelFieldName);
+                string modelId = !string.IsNullOrWhiteSpace(activeProfile?.ModelId)
+                    ? activeProfile!.ModelId
+                    : _audioModel;
+                if (!string.IsNullOrWhiteSpace(modelId))
+                    UpsertField(_activeModelFieldName, new StringContent(modelId), 10);
 
                 // ── 2. Language ──
-                // Bearer-auth providers (OpenAI-compat AND Cohere) all accept "language".
-                // Custom-header providers (ElevenLabs xi-api-key) use different field
-                // names or auto-detect, so we skip it for those.
-                if (string.IsNullOrWhiteSpace(_activeAuthHeaderName))
-                    content.Add(new StringContent("en"), "language");
+                bool sendLanguage = activeProfile?.SendLanguage ?? string.IsNullOrWhiteSpace(_activeAuthHeaderName);
+                string languageValue = string.IsNullOrWhiteSpace(activeProfile?.Language) ? "en" : activeProfile!.Language.Trim();
+                if (sendLanguage && !string.IsNullOrWhiteSpace(languageValue))
+                    UpsertField("language", new StringContent(languageValue), 20);
 
                 // ── 3. Temperature (if provider configures one) ──
-                if (activeProvider?.TranscriptionTemperature.HasValue == true)
-                    content.Add(
-                        new StringContent(activeProvider.TranscriptionTemperature.Value
-                            .ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)),
-                        "temperature");
+                double? temp = activeProfile?.Temperature ?? activeProvider?.TranscriptionTemperature;
+                if (temp.HasValue)
+                    UpsertField("temperature", new StringContent(temp.Value.ToString("0.##", CultureInfo.InvariantCulture)), 30);
 
                 // ── 4. Context biasing ──
-                // Delivery method is per-provider; unsupported providers ignore unknown fields,
-                // but we only send when explicitly configured to avoid padding request size.
-                if (_contextBiasTerms.Count > 0)
+                var terms = ParseTerms(activeProfile?.ContextBiasTerms ?? "");
+                if (terms.Count == 0)
+                    terms = _contextBiasTerms;
+
+                string biasMode = activeProvider == null ? "none" : ResolveProfileBiasMode(activeProvider, activeProfile);
+                if (terms.Count > 0 || !string.IsNullOrWhiteSpace(activeProfile?.Prompt))
                 {
-                    string biasMode = activeProvider?.ContextBiasMode ?? "none";
                     switch (biasMode)
                     {
                         case "cohere_terms":
                             // Cohere v2: JSON array of up to 100 domain-specific strings
-                            content.Add(new StringContent(JsonSerializer.Serialize(_contextBiasTerms)), "context_bias_terms");
+                            if (terms.Count > 0)
+                                UpsertField("context_bias_terms", new StringContent(JsonSerializer.Serialize(terms)), 35);
                             break;
 
                         case "whisper_prompt":
                             // OpenAI Whisper / Groq / DeepInfra / local servers:
                             // A text string that primes the decoder vocabulary — comma-join works well.
                             // Keep under ~224 tokens (Whisper's prompt buffer limit).
-                            content.Add(new StringContent(string.Join(", ", _contextBiasTerms)), "prompt");
+                            string promptValue = string.IsNullOrWhiteSpace(activeProfile?.Prompt)
+                                ? string.Join(", ", terms)
+                                : activeProfile!.Prompt.Trim();
+                            if (!string.IsNullOrWhiteSpace(promptValue))
+                                UpsertField("prompt", new StringContent(promptValue), 35);
                             break;
 
                         // "none" — don't send anything
                     }
+                }
+
+                // ── 4b. Advanced raw overrides (override typed fields) ──
+                if (activeProfile?.RawOverrides != null)
+                {
+                    foreach (var ov in activeProfile.RawOverrides)
+                    {
+                        if (!ov.Enabled || string.IsNullOrWhiteSpace(ov.Key))
+                            continue;
+
+                        if (!TryParseRawOverrideValue(ov, out var parsedContent) || parsedContent == null)
+                        {
+                            Log($"Skipped invalid raw override: {ov.Key}={ov.Value} (type={ov.ValueTypeHint})");
+                            continue;
+                        }
+
+                        UpsertField(ov.Key.Trim(), parsedContent, ResolvePriority(ov.Key.Trim()));
+                    }
+                }
+
+                foreach (var field in multipartFields
+                    .OrderBy(kv => kv.Value.Priority)
+                    .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+                {
+                    content.Add(field.Value.Content, field.Key);
                 }
 
                 // ── 5. File LAST ──
@@ -1368,6 +1561,41 @@ namespace WhisperInk
                 pItem.Click += (_, _) => SwitchProvider(pid);
                 providerMenu.Items.Add(pItem);
             }
+
+            var activeProvider = GetActiveProvider();
+            if (activeProvider != null)
+            {
+                activeProvider.EnsureTranscriptionProfiles(_contextBiasTerms);
+                var profileMenu = new MenuItem
+                {
+                    Header = $"🧪 Profile: {activeProvider.GetActiveTranscriptionProfile()?.DisplayName ?? "Default"}"
+                };
+
+                foreach (var profile in activeProvider.TranscriptionProfiles.Where(p => p.Enabled))
+                {
+                    string profileId = profile.Id;
+                    var profileItem = new MenuItem
+                    {
+                        Header = string.IsNullOrWhiteSpace(profile.ModelId)
+                            ? profile.DisplayName
+                            : $"{profile.DisplayName} ({profile.ModelId})",
+                        IsChecked = string.Equals(profile.Id, activeProvider.ActiveTranscriptionProfileId, StringComparison.OrdinalIgnoreCase)
+                    };
+
+                    profileItem.Click += (_, _) =>
+                    {
+                        activeProvider.ActiveTranscriptionProfileId = profileId;
+                        ApplyActiveProvider();
+                        SaveConfig();
+                        UpdateStatusLabel();
+                    };
+                    profileMenu.Items.Add(profileItem);
+                }
+
+                providerMenu.Items.Add(new Separator());
+                providerMenu.Items.Add(profileMenu);
+            }
+
             providerMenu.Items.Add(new Separator());
             var configProvidersItem = new MenuItem { Header = "⚙ Configure Providers..." };
             configProvidersItem.Click += (_, _) =>

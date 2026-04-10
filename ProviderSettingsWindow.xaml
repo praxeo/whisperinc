@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="API Provider Settings"
-        Height="700" Width="500"
+        Height="860" Width="620"
         WindowStartupLocation="CenterScreen"
         Background="#1E1E1E"
         ResizeMode="CanResizeWithGrip">
@@ -30,6 +30,12 @@
             <Setter Property="BorderBrush" Value="#555"/>
             <Setter Property="Padding" Value="12,4"/>
             <Setter Property="Margin" Value="4,0"/>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#CCCCCC"/>
+            <Setter Property="BorderBrush" Value="#555"/>
+            <Setter Property="Padding" Value="4,2"/>
         </Style>
     </Window.Resources>
 
@@ -87,6 +93,16 @@
                 <Label Content="Transcription Model  (e.g. voxtral-mini-latest, whisper-1, scribe_v2)"/>
                 <TextBox x:Name="TxtTranscriptionModel" Margin="0,0,0,8"/>
 
+                <Label Content="Legacy Transcription Temperature (optional fallback)"/>
+                <TextBox x:Name="TxtLegacyTemperature" Margin="0,0,0,8"/>
+
+                <Label Content="Legacy Context Bias Mode (fallback when profile uses inherit)"/>
+                <ComboBox x:Name="CmbLegacyContextBiasMode" Margin="0,0,0,8">
+                    <ComboBoxItem Content="none"/>
+                    <ComboBoxItem Content="whisper_prompt"/>
+                    <ComboBoxItem Content="cohere_terms"/>
+                </ComboBox>
+
                 <Label Content="Chat Model  (/v1/chat/completions — for AnalyzeContext)"/>
                 <TextBox x:Name="TxtChatModel" Margin="0,0,0,8"/>
 
@@ -97,6 +113,78 @@
 
                 <CheckBox x:Name="ChkSupportsTranscription" Content="Supports /v1/audio/transcriptions"/>
                 <CheckBox x:Name="ChkSupportsRealtime" Content="Supports Mistral Realtime WebSocket (Mistral only)"/>
+
+                <Separator Background="#333" Margin="0,12,0,8"/>
+
+                <TextBlock Text="Model Profiles" Foreground="#E0E0E0" FontSize="13" FontWeight="SemiBold" Margin="0,0,0,6"/>
+                <TextBlock Foreground="#777" FontSize="10" Margin="0,0,0,8"
+                           Text="Use per-model profiles for parameters and hints. Raw overrides can inject additional multipart fields for experiments."/>
+
+                <DockPanel Margin="0,0,0,8">
+                    <Label DockPanel.Dock="Left" Content="Profile:" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="12"/>
+                    <Button x:Name="BtnProfileDelete" DockPanel.Dock="Right" Content="✕ Delete" Click="BtnProfileDelete_Click"
+                            Background="#4A2020" Margin="4,0,0,0"/>
+                    <Button x:Name="BtnProfileAdd" DockPanel.Dock="Right" Content="+ Add" Click="BtnProfileAdd_Click"/>
+                    <ComboBox x:Name="CmbProfiles" DisplayMemberPath="DisplayName"
+                              SelectionChanged="CmbProfiles_SelectionChanged"/>
+                </DockPanel>
+
+                <Label Content="Profile Name"/>
+                <TextBox x:Name="TxtProfileDisplayName" Margin="0,0,0,8"/>
+
+                <Label Content="Profile Model ID"/>
+                <TextBox x:Name="TxtProfileModelId" Margin="0,0,0,4"/>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
+                           Text="Examples: gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper-1, cohere-transcribe-03-2026"/>
+
+                <CheckBox x:Name="ChkProfileEnabled" Content="Profile enabled"/>
+                <CheckBox x:Name="ChkProfileSendLanguage" Content="Send language field"/>
+
+                <Label Content="Language"/>
+                <TextBox x:Name="TxtProfileLanguage" Margin="0,0,0,8"/>
+
+                <Label Content="Profile Temperature (optional)"/>
+                <TextBox x:Name="TxtProfileTemperature" Margin="0,0,0,8"/>
+
+                <Label Content="Profile Context Bias Mode"/>
+                <ComboBox x:Name="CmbProfileContextBiasMode" Margin="0,0,0,8">
+                    <ComboBoxItem Content="inherit"/>
+                    <ComboBoxItem Content="none"/>
+                    <ComboBoxItem Content="whisper_prompt"/>
+                    <ComboBoxItem Content="cohere_terms"/>
+                </ComboBox>
+
+                <Label Content="Prompt (for whisper_prompt or model prompt field)"/>
+                <TextBox x:Name="TxtProfilePrompt" Margin="0,0,0,8" Height="60" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+
+                <Label Content="Context Bias Terms (comma/newline separated)"/>
+                <TextBox x:Name="TxtProfileContextBiasTerms" Margin="0,0,0,8" Height="60" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+
+                <Label Content="Hints"/>
+                <TextBox x:Name="TxtProfileHints" Margin="0,0,0,8" Height="70" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
+
+                <TextBlock Text="Advanced Raw Overrides" Foreground="#E0E0E0" FontSize="12" FontWeight="SemiBold" Margin="0,4,0,6"/>
+                <DataGrid x:Name="DgRawOverrides"
+                          AutoGenerateColumns="False"
+                          CanUserAddRows="True"
+                          CanUserDeleteRows="True"
+                          HeadersVisibility="Column"
+                          Background="#232323"
+                          Foreground="#D0D0D0"
+                          BorderBrush="#555"
+                          RowBackground="#2B2B2B"
+                          AlternatingRowBackground="#303030"
+                          Height="220"
+                          Margin="0,0,0,8">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Key" Binding="{Binding Key}" Width="1.2*"/>
+                        <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="1.8*"/>
+                        <DataGridTextColumn Header="Type" Binding="{Binding ValueTypeHint}" Width="0.9*"/>
+                        <DataGridCheckBoxColumn Header="On" Binding="{Binding Enabled}" Width="0.5*"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,4"
+                           Text="Type values: string | number | bool | json. Raw overrides win over typed profile fields except protected key 'file'."/>
             </StackPanel>
         </ScrollViewer>
 

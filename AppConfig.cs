@@ -1,8 +1,184 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace WhisperInk
 {
+    public class RawParameterOverride
+    {
+        public string Key { get; set; } = "";
+        public string Value { get; set; } = "";
+        public string ValueTypeHint { get; set; } = "string"; // string | number | bool | json
+        public bool Enabled { get; set; } = true;
+
+        public override string ToString() => Enabled ? $"{Key}={Value}" : $"{Key}=<disabled>";
+    }
+
+    public class TranscriptionModelProfile
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
+        public string DisplayName { get; set; } = "Default";
+        public string ModelId { get; set; } = "";
+
+        // Common typed parameters
+        public bool SendLanguage { get; set; } = true;
+        public string Language { get; set; } = "en";
+        public double? Temperature { get; set; } = null;
+
+        // "inherit" | "none" | "whisper_prompt" | "cohere_terms"
+        public string ContextBiasMode { get; set; } = "inherit";
+        public string Prompt { get; set; } = "";
+        public string ContextBiasTerms { get; set; } = ""; // newline or comma delimited
+
+        // UI helper text shown in settings to explain best-practice usage.
+        public string Hints { get; set; } = "";
+        public bool Enabled { get; set; } = true;
+
+        // Advanced raw multipart key/value overrides. Keys here can override typed fields.
+        public List<RawParameterOverride> RawOverrides { get; set; } = new();
+
+        public override string ToString() =>
+            string.IsNullOrWhiteSpace(ModelId)
+                ? DisplayName
+                : $"{DisplayName} ({ModelId})";
+    }
+
+    public static class TranscriptionParameterCatalog
+    {
+        public static string BuildHints(string providerId, string? modelId)
+        {
+            providerId = (providerId ?? "").Trim().ToLowerInvariant();
+            modelId = (modelId ?? "").Trim();
+            string m = modelId.ToLowerInvariant();
+
+            return providerId switch
+            {
+                "openai" when m.Contains("gpt-4o-transcribe") =>
+                    "OpenAI GPT-4o Transcribe profile. Keep language='en' when dictating English. Use prompt for style/term priming. Temperature near 0 is most deterministic.",
+
+                "openai" when m.Contains("gpt-4o-mini-transcribe") =>
+                    "OpenAI GPT-4o Mini Transcribe profile. Lower latency, generally robust for quick dictation. Prompt can bias terminology.",
+
+                "openai" when m.Contains("whisper-1") =>
+                    "OpenAI Whisper-1 profile. Prompt is the main vocabulary-bias tool. Keep prompt concise and domain-specific.",
+
+                "mistral" =>
+                    "Mistral Voxtral batch profile. Prefer language='en'. Keep temperature null unless explicitly needed. Realtime mode settings are configured separately.",
+
+                "cohere-api" =>
+                    "Cohere v2 Transcribe profile. context_bias_terms accepts JSON array semantics; keep terms concise. Temperature 0.1 is a good deterministic baseline.",
+
+                "elevenlabs" =>
+                    "ElevenLabs Scribe profile. Uses custom auth header and model_id field. Avoid unsupported extras unless tested via raw overrides.",
+
+                "local" =>
+                    "Local OpenAI-compatible server profile. Prompt-based context biasing usually works for Whisper-compatible endpoints.",
+
+                "cohere-onnx" =>
+                    "Local ONNX profile. HTTP multipart parameters are ignored in this mode. Model behavior is controlled by local ONNX runtime.",
+
+                _ => "Set model-specific parameters here. Use Raw Overrides for experimental fields."
+            };
+        }
+
+        public static List<TranscriptionModelProfile> CreateDefaultProfiles(string providerId, string? fallbackModel)
+        {
+            providerId = (providerId ?? "").Trim().ToLowerInvariant();
+
+            static TranscriptionModelProfile P(string name, string model, double? temp, string biasMode, bool sendLang, string lang, string prompt, string biasTerms, string hints)
+                => new()
+                {
+                    DisplayName = name,
+                    ModelId = model,
+                    Temperature = temp,
+                    ContextBiasMode = biasMode,
+                    SendLanguage = sendLang,
+                    Language = lang,
+                    Prompt = prompt,
+                    ContextBiasTerms = biasTerms,
+                    Hints = hints,
+                    Enabled = true
+                };
+
+            if (providerId == "openai")
+            {
+                var profiles = new List<TranscriptionModelProfile>
+                {
+                    P("4o Transcribe", "gpt-4o-transcribe", 0.0, "whisper_prompt", true, "en", "", "", BuildHints("openai", "gpt-4o-transcribe")),
+                    P("4o Mini Transcribe", "gpt-4o-mini-transcribe", 0.0, "whisper_prompt", true, "en", "", "", BuildHints("openai", "gpt-4o-mini-transcribe")),
+                    P("Whisper-1", "whisper-1", 0.0, "whisper_prompt", true, "en", "", "", BuildHints("openai", "whisper-1"))
+                };
+                return profiles;
+            }
+
+            if (providerId == "mistral")
+            {
+                return new List<TranscriptionModelProfile>
+                {
+                    P("Voxtral Mini", string.IsNullOrWhiteSpace(fallbackModel) ? "voxtral-mini-latest" : fallbackModel, null, "none", true, "en", "", "", BuildHints("mistral", fallbackModel))
+                };
+            }
+
+            if (providerId == "cohere-api")
+            {
+                return new List<TranscriptionModelProfile>
+                {
+                    P("Cohere Transcribe", string.IsNullOrWhiteSpace(fallbackModel) ? "cohere-transcribe-03-2026" : fallbackModel, 0.1, "cohere_terms", true, "en", "", "", BuildHints("cohere-api", fallbackModel))
+                };
+            }
+
+            if (providerId == "elevenlabs")
+            {
+                return new List<TranscriptionModelProfile>
+                {
+                    P("Scribe v2", string.IsNullOrWhiteSpace(fallbackModel) ? "scribe_v2" : fallbackModel, null, "none", false, "", "", "", BuildHints("elevenlabs", fallbackModel))
+                };
+            }
+
+            if (providerId == "local")
+            {
+                return new List<TranscriptionModelProfile>
+                {
+                    P("Local Whisper-Compatible", fallbackModel ?? "", null, "whisper_prompt", true, "en", "", "", BuildHints("local", fallbackModel))
+                };
+            }
+
+            if (providerId == "cohere-onnx")
+            {
+                return new List<TranscriptionModelProfile>
+                {
+                    P("Cohere ONNX", "", null, "none", false, "", "", "", BuildHints("cohere-onnx", fallbackModel))
+                };
+            }
+
+            return new List<TranscriptionModelProfile>
+            {
+                P("Default", fallbackModel ?? "", null, "inherit", true, "en", "", "", BuildHints(providerId, fallbackModel))
+            };
+        }
+
+        public static TranscriptionModelProfile CreateFromLegacy(ApiProvider provider, IEnumerable<string>? legacyTerms)
+        {
+            var terms = legacyTerms == null
+                ? ""
+                : string.Join(", ", legacyTerms.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t.Trim()));
+
+            return new TranscriptionModelProfile
+            {
+                DisplayName = "Legacy Default",
+                ModelId = provider.TranscriptionModel,
+                Temperature = provider.TranscriptionTemperature,
+                ContextBiasMode = provider.ContextBiasMode,
+                SendLanguage = string.IsNullOrWhiteSpace(provider.AuthHeaderName),
+                Language = string.IsNullOrWhiteSpace(provider.AuthHeaderName) ? "en" : "",
+                Prompt = "",
+                ContextBiasTerms = terms,
+                Hints = BuildHints(provider.Id, provider.TranscriptionModel),
+                Enabled = true
+            };
+        }
+    }
+
     public class ApiProvider
     {
         public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
@@ -65,6 +241,10 @@ namespace WhisperInk
         // "cohere_terms" instructs Cohere's model to treat those strings as high-priority.
         public string ContextBiasMode { get; set; } = "none";
 
+        // ── Per-model transcription profiles ─────────────────────────────
+        public List<TranscriptionModelProfile> TranscriptionProfiles { get; set; } = new();
+        public string ActiveTranscriptionProfileId { get; set; } = "";
+
         public override string ToString() => Name;
 
         /// <summary>Resolved transcription URL — uses override if set, else builds from BaseUrl.</summary>
@@ -80,6 +260,48 @@ namespace WhisperInk
         /// <summary>True when auth should use a custom header instead of Authorization: Bearer.</summary>
         public bool UsesCustomAuthHeader => !string.IsNullOrWhiteSpace(AuthHeaderName);
 
+        public TranscriptionModelProfile? GetActiveTranscriptionProfile()
+        {
+            if (TranscriptionProfiles == null || TranscriptionProfiles.Count == 0)
+                return null;
+
+            var active = TranscriptionProfiles.FirstOrDefault(p => p.Id == ActiveTranscriptionProfileId && p.Enabled);
+            if (active != null) return active;
+
+            active = TranscriptionProfiles.FirstOrDefault(p => p.Enabled);
+            if (active != null)
+            {
+                ActiveTranscriptionProfileId = active.Id;
+                return active;
+            }
+
+            ActiveTranscriptionProfileId = TranscriptionProfiles[0].Id;
+            return TranscriptionProfiles[0];
+        }
+
+        public void EnsureTranscriptionProfiles(IEnumerable<string>? legacyTerms = null)
+        {
+            if (TranscriptionProfiles == null || TranscriptionProfiles.Count == 0)
+            {
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles(Id, TranscriptionModel);
+                if (TranscriptionProfiles.Count == 0)
+                    TranscriptionProfiles.Add(TranscriptionParameterCatalog.CreateFromLegacy(this, legacyTerms));
+
+                if (TranscriptionProfiles.Count > 0)
+                    ActiveTranscriptionProfileId = TranscriptionProfiles[0].Id;
+            }
+
+            if (string.IsNullOrWhiteSpace(ActiveTranscriptionProfileId) || !TranscriptionProfiles.Any(p => p.Id == ActiveTranscriptionProfileId))
+                ActiveTranscriptionProfileId = TranscriptionProfiles[0].Id;
+
+            // Backfill missing hints for old profiles
+            foreach (var profile in TranscriptionProfiles)
+            {
+                if (string.IsNullOrWhiteSpace(profile.Hints))
+                    profile.Hints = TranscriptionParameterCatalog.BuildHints(Id, profile.ModelId);
+            }
+        }
+
         public static List<ApiProvider> CreateDefaults() => new()
         {
             new ApiProvider
@@ -93,7 +315,8 @@ namespace WhisperInk
                 SupportsRealtime = true,
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
-                ContextBiasMode = "none"
+                ContextBiasMode = "none",
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles("mistral", "voxtral-mini-latest")
             },
             new ApiProvider
             {
@@ -106,7 +329,8 @@ namespace WhisperInk
                 SupportsRealtime = false,
                 SupportsTranscription = true,
                 TranscriptionTemperature = 0.0,
-                ContextBiasMode = "whisper_prompt"
+                ContextBiasMode = "whisper_prompt",
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles("openai", "whisper-1")
             },
             new ApiProvider
             {
@@ -122,7 +346,8 @@ namespace WhisperInk
                 SupportsRealtime = false,
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
-                ContextBiasMode = "none"
+                ContextBiasMode = "none",
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles("elevenlabs", "scribe_v2")
             },
             new ApiProvider
             {
@@ -138,7 +363,8 @@ namespace WhisperInk
                 // Cohere v2: model and language MUST appear before file in multipart body.
                 // Temperature 0.1 → focused/deterministic output, good for medical dictation.
                 TranscriptionTemperature = 0.1,
-                ContextBiasMode = "cohere_terms"
+                ContextBiasMode = "cohere_terms",
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles("cohere-api", "cohere-transcribe-03-2026")
             },
             new ApiProvider
             {
@@ -152,7 +378,8 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 // Whisper-based local servers accept the OpenAI `prompt` field for vocabulary seeding.
-                ContextBiasMode = "whisper_prompt"
+                ContextBiasMode = "whisper_prompt",
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles("local", "")
             },
             new ApiProvider
             {
@@ -166,13 +393,25 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 // Local ONNX inference — no HTTP multipart, so bias/temp fields are irrelevant here.
-                ContextBiasMode = "none"
+                ContextBiasMode = "none",
+                TranscriptionProfiles = TranscriptionParameterCatalog.CreateDefaultProfiles("cohere-onnx", "")
             }
         };
+
+        public static void NormalizeDefaults(List<ApiProvider> providers)
+        {
+            foreach (var p in providers)
+            {
+                p.EnsureTranscriptionProfiles();
+                if (string.IsNullOrWhiteSpace(p.ActiveTranscriptionProfileId) && p.TranscriptionProfiles.Count > 0)
+                    p.ActiveTranscriptionProfileId = p.TranscriptionProfiles[0].Id;
+            }
+        }
     }
 
     public class AppConfig
     {
+        public int ConfigSchemaVersion { get; set; } = 2;
         public string MistralApiKey { get; set; } = "";
         public bool IsSoundEnabled { get; set; } = true;
         public string SystemPrompt { get; set; } = "You are a precise execution engine. The user will give you text and a voice instruction. Follow the instruction exactly. Return only the result — no commentary, no markdown, no explanation.";
