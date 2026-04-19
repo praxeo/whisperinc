@@ -1,278 +1,351 @@
 # WhisperInk
 
-A WPF (C#/.NET 8) system-wide dictation tool for Windows. Global hotkeys capture audio and transcribe via multiple ASR backends, typing or pasting results into the foreground application.
+A WPF (C#/.NET 8) system-wide dictation tool for Windows. Hold a global hotkey, speak, and the transcript is typed or pasted into whichever application has focus. Works with multiple cloud ASR backends (Mistral Voxtral, OpenAI Whisper, ElevenLabs Scribe, Cohere Transcribe) and optional local inference paths (ONNX, GGUF via llama.cpp, Qwen3-ASR).
+
+- **Repository**: https://github.com/praxeo/whisperinc
+- **Platform**: Windows 10/11, .NET 8.0
+- **License**: see `LICENSE`
+
+---
+
+## Table of Contents
+
+1. [Features](#features)
+2. [Setting up on a new computer](#setting-up-on-a-new-computer)
+3. [Configuring a provider](#configuring-a-provider)
+4. [Hotkeys & modes](#hotkeys--modes)
+5. [Optional local backends](#optional-local-backends)
+6. [Architecture](#architecture)
+7. [Configuration & data locations](#configuration--data-locations)
+8. [Build & publish](#build--publish)
+9. [Troubleshooting](#troubleshooting)
+
+---
 
 ## Features
 
-- **Global Hotkeys**: Press and hold `Ctrl+Space` to record, release to transcribe
-- **Multiple ASR Backends**: Support for Mistral, OpenAI, ElevenLabs, Cohere API, and local ONNX inference
-- **Realtime Streaming**: Live character-by-character typing with Mistral Voxtral (via WebSocket proxy)
-- **Batch Transcription**: Record audio file and transcribe via HTTP POST
-- **AI Query Mode**: `Ctrl+Alt` to record voice instructions with selected text context
-- **Post-Processing**: Optional LLM correction for medical/technical terminology
-- **Local ONNX Support**: Run Cohere Transcribe models locally with CPU/GPU acceleration
+- **Global hotkey dictation** — `Ctrl+Space` to record and transcribe into any foreground app.
+- **AI edit mode** — `Ctrl+Alt` grabs the currently-selected text, captures a voice instruction, sends both to a chat LLM, and pastes the result.
+- **Multi-provider** — cloud (Mistral, OpenAI, ElevenLabs, Cohere) and local (ONNX, GGUF llama.cpp subprocess/server, Qwen3-ASR HTTP). Per-provider auth header, endpoint, model, temperature, and context-bias configuration.
+- **Two dictation modes** — `Batch` (record → POST → paste via clipboard) works with every provider; `Realtime` (WebSocket streaming → per-character `WM_CHAR`) is Mistral-only via a local proxy.
+- **Context biasing** — per-provider vocabulary hints (`whisper_prompt` for OpenAI-compatible, `cohere_terms` for Cohere v2, `keyterms` for ElevenLabs Scribe v2).
+- **Optional post-processing** — a second LLM correction pass tuned for medical/technical dictation.
+- **History log** — every transcription recorded locally, viewable from the tray.
 
-## Repository
+---
 
-- **GitHub**: https://github.com/praxeo/whisperinc
-- **Language**: C# / WPF
-- **Runtime**: .NET 8.0 (Windows)
-- **NuGet Dependencies**: `NAudio 2.2.1`, `Microsoft.ML.OnnxRuntime.Gpu.Windows 1.24.4`
+## Setting up on a new computer
 
-## Quick Start
+This is the fast path if you just want to use cloud providers — no GPU, no Python, no model downloads.
 
-### Windows Application
+### 1. Install prerequisites
 
-1. **Download the latest release** or build from source:
-   ```powershell
-   dotnet publish -c Release -r win-x64 --self-contained true
-   ```
+- **.NET 8 Desktop Runtime (x64)** — https://dotnet.microsoft.com/download/dotnet/8.0
+  Pick *"Desktop Runtime"*, not just the runtime, or the WPF app won't launch.
+- **Git for Windows** (only if building from source) — https://git-scm.com/download/win
+- **.NET 8 SDK** (only if building from source) — same download page as above.
 
-2. **Run WhisperInk.exe** — The app will start in your system tray
+Verify:
 
-3. **Configure API Keys**:
-   - Right-click the tray icon
-   - Select "API Providers"
-   - Add your API keys for your chosen providers (Mistral, OpenAI, ElevenLabs, Cohere, etc.)
+```powershell
+dotnet --list-runtimes
+# should include: Microsoft.WindowsDesktop.App 8.0.x
+```
 
-4. **Start Dictating**:
-   - Hold `Ctrl+Space` to record
-   - Release to transcribe and paste text
+### 2. Get the app
 
-### Backend Servers
+**Option A — build from source (recommended while there are no published releases):**
 
-WhisperInk can work with optional backend servers for enhanced functionality:
+```powershell
+git clone https://github.com/praxeo/whisperinc.git
+cd whisperinc
+dotnet publish -c Release -r win-x64 --self-contained false -o publish
+```
 
-#### 1. Cohere Transcribe Server (FastAPI)
+The binary lands in `publish\WhisperInk.exe`. Move that folder wherever you want the app to live (e.g. `C:\Tools\WhisperInk\`).
 
-A local FastAPI server for running Cohere Transcribe models with GPU acceleration.
+**Option B — self-contained build** (bundles the .NET runtime, ~80MB, skips prerequisite #1):
 
-**Requirements**:
+```powershell
+dotnet publish -c Release -r win-x64 --self-contained true -o publish
+```
+
+### 3. First run
+
+Double-click `WhisperInk.exe`. The main window opens and a keyboard hook is installed. Leave the window open (minimize it) — closing it exits the hook. Optional: add a shortcut to `WhisperInk.exe` in `shell:startup` to auto-launch at login.
+
+### 4. Grant microphone access
+
+Windows → Settings → Privacy & Security → Microphone → allow desktop apps. On first recording, Windows may also prompt for access.
+
+That's the minimum. From here, configure at least one provider and you can dictate.
+
+---
+
+## Configuring a provider
+
+Right-click the window (or use the menu) and open **Providers…**.
+
+WhisperInk ships with several defaults populated. For the easiest path, pick one cloud provider and paste its API key:
+
+| Provider | Where to get a key | Notes |
+|----------|---------------------|-------|
+| **Mistral** | https://console.mistral.ai | Supports both Realtime and Batch. Also useful for AI-edit mode and post-processing. |
+| **OpenAI** | https://platform.openai.com/api-keys | Whisper-1. Rock-solid; supports `whisper_prompt` vocabulary biasing. |
+| **ElevenLabs Scribe v2** | https://elevenlabs.io | Custom `xi-api-key` header; supports keyterms list (~20% cost surcharge). |
+| **Cohere Transcribe** | https://dashboard.cohere.com | Cohere v2 endpoint with `context_bias_terms` JSON array; temp 0.1 default. |
+
+Then:
+
+1. Select the provider in the list → paste your API key → **Save**.
+2. Set it as **Active**.
+3. Set **Mode → Batch** (Realtime only works with Mistral + the local proxy; see below).
+4. Pick your microphone from the device dropdown.
+5. Hold **Ctrl+Space**, speak, release. Text should paste into the focused window.
+
+The debug log at `%APPDATA%\.WhisperInk\debug.log` is your first stop if something isn't working.
+
+---
+
+## Hotkeys & modes
+
+| Hotkey | Behaviour |
+|--------|-----------|
+| **Hold Ctrl+Space** | Record for as long as held; on release, transcribe and insert. In Batch mode the transcript is pasted via `Ctrl+V`; in Realtime mode each delta is typed live with `WM_CHAR`. |
+| **Hold Ctrl+Alt** | Record a voice *instruction*. On release, WhisperInk grabs the currently-selected text from the foreground app, sends both the selection and the transcribed instruction to the active provider's chat model, and pastes the response. |
+
+### Batch mode
+
+- Records to `~/Documents/MyRecordings/temp_audio.wav`.
+- POSTs a multipart form to the provider's transcription endpoint.
+- Optionally runs the transcript through a post-processing LLM (`PostProcessBatch` toggle) to clean up garbled terms.
+- Pastes via clipboard + simulated `Ctrl+V`, with a leading space prepended.
+
+### Realtime mode
+
+- Mistral-only. Requires a local WebSocket proxy at `ws://localhost:8765/v1/realtime`.
+- Streams audio chunks up; each transcription delta is typed directly into the window that was in focus when you started recording, using `PostMessage(WM_CHAR)`.
+- Tunable `TargetStreamingDelayMs` (240–2400ms) trades latency for accuracy.
+
+---
+
+## Optional local backends
+
+Everything below is *optional*. If you're happy with a cloud provider, skip this section.
+
+### Cohere Transcribe server (FastAPI + Transformers)
+
+A local FastAPI server for running Cohere Transcribe on your own GPU.
+
+Requirements:
 - Python 3.10+
-- CUDA-capable GPU (NVIDIA) for best performance
-- 16GB+ RAM recommended
+- NVIDIA GPU with recent CUDA drivers (RTX 30-series or better recommended)
+- 16 GB+ system RAM
 
-**Setup**:
-
-```bash
-# Navigate to server directory
+```powershell
 cd server
-
-# Create virtual environment
 python -m venv venv
-
-# Activate virtual environment (Windows)
 venv\Scripts\activate
-
-# Install dependencies
 pip install transformers>=4.52.0 torch soundfile fastapi uvicorn
-```
-
-**Run the Server**:
-
-```bash
-# Activate virtual environment
-venv\Scripts\activate
-
-# Start the server
 python cohere_server.py
+# listens on http://127.0.0.1:8101
 ```
 
-The server will start on `http://127.0.0.1:8101`
+Configure WhisperInk → add a provider:
+- **Base URL**: `http://127.0.0.1:8101`
+- **Transcription Endpoint**: `http://127.0.0.1:8101/v1/audio/transcriptions`
+- **API Key**: *(blank)*
+- **Model**: `cohere-transcribe-03-2026`
 
-**Configure WhisperInk**:
+### Cohere GGUF via llama.cpp
 
-1. Right-click the WhisperInk tray icon
-2. Select "API Providers"
-3. Add a new provider with:
-   - **Name**: `Cohere Local`
-   - **Base URL**: `http://127.0.0.1:8101`
-   - **Transcription Endpoint**: `/v1/audio/transcriptions`
-   - **API Key**: (leave blank for local server)
-   - **Transcription Model**: `cohere-transcribe-03-2026`
+Four provider variants ship for different llama.cpp deployments — CPU subprocess, HTTP server (CPU), HTTP server (CUDA), HTTP server (CUDA Q8). See the classes in `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, `CohereGgufCudaQ8ServerTranscriber.cs` for the exact URLs and binary paths they expect.
 
-**Server Features**:
-- CUDA acceleration with TF32 support (RTX 30-series optimization)
-- 30-second audio chunking with 5-second overlap
-- Hallucination filter for common false positives
-- Automatic audio resampling to 16kHz
-- Health check endpoint at `/health`
+Helper scripts:
+- `scripts/download-cohere-gguf.ps1` — fetch GGUF weights.
+- `scripts/build-crispasr.ps1` — build the matching llama.cpp binary.
 
-#### 2. Mistral Realtime Proxy (WebSocket)
+### Cohere ONNX (CPU, no server)
 
-For realtime streaming transcription with Mistral Voxtral, you need a WebSocket proxy server.
+Runs Cohere Transcribe directly inside the WhisperInk process via ONNX Runtime — no subprocess, no HTTP. Slower than GPU paths for autoregressive decoding, but completely offline.
 
-**Note**: This proxy script is not included in this repository. You can create a simple proxy using Python:
+Place these in `%APPDATA%\.WhisperInk\cohere-onnx\`:
+- `cohere-encoder.int4.onnx`
+- `cohere-decoder.int4.onnx`
+- `tokens.txt`
+
+INT4 weights: `cstr/cohere-transcribe-onnx-int4` on HuggingFace. Swap filenames for INT8 if you have those.
+
+### Qwen3-ASR local server
+
+Expects an OpenAI-compatible transcription endpoint at `http://localhost:8102`. Any inference server that exposes `/v1/audio/transcriptions` in that shape will work.
+
+### Mistral realtime proxy
+
+Realtime mode requires a local proxy that bridges WhisperInk's WebSocket client to `wss://api.mistral.ai/v1/realtime`, injecting your API key as a header. A minimal Python example:
 
 ```python
-# mistral_proxy.py (example - create this file)
-import asyncio
-import websockets
-import json
-import os
+# mistral_proxy.py
+import asyncio, os, websockets
 
-MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
+KEY = os.environ["MISTRAL_API_KEY"]
 
-async def handle_client(websocket, path):
+async def handle(ws, _path):
     async with websockets.connect(
         "wss://api.mistral.ai/v1/realtime",
-        extra_headers={"Authorization": f"Bearer {MISTRAL_API_KEY}"}
-    ) as mistral_ws:
-        # Bridge between client and Mistral API
-        async def forward_to_mistral():
-            async for message in websocket:
-                await mistral_ws.send(message)
-        
-        async def forward_to_client():
-            async for message in mistral_ws:
-                await websocket.send(message)
-        
-        await asyncio.gather(forward_to_mistral(), forward_to_client())
+        extra_headers={"Authorization": f"Bearer {KEY}"},
+    ) as upstream:
+        async def c2s():
+            async for m in ws: await upstream.send(m)
+        async def s2c():
+            async for m in upstream: await ws.send(m)
+        await asyncio.gather(c2s(), s2c())
 
 async def main():
-    async with websockets.serve(handle_client, "localhost", 8765):
+    async with websockets.serve(handle, "localhost", 8765):
         await asyncio.Future()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
 ```
 
-**Run the Proxy**:
-
-```bash
-# Set your Mistral API key
-set MISTRAL_API_KEY=your_api_key_here
-
-# Start the proxy
+```powershell
+set MISTRAL_API_KEY=sk-...
 python mistral_proxy.py
 ```
 
-**Configure WhisperInk**:
+Then set WhisperInk's proxy path in the config (or leave it to the default `ws://localhost:8765/v1/realtime`) and switch the dictation mode to **Realtime**.
 
-1. Right-click the WhisperInk tray icon
-2. Select "API Providers"
-3. Edit the Mistral provider:
-   - **Base URL**: `http://127.0.0.1:8765`
-   - **API Key**: Your Mistral API key (or leave blank if set in environment)
-
-4. Switch to "Realtime" mode in the context menu
+---
 
 ## Architecture
 
-### Core Files
+### Core files
 
 | File | Purpose |
 |------|---------|
-| `MainWindow.xaml.cs` | Global keyboard hook, recording state machine, all transcription/AI logic, context menu UI |
-| `AppConfig.cs` | `ApiProvider` model (multi-provider config) and `AppConfig` defaults |
-| `CohereOnnxTranscriber.cs` | Local ONNX inference for Cohere Transcribe INT4/INT8 (encoder-decoder, 30s chunking, overlap stitching) |
-| `HistoryService.cs` / `HistoryWindow.xaml` | Transcription history log |
-| `ProviderSettingsWindow.xaml` | GUI for adding/editing API providers |
-| `PromptWindow.xaml` | System prompt editor (used for Ctrl+Alt AI mode) |
+| `MainWindow.xaml.cs` | Global low-level keyboard hook, recording state machine, all transcription/AI logic, tray & context menu UI, clipboard/paste plumbing, WebSocket client. ~1800 LOC — the heart of the app. |
+| `AppConfig.cs` | `ApiProvider` model (one per backend) and `AppConfig` (top-level settings, provider list, bias terms, post-process config). `CreateDefaults()` seeds the provider list. |
+| `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe (encoder-decoder, 30s chunks, 5s overlap, greedy decoding). |
+| `CohereGguf*Transcriber.cs` | Four variants for llama.cpp-based Cohere deployments (subprocess / HTTP CPU / HTTP CUDA / HTTP CUDA Q8). |
+| `ProviderSettingsWindow.xaml(.cs)` | GUI for editing providers — URLs, keys, auth header, model field, bias mode, Scribe v2 keyterms. |
+| `ContextBiasWindow.xaml(.cs)` | Global context-bias term list (used with `whisper_prompt` / `cohere_terms` modes). |
+| `PromptWindow.xaml(.cs)` | System-prompt editor for AI-edit mode. |
+| `HistoryService.cs`, `HistoryWindow.xaml(.cs)` | Local transcript log + viewer. |
 
-### Hotkeys
+### Provider system
 
-| Hotkey | Action |
-|---------|--------|
-| **Ctrl+Space** | Hold to record, release to transcribe. Mode determines behavior:
-  - **Realtime**: WebSocket streaming to Mistral Voxtral proxy → live character-by-character typing
-  - **Batch**: Records WAV → HTTP POST to active provider → result pasted via clipboard |
-| **Ctrl+Alt** | Hold to record for AI query mode. Grabs selected text as context, transcribes voice instruction, sends both to chat LLM, pastes response. |
+`ApiProvider` captures every knob a transcription backend might need:
 
-### Dictation Modes
+- `BaseUrl` + optional `TranscriptionEndpoint` override (full URL).
+- `AuthHeaderName` — blank means `Authorization: Bearer <key>`; set to `xi-api-key` for ElevenLabs; etc.
+- `ModelFieldName` — `"model"` or `"model_id"` (ElevenLabs).
+- `TranscriptionModel`, `ChatModel`, `PostProcessModel`.
+- `SupportsRealtime`, `SupportsTranscription`.
+- `TranscriptionTemperature` — nullable; sent as multipart form field when set.
+- `ContextBiasMode`:
+  - `"none"` — no bias field.
+  - `"whisper_prompt"` — comma-joined string in `prompt` (OpenAI, Groq, DeepInfra, local Whisper servers).
+  - `"cohere_terms"` — JSON array in `context_bias_terms` (Cohere v2 cloud).
+- `ScribeKeytermsRaw` — newline-delimited per-provider keyterms; sent as repeated `keyterms` multipart fields when the provider uses `xi-api-key` auth (ElevenLabs Scribe v2). Validated on send: ≤1000 terms, <50 chars, ≤5 words each.
 
-**Realtime** — Mistral-only. Requires a local WebSocket proxy (`ws://localhost:8765/v1/realtime`). Configurable streaming delay (240–2400ms). Types each delta directly into the target window.
+Default providers (see `AppConfig.cs`):
 
-**Batch** — Works with all providers. Records to `~/Documents/MyRecordings/temp_audio.wav`, POSTs multipart form to provider's transcription endpoint, optionally runs post-processing LLM correction, then pastes result.
+| Id | Name | Transport | Notes |
+|----|------|-----------|-------|
+| `mistral` | Mistral | HTTPS + WS | Voxtral, realtime + batch |
+| `openai` | OpenAI | HTTPS | Whisper-1, whisper_prompt bias |
+| `elevenlabs` | ElevenLabs Scribe | HTTPS | `xi-api-key`, `model_id`, keyterms |
+| `cohere-api` | Cohere Transcribe API | HTTPS | Cohere v2, temp 0.1, cohere_terms |
+| `local` | Local Server | HTTP | `localhost:8100`, whisper_prompt |
+| `cohere-onnx` | Cohere Local (ONNX) | in-process | Bypasses HTTP entirely |
+| `cohere-gguf` | Cohere Local (CrispASR GGUF) | subprocess | llama.cpp CLI |
+| `cohere-gguf-server` | Cohere Local (CrispASR server) | HTTP | llama.cpp server, CPU |
+| `cohere-gguf-cuda-server` | Cohere Local (CrispASR CUDA) | HTTP | llama.cpp server, CUDA |
+| `cohere-gguf-cuda-server-q8` | Cohere Local (CrispASR CUDA Q8) | HTTP | llama.cpp server, CUDA Q8, cohere_terms |
+| `qwen3-asr` | Qwen3-ASR Local | HTTP | `localhost:8102`, OpenAI-compat |
 
-### Provider System
+### Text injection
 
-Multi-provider architecture defined in `ApiProvider`. Each provider configures:
+- **Realtime** — `PostMessage(WM_CHAR, ch, 0)` per character to the window handle captured at recording start. This bypasses IME and most focus-stealing issues.
+- **Batch / AI** — `Clipboard.SetText` followed by a synthetic `Ctrl+V`. A single leading space is prepended so the result doesn't fuse to an adjacent word.
 
-- `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (custom header vs Bearer), `ModelFieldName` ("model" vs "model_id")
-- `TranscriptionModel`, `ChatModel`, `PostProcessModel`
-- `SupportsRealtime`, `SupportsTranscription`
-- `TranscriptionTemperature` (nullable double)
-- `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI `prompt` field) | `"cohere_terms"` (Cohere `context_bias_terms` JSON array)
+### Keyboard hook internals
 
-Default providers (in `ApiProvider.CreateDefaults()`):
+- `SetWindowsHookEx(WH_KEYBOARD_LL, …)` installed on the UI thread.
+- Synthetic key presses (the `Ctrl+V` paste in particular) are tagged with a sentinel flag (`0x5AFE`) in the hook's extra-info field so the hook ignores its own injections and avoids re-entry.
+- `ReleaseAllModifierKeys()` runs after every recording to clear any physical modifier that was still held when the hook fired — prevents "stuck Ctrl" after long sessions.
 
-| Id | Name | Notes |
-|----|------|-------|
-| `mistral` | Mistral | Voxtral, supports realtime WebSocket |
-| `openai` | OpenAI | Whisper-1, whisper_prompt bias |
-| `elevenlabs` | ElevenLabs Scribe | Custom auth header `xi-api-key`, model field `model_id` |
-| `cohere-api` | Cohere Transcribe API | Cohere v2 endpoint, temp 0.1, cohere_terms bias |
-| `local` | Local Server | localhost:8100, whisper_prompt bias |
-| `cohere-onnx` | Cohere Local (ONNX) | Bypasses HTTP entirely, runs CohereOnnxTranscriber |
+### Cohere v2 multipart quirk
 
-### Local ONNX Inference (CohereOnnxTranscriber)
+The Cohere v2 transcription endpoint rejects requests where the `file` part appears before string fields. WhisperInk therefore always appends string fields (`model`, `language`, `temperature`, `context_bias_terms`, `keyterms`) *before* the `file` part in the multipart body.
 
-- Encoder-decoder architecture, 8 layers, 8 heads, 128 head dim, 16384 vocab
-- Model files in `%APPDATA%\.WhisperInk\cohere-onnx\`: `cohere-encoder.int4.onnx`, `cohere-decoder.int4.onnx`, `tokens.txt`
-- INT4 from `cstr/cohere-transcribe-onnx-int4` (HuggingFace); swap filenames for INT8
-- 30s max chunk, 5s overlap, greedy autoregressive decoding
-- CPU-only via `Microsoft.ML.OnnxRuntime.Gpu.Windows` (DirectML loaded but slow for autoregressive; CUDA blocked by missing cuDNN)
+### WebSocket serialization
 
-### Post-Processing
+All sends on the Realtime WebSocket go through a `SemaphoreSlim(1,1)` so concurrent audio chunks + control frames can't interleave on the wire.
 
-Optional LLM correction pass (`PostProcessBatch` toggle). Uses `PostProcessModel` with a few-shot prompt that fixes garbled medical terms without over-correcting valid English. Filters out commentary responses (e.g. "no correction needed").
+### UI sounds
 
-### Text Input
+Start/stop chirps are procedurally generated sine waves in memory — no asset files, nothing to ship.
 
-- **Realtime**: `PostMessage(WM_CHAR)` per character to target window handle captured at recording start
-- **Batch/AI**: Clipboard `SetText` + simulated `Ctrl+V`
-- Leading space prepended to avoid merging with existing text
+---
 
-### Config
+## Configuration & data locations
 
-JSON at `%APPDATA%\.WhisperInk\config.json`. Stores providers array, active provider ID, dictation mode, microphone selection, sound toggle, system prompt, context bias terms, post-process settings, proxy path, streaming delay.
+| Path | Contents |
+|------|----------|
+| `%APPDATA%\.WhisperInk\config.json` | All providers, active id, mode, mic selection, system prompt, bias terms, post-process prompt & toggle, proxy path, streaming delay. |
+| `%APPDATA%\.WhisperInk\debug.log` | Rolling log. First place to check for any failure. |
+| `%APPDATA%\.WhisperInk\history.json` | Transcription history (viewable from the tray). |
+| `%APPDATA%\.WhisperInk\cohere-onnx\` | ONNX weights + `tokens.txt` (only if you use the ONNX provider). |
+| `~/Documents/MyRecordings/temp_audio.wav` | The most recent Batch-mode recording (overwritten each time). |
 
-Debug log at `%APPDATA%\.WhisperInk\debug.log`.
+Config is loaded on startup and rewritten after any settings change. Safe to back up or sync.
 
-## Build & Publish
+---
+
+## Build & publish
 
 ```powershell
-# Framework-dependent (requires .NET 8 runtime)
+# Framework-dependent (smaller; requires the .NET 8 Desktop Runtime on the target machine)
 dotnet publish -c Release -r win-x64 --self-contained false
 
-# Self-contained
+# Self-contained (bundles the runtime; ~80 MB, no prerequisites)
 dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
-## Key Implementation Notes
+Helper scripts: `publish.ps1` (self-contained) and `publish-framework-dependent.ps1`.
 
-- Global low-level keyboard hook (`WH_KEYBOARD_LL`) with synthetic key marker (`0x5AFE`) to avoid re-entrant hook processing
-- Target window (`GetForegroundWindow()`) captured before recording starts so text goes to the right window
-- `ReleaseAllModifierKeys()` called after every recording to prevent stuck modifier keys
-- Multipart form field order matters for Cohere v2: all string fields before the file part
-- WebSocket send is serialized via `SemaphoreSlim` to prevent concurrent writes
-- UI sounds are procedurally generated sine waves (no asset files)
+NuGet dependencies (`WhisperInk.csproj`):
+- `NAudio 2.2.1` — microphone capture.
+- `Microsoft.ML.OnnxRuntime.Gpu.Windows 1.24.4` — ONNX inference; loads DirectML, falls back to CPU.
+
+---
 
 ## Troubleshooting
 
-### Realtime Mode Not Working
+**App launches but Ctrl+Space does nothing**
+The keyboard hook needs the main window alive. Don't close it — minimize it. Also check `debug.log` for hook-install failures (rare; usually means another process is already holding a global hook).
 
-1. Ensure the Mistral proxy is running on `http://127.0.0.1:8765`
-2. Check that your API key is correctly configured
-3. Verify streaming delay settings (try 480ms for balanced latency/accuracy)
+**"The .NET runtime is not installed"**
+Install the **.NET 8 Desktop Runtime (x64)**, not the base runtime. Alternatively, rebuild with `--self-contained true`.
 
-### Local ONNX Slow Performance
+**Recording starts but nothing pastes**
+Check `debug.log` for the HTTP response. 401/403 = bad API key. 404 = wrong endpoint (especially common if you customized the TranscriptionEndpoint field). 422 on ElevenLabs with keyterms = swap the repeated form fields for a JSON fallback (commented in `MainWindow.xaml.cs` at the keyterms block).
 
-1. Use INT8 models instead of INT4 for better accuracy
-2. Ensure you have a CUDA-capable GPU
-3. Check that cuDNN is properly installed
+**Realtime mode does nothing**
+Mistral only. The local proxy must be running on `127.0.0.1:8765`, your API key must be in the proxy's environment, and mode must be set to `Realtime`. Try `TargetStreamingDelayMs = 480` for a sensible default.
 
-### API Key Issues
+**Local ONNX is slow**
+Autoregressive decoding on CPU/DirectML is genuinely slow — a 10s utterance can take several seconds. Prefer a cloud provider or a GGUF CUDA server if you have an NVIDIA GPU. INT8 is more accurate but slower than INT4.
 
-1. Verify your API key has the correct permissions
-2. Check that the provider endpoint URL is correct
-3. Review the debug log at `%APPDATA%\.WhisperInk\debug.log`
+**Stuck modifier key after a recording**
+Should auto-clear via `ReleaseAllModifierKeys()`. If it ever happens, tapping the key once releases it. Capture a `debug.log` excerpt and file an issue.
 
-## License
+**Mic not listed**
+NAudio enumerates WASAPI devices on launch. Plug in your mic *before* starting WhisperInk, or restart the app after plugging in.
 
-See LICENSE file for details.
+---
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+PRs welcome. `CLAUDE.md` has the quick architecture summary that Claude Code uses when working in this repo — a good orientation for new contributors too.
