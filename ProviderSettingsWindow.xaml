@@ -134,6 +134,27 @@
                            Text="Whisper Prompt: OpenAI, Groq, DeepInfra, local servers"/>
                 <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
                            Text="Cohere Terms: Cohere v2 cloud API only"/>
+
+                <Separator Background="#333" Margin="0,4,0,8"/>
+
+                <GroupBox Header="Scribe v2 Keyterms (ElevenLabs only)" Margin="0,0,0,4"
+                          BorderBrush="#444" Foreground="#AAAAAA">
+                    <StackPanel Margin="4,4,4,4">
+                        <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10" Margin="0,0,0,6">
+                            One term per line. Max 1000 terms, &lt;50 chars each, 5 words max.
+                            Only sent when ElevenLabs Scribe v2 is the active provider. ~20% cost surcharge.
+                        </TextBlock>
+                        <TextBox x:Name="TxtScribeKeyterms"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 MinHeight="120"
+                                 MaxHeight="280"
+                                 FontFamily="Consolas"
+                                 TextChanged="TxtScribeKeyterms_TextChanged"/>
+                        <TextBlock x:Name="KeytermsCountLabel" Margin="0,4,0,0" Foreground="#666" FontSize="10"/>
+                    </StackPanel>
+                </GroupBox>
             </StackPanel>
         </ScrollViewer>
 

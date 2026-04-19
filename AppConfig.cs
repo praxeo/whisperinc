@@ -71,6 +71,40 @@ namespace WhisperInk
         // "cohere_terms" instructs Cohere's model to treat those strings as high-priority.
         public string ContextBiasMode { get; set; } = "none";
 
+        // ── ElevenLabs Scribe v2 keyterms ────────────────────────────────
+        // Raw newline-delimited vocabulary hints. Only sent when this provider
+        // uses xi-api-key auth (ElevenLabs). Parsed and validated on send, not
+        // on every keystroke. Max 1000 terms, <50 chars, ≤5 words each.
+        // ~20% cost surcharge per ElevenLabs pricing.
+        public string ScribeKeytermsRaw { get; set; } = "";
+
+        public List<string> GetValidatedKeyterms(out List<string> warnings)
+        {
+            warnings = new List<string>();
+            var terms = (ScribeKeytermsRaw ?? "")
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(t => t.Trim())
+                .Where(t => t.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var valid = new List<string>();
+            foreach (var t in terms)
+            {
+                if (t.Length >= 50)   { warnings.Add($"Dropped (>=50 chars): {t}"); continue; }
+                if (t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length > 5)
+                                      { warnings.Add($"Dropped (>5 words): {t}"); continue; }
+                valid.Add(t);
+            }
+
+            if (valid.Count > 1000)
+            {
+                warnings.Add($"Truncated to 1000 (had {valid.Count}).");
+                valid = valid.Take(1000).ToList();
+            }
+            return valid;
+        }
+
         public override string ToString() => Name;
 
         /// <summary>Resolved transcription URL — uses override if set, else builds from BaseUrl.</summary>

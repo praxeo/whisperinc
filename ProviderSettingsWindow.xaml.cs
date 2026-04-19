@@ -64,6 +64,9 @@ namespace WhisperInk
                 CmbContextBiasMode.SelectedItem = biasItem;
             else
                 CmbContextBiasMode.SelectedIndex = 0;
+
+            TxtScribeKeyterms.Text = _current.ScribeKeytermsRaw;
+            UpdateKeytermsCount();
         }
 
         private void CommitCurrentFields()
@@ -92,6 +95,19 @@ namespace WhisperInk
             
             // Get context bias mode from dropdown
             _current.ContextBiasMode = CmbContextBiasMode.SelectedValue?.ToString() ?? "none";
+
+            _current.ScribeKeytermsRaw = TxtScribeKeyterms.Text;
+        }
+
+        private void TxtScribeKeyterms_TextChanged(object sender, TextChangedEventArgs e) =>
+            UpdateKeytermsCount();
+
+        private void UpdateKeytermsCount()
+        {
+            int count = TxtScribeKeyterms.Text
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Count(t => !string.IsNullOrWhiteSpace(t));
+            KeytermsCountLabel.Text = count == 0 ? "" : $"{count} term{(count == 1 ? "" : "s")}";
         }
 
         private void BtnAdd_Click(object sender, RoutedEventArgs e)
@@ -181,7 +197,8 @@ namespace WhisperInk
             SupportsTranscription = src.SupportsTranscription,
             TranscriptionTemperature = src.TranscriptionTemperature,
             Language = src.Language,
-            ContextBiasMode = src.ContextBiasMode
+            ContextBiasMode = src.ContextBiasMode,
+            ScribeKeytermsRaw = src.ScribeKeytermsRaw
         };
     }
 }

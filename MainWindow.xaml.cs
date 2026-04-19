@@ -461,6 +461,8 @@ namespace WhisperInk
                                 p.ContextBiasMode = cbm.GetString() ?? "none";
                             if (pEl.TryGetProperty("Language", out var lang))
                                 p.Language = lang.GetString() ?? "en";
+                            if (pEl.TryGetProperty("ScribeKeytermsRaw", out var skr))
+                                p.ScribeKeytermsRaw = skr.GetString() ?? "";
                             _providers.Add(p);
                         }
                     }
@@ -1334,6 +1336,23 @@ namespace WhisperInk
                         case "whisper_prompt":
                             content.Add(new StringContent(string.Join(", ", _contextBiasTerms)), "prompt");
                             break;
+                    }
+                }
+
+                // ElevenLabs Scribe v2 keyterms — repeated form fields (FastAPI List[str] convention).
+                // If this yields a 422, switch to the JSON fallback below.
+                if (!string.IsNullOrWhiteSpace(activeProvider?.ScribeKeytermsRaw) &&
+                    !string.IsNullOrWhiteSpace(activeProvider?.AuthHeaderName))
+                {
+                    var keyterms = activeProvider.GetValidatedKeyterms(out var ktWarnings);
+                    foreach (var w in ktWarnings) Log($"[keyterms] {w}");
+                    if (keyterms.Count > 0)
+                    {
+                        Log($"[keyterms] sending {keyterms.Count} terms");
+                        foreach (var term in keyterms)
+                            content.Add(new StringContent(term), "keyterms");
+                        // JSON fallback (uncomment if repeated fields return 422):
+                        // content.Add(new StringContent(JsonSerializer.Serialize(keyterms)), "keyterms");
                     }
                 }
 
