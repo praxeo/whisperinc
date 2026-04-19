@@ -157,13 +157,63 @@ Configure WhisperInk → add a provider:
 - **API Key**: *(blank)*
 - **Model**: `cohere-transcribe-03-2026`
 
-### Cohere GGUF via llama.cpp
+### Cohere GGUF via CrispASR (llama.cpp fork)
 
-Four provider variants ship for different llama.cpp deployments — CPU subprocess, HTTP server (CPU), HTTP server (CUDA), HTTP server (CUDA Q8). See the classes in `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, `CohereGgufCudaQ8ServerTranscriber.cs` for the exact URLs and binary paths they expect.
+CrispASR is a whisper.cpp/llama.cpp fork that can run the Cohere Transcribe GGUF locally. Four provider variants ship for different deployments — CPU subprocess, HTTP server (CPU), HTTP server (CUDA), HTTP server (CUDA Q8). The CPU HTTP server (`cohere-gguf-server`) is the most useful default on a machine without an NVIDIA GPU.
 
-Helper scripts:
-- `scripts/download-cohere-gguf.ps1` — fetch GGUF weights.
-- `scripts/build-crispasr.ps1` — build the matching llama.cpp binary.
+**Performance expectation (important):** on a typical laptop CPU (8 threads, no GPU), the Q5_0 build runs at roughly **1.0× real-time factor** — a 10-second utterance takes ~10 seconds to transcribe. That's usable for offline work but meaningfully slower than any cloud provider (~1–2s for the same clip). If speed matters more than offline privacy, stay with cloud.
+
+#### Prerequisites
+
+- **Visual Studio 2022** with the *"Desktop development with C++"* workload (or standalone Build Tools 2022).
+- **CMake 3.14+** — https://cmake.org/download/
+- **Git**
+- ~2 GB disk for the build + model.
+
+For CUDA variants, also: **CUDA Toolkit 12.x** and an NVIDIA GPU with recent drivers.
+
+#### 1. Download the GGUF model
+
+```powershell
+cd path\to\whisperinc
+.\scripts\download-cohere-gguf.ps1
+```
+
+This fetches `cohere-transcribe-q5_0.gguf` (~1.45 GB) from HuggingFace (`cstr/cohere-transcribe-03-2026-GGUF`) into `%APPDATA%\.WhisperInk\cohere-gguf\`. Q5_0 is the sweet spot; edit `$variant` in the script to use `q4_k` (smaller) or `q6_k`/`q8_0` (more accuracy).
+
+#### 2. Build CrispASR
+
+```powershell
+.\scripts\build-crispasr.ps1
+```
+
+What this does:
+- Clones `https://github.com/CrispStrobe/CrispASR` into `C:\Users\<you>\OneDrive\Desktop\CrispASR` (edit `$srcRoot` at the top of the script if you want it elsewhere — the current path is hardcoded for the maintainer's machine).
+- Runs `cmake -B build -G "Visual Studio 16 2019" -A x64 -DGGML_CUDA=OFF` then builds the `whisper-cli` target in Release.
+- Copies `crispasr.exe` (or `whisper-cli.exe`) and any `ggml*.dll` runtime deps into `%APPDATA%\.WhisperInk\cohere-gguf\` next to the model.
+
+For a CUDA build, flip `-DGGML_CUDA=OFF` to `ON` in the script.
+
+The Visual Studio generator string (`Visual Studio 16 2019`) works with VS2022 as long as the v141/v142 toolset is installed. If CMake complains, change it to `Visual Studio 17 2022`.
+
+#### 3. Point WhisperInk at it
+
+After step 2, `%APPDATA%\.WhisperInk\cohere-gguf\` should contain:
+
+```
+crispasr.exe
+cohere-transcribe-q5_0.gguf
+ggml.dll, ggml-cpu.dll, ggml-base.dll, ...
+```
+
+In the WhisperInk UI, pick one of:
+- **`Cohere Local (CrispASR GGUF)`** — uses `CohereGgufTranscriber`, one-shot subprocess per recording (simplest, highest per-call latency).
+- **`Cohere Local (CrispASR server)`** — uses `CohereGgufServerTranscriber`, lazy-starts `crispasr.exe --server --host 127.0.0.1 --port 8766 -m <model> --backend cohere -l en -t 8 -np` on first use and keeps it alive. Recommended for the CPU path — cuts latency by keeping the model loaded.
+- **`Cohere Local (CrispASR CUDA)`** / **`Cohere Local (CrispASR CUDA Q8)`** — same idea but targeting a CUDA-built binary and, for Q8, a different model file.
+
+Set it Active, mode = Batch, then `Ctrl+Space` to test. First call takes a few extra seconds while the server boots and loads the model; subsequent calls are just inference.
+
+Source files worth reading if you want to customize ports, flags, or the model filename: `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, `CohereGgufCudaQ8ServerTranscriber.cs`.
 
 ### Cohere ONNX (CPU, no server)
 
