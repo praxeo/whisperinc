@@ -285,6 +285,26 @@ namespace WhisperInk
                 // Qwen3-ASR accepts language via form field; no context bias support.
                 ContextBiasMode = "none",
                 Language = "en"
+            },
+            new ApiProvider
+            {
+                // CrispASR --server speaks the OpenAI /v1/audio/transcriptions protocol,
+                // so no dedicated transcriber class is needed — the generic HTTP path
+                // handles it the same way it handles qwen3-asr.
+                // User workflow: run `crispasr.exe --server -m parakeet.gguf --port 8103`
+                // externally, then activate this provider.
+                Id = "parakeet-local",
+                Name = "Parakeet Local (CrispASR)",
+                BaseUrl = "http://localhost:8103",
+                TranscriptionEndpoint = "http://localhost:8103/v1/audio/transcriptions",
+                TranscriptionModel = "parakeet",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en"
             }
         };
     }

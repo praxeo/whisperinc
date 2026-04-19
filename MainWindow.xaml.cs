@@ -480,6 +480,21 @@ namespace WhisperInk
                         }
                         Log("Migrated legacy config → provider system");
                     }
+                    else
+                    {
+                        // Append any new built-in defaults that the user's saved config doesn't
+                        // have yet (matched by Id). Purely additive — never overwrites anything
+                        // the user has edited, never removes anything.
+                        var existingIds = new HashSet<string>(_providers.Select(p => p.Id));
+                        foreach (var def in ApiProvider.CreateDefaults())
+                        {
+                            if (!existingIds.Contains(def.Id))
+                            {
+                                _providers.Add(def);
+                                Log($"Added new default provider: {def.Name}");
+                            }
+                        }
+                    }
                 }
                 else
                 {
