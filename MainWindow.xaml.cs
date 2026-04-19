@@ -185,6 +185,7 @@ namespace WhisperInk
         private CohereGgufServerTranscriber? _cohereGgufServer;
         private CohereGgufCudaServerTranscriber? _cohereGgufCudaServer;
         private CohereGgufCudaQ8ServerTranscriber? _cohereGgufCudaQ8Server;
+        private CrispAsrServerTranscriber? _parakeetServer;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -247,6 +248,14 @@ namespace WhisperInk
             catch { return 0; }
         }
 
+        private static int TryParsePortFromUrl(string? url, int fallback)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return fallback;
+            if (Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Port > 0)
+                return u.Port;
+            return fallback;
+        }
+
         public MainWindow()
         {
             InitializeComponent();
@@ -261,6 +270,7 @@ namespace WhisperInk
                 try { _cohereGgufServer?.Dispose(); } catch { }
                 try { _cohereGgufCudaServer?.Dispose(); } catch { }
                 try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
+                try { _parakeetServer?.Dispose(); } catch { }
             };
         }
 
@@ -399,8 +409,11 @@ namespace WhisperInk
         private bool IsLocalGgufCudaQ8ServerProvider =>
             GetActiveProvider()?.Id == "cohere-gguf-cuda-server-q8";
 
+        private bool IsParakeetLocalProvider =>
+            GetActiveProvider()?.Id == "parakeet-local";
+
         private bool IsLocalProvider =>
-            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider;
+            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider;
 
         // ── Config ──────────────────────────────────────────────────────
 
@@ -1302,6 +1315,56 @@ namespace WhisperInk
                 catch (Exception ex)
                 {
                     Log($"Cohere GGUF CUDA Q8 error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Parakeet (CrispASR server, auto-spawned) ──────────────
+            if (IsParakeetLocalProvider)
+            {
+                try
+                {
+                    var prov = GetActiveProvider();
+                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8103);
+                    if (_parakeetServer == null || _parakeetServer.Port != port)
+                    {
+                        _parakeetServer?.Dispose();
+                        _parakeetServer = new CrispAsrServerTranscriber(
+                            modelGlob: "parakeet-*.gguf",
+                            port: port,
+                            displayName: "Parakeet");
+                        if (!_parakeetServer.ModelFilesExist())
+                        {
+                            Log($"Parakeet: {_parakeetServer.DiagnoseMissing()}");
+                            return null;
+                        }
+                    }
+
+                    string language = prov?.Language ?? "en";
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _parakeetServer.TranscribeAsync(_lastWavBytes, language);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _parakeetServer.TranscribeAsync(filePath, language);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Parakeet (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Parakeet error: {ex.Message}");
                     return null;
                 }
             }

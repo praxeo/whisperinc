@@ -215,84 +215,38 @@ Set it Active, mode = Batch, then `Ctrl+Space` to test. First call takes a few e
 
 Source files worth reading if you want to customize ports, flags, or the model filename: `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, `CohereGgufCudaQ8ServerTranscriber.cs`.
 
-### Parakeet (or any other CrispASR backend) via the Providers UI
+### Parakeet Local (CrispASR) — auto-managed server
 
-The current `main` branch of CrispASR ships a unified `crispasr.exe --server` mode with an **OpenAI-compatible `/v1/audio/transcriptions` endpoint** that supports every backend it knows about (Parakeet, Canary, Voxtral, Qwen3-ASR, Granite, Wav2Vec2, and Cohere). That means adding any of these to WhisperInk is a pure UI operation — no new C# code, no provider-specific transcriber class. This section walks through Parakeet specifically (multilingual, fast on CPU, free word-level timestamps, CC-BY-4.0), but the exact same steps work for any other CrispASR backend — just swap the GGUF file.
+WhisperInk ships with a built-in `Parakeet Local (CrispASR)` provider that auto-spawns a `crispasr.exe --server` subprocess the first time you dictate with it selected, keeps the model resident between calls, and tears it down when WhisperInk exits. You don't need to keep a terminal open.
 
-Parakeet-TDT 0.6B quantized to Q4_K is ~467 MB and noticeably faster than the 2B Cohere Transcribe model on CPU, so it's a good default for laptops without a GPU.
+Parakeet TDT 0.6B at Q4_K is ~467 MB and noticeably faster than the 2B Cohere Transcribe model on CPU, so it's a good default for laptops without a GPU. The server exposes CrispASR's OpenAI-compatible `/v1/audio/transcriptions` endpoint, so WhisperInk uses its regular HTTP batch path — no realtime streaming, no special protocol.
 
-#### Prerequisites
+#### One-time setup
 
-- A working `crispasr.exe` on disk. Either follow the [Cohere GGUF section](#cohere-gguf-via-crispasr-llamacpp-fork) above (which builds `crispasr.exe` into `%APPDATA%\.WhisperInk\cohere-gguf\`), or build CrispASR from its current `main` branch following the instructions at https://github.com/CrispStrobe/CrispASR. Either way, the binary must be on your `PATH` or you must know the full path to it.
+You only need two files in place: `crispasr.exe` and a Parakeet GGUF, both under `%APPDATA%\.WhisperInk\cohere-gguf\`.
 
-#### 1. Download the Parakeet GGUF
+1. **crispasr.exe** — build CrispASR's current `main` branch from https://github.com/CrispStrobe/CrispASR (it now ships the unified multi-backend binary). If you already followed the [Cohere GGUF section](#cohere-gguf-via-crispasr-llamacpp-fork) above, you've got this.
+2. **Parakeet GGUF** — one PowerShell line:
 
-One-liner from PowerShell:
+   ```powershell
+   $dir = "$env:APPDATA\.WhisperInk\cohere-gguf"
+   New-Item -ItemType Directory -Force -Path $dir | Out-Null
+   curl.exe -L --fail --progress-bar `
+     -o "$dir\parakeet-tdt-0.6b-v3-q4_k.gguf" `
+     "https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/resolve/main/parakeet-tdt-0.6b-v3-q4_k.gguf"
+   ```
 
-```powershell
-# Creates the folder if needed, then downloads ~467 MB.
-$dir = "$env:APPDATA\.WhisperInk\cohere-gguf"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-curl.exe -L --fail --progress-bar `
-  -o "$dir\parakeet-tdt-0.6b-v3-q4_k.gguf" `
-  "https://huggingface.co/cstr/parakeet-tdt-0.6b-v3-GGUF/resolve/main/parakeet-tdt-0.6b-v3-q4_k.gguf"
-```
+   Any `parakeet-*.gguf` filename in that folder will be picked up; pick a different quant (`q8_0`, `q5_0`, `q4_k`, `f16`) by changing the URL filename.
 
-Any folder works — the path above just keeps all CrispASR-related artefacts in one place next to `crispasr.exe`. Adjust the URL filename to pick a different quantization (`q8_0`, `q5_0`, `q4_k`, `f16`) if you want to trade size for quality.
+#### Use it
 
-#### 2. Start the CrispASR server
+In WhisperInk → **Providers…** → pick **`Parakeet Local (CrispASR)`** → set it Active. Mode = Batch. Hold `Ctrl+Space` to dictate. First call takes a few extra seconds while the server boots and loads the model; subsequent calls are just inference.
 
-Leave this window running while you dictate. It loads the model once and keeps it resident between calls:
+Changing the port in the provider's `Base URL` field (default `http://localhost:8103`) is honored — the spawned server binds to whatever port the UI says.
 
-```powershell
-# Adjust the paths and port to match your setup. Port 8103 is unused by default in WhisperInk.
-crispasr.exe --server `
-  -m "$env:APPDATA\.WhisperInk\cohere-gguf\parakeet-tdt-0.6b-v3-q4_k.gguf" `
-  --host 127.0.0.1 `
-  --port 8103
-```
+#### What about Canary / Qwen3-ASR / Voxtral?
 
-Sanity-check it's up by opening another terminal:
-
-```powershell
-curl.exe http://127.0.0.1:8103/health
-# {"status":"ok","backend":"parakeet"}
-```
-
-Pick any free port — 8103 is used here because WhisperInk's defaults already claim 8100 (local), 8102 (qwen3-asr), and 8766 (cohere-gguf-server).
-
-If you want it to start automatically at login, create a shortcut to a `.cmd` file with the command above in `shell:startup`.
-
-#### 3. Add the provider in WhisperInk's UI
-
-Open WhisperInk → right-click the window → **Providers…** → **+ Add**. Fill in exactly:
-
-| Field | Value |
-|-------|-------|
-| Display Name | `Parakeet Local (CrispASR)` |
-| Base URL | `http://localhost:8103` |
-| API Key | *(blank)* |
-| Transcription Endpoint | `http://localhost:8103/v1/audio/transcriptions` |
-| Auth Header Name | *(blank)* |
-| Model Field Name | *(blank)* |
-| Transcription Model | `parakeet` |
-| Chat Model | *(blank — Parakeet is transcription-only)* |
-| Post-Process Model | *(blank, or reuse Mistral/OpenAI's chat model if you want post-processing)* |
-| ✔ Supports /v1/audio/transcriptions | checked |
-| ✗ Supports Mistral Realtime WebSocket | unchecked |
-| Transcription Temperature | *(blank)* |
-| Language | `en` (or any of Parakeet's 25 EU languages; the model also auto-detects) |
-| Context Bias Mode | `None` |
-
-Click **Save**. Then, back in the main window, select the new `Parakeet Local (CrispASR)` as the active provider and make sure **Mode = Batch**.
-
-#### 4. Dictate
-
-Hold `Ctrl+Space`, speak, release. Text pastes into the focused window just like any other provider. The first call after server start includes one-time model warm-up; subsequent calls are pure inference.
-
-#### Adapting this to other CrispASR backends
-
-The exact same three steps work for any other CrispASR-supported model. Only the GGUF filename changes — CrispASR's server auto-detects the backend from the GGUF metadata. Some worth trying:
+The built-in Parakeet preset is the only one with auto-spawn wired up right now. For any other CrispASR backend, the manual path still works: start the server yourself and point a cloned provider at it. Swap the GGUF file, adjust the port, done.
 
 | Model | HuggingFace repo | Good for |
 |-------|------------------|----------|
@@ -302,7 +256,15 @@ The exact same three steps work for any other CrispASR-supported model. Only the
 | `voxtral-mini-3b-2507-q4_k.gguf` | `cstr/voxtral-mini-3b-2507-GGUF` | Speech-LLM, audio Q&A |
 | `cohere-transcribe-q5_0.gguf` | `cstr/cohere-transcribe-03-2026-GGUF` | Highest English WER |
 
-You can run multiple servers on different ports and add one provider per model, then switch between them from the WhisperInk tray. No reboots, no rebuilds.
+Manual start (leave running):
+
+```powershell
+crispasr.exe --server `
+  -m "$env:APPDATA\.WhisperInk\cohere-gguf\canary-1b-v2-q5_0.gguf" `
+  --host 127.0.0.1 --port 8104
+```
+
+Then in Providers… duplicate the Parakeet preset, change the name, point Base URL + Transcription Endpoint at `http://localhost:8104`. If there's interest we can generalize auto-spawn to any CrispASR model; for now, Parakeet is the turnkey one.
 
 ### Cohere ONNX (CPU, no server)
 
