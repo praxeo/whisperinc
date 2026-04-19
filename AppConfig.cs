@@ -39,6 +39,12 @@ namespace WhisperInk
         public string ChatModel { get; set; } = "";
         public string PostProcessModel { get; set; } = "";
 
+        // ── Language ─────────────────────────────────────────────────────────
+        // Language code for transcription (e.g., "en", "es", "fr").
+        // Explicit language setting improves accuracy by constraining the model's search space.
+        // Defaults to "en" if not set.
+        public string Language { get; set; } = "en";
+
         // Whether this provider supports the realtime WebSocket protocol (Mistral-specific)
         public bool SupportsRealtime { get; set; } = false;
 
@@ -93,7 +99,8 @@ namespace WhisperInk
                 SupportsRealtime = true,
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
-                ContextBiasMode = "none"
+                ContextBiasMode = "none",
+                Language = "en"
             },
             new ApiProvider
             {
@@ -106,7 +113,8 @@ namespace WhisperInk
                 SupportsRealtime = false,
                 SupportsTranscription = true,
                 TranscriptionTemperature = 0.0,
-                ContextBiasMode = "whisper_prompt"
+                ContextBiasMode = "whisper_prompt",
+                Language = "en"
             },
             new ApiProvider
             {
@@ -122,7 +130,8 @@ namespace WhisperInk
                 SupportsRealtime = false,
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
-                ContextBiasMode = "none"
+                ContextBiasMode = "none",
+                Language = "en"
             },
             new ApiProvider
             {
@@ -138,7 +147,8 @@ namespace WhisperInk
                 // Cohere v2: model and language MUST appear before file in multipart body.
                 // Temperature 0.1 → focused/deterministic output, good for medical dictation.
                 TranscriptionTemperature = 0.1,
-                ContextBiasMode = "cohere_terms"
+                ContextBiasMode = "cohere_terms",
+                Language = "en"
             },
             new ApiProvider
             {
@@ -152,7 +162,8 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 // Whisper-based local servers accept the OpenAI `prompt` field for vocabulary seeding.
-                ContextBiasMode = "whisper_prompt"
+                ContextBiasMode = "whisper_prompt",
+                Language = "en"
             },
             new ApiProvider
             {
@@ -166,7 +177,80 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 // Local ONNX inference — no HTTP multipart, so bias/temp fields are irrelevant here.
-                ContextBiasMode = "none"
+                ContextBiasMode = "none",
+                Language = "en"
+            },
+            new ApiProvider
+	    {
+    	  	Id = "cohere-gguf",
+    		Name = "Cohere Local (CrispASR GGUF)",
+    		BaseUrl = "local://cohere-gguf",
+    		TranscriptionModel = "",
+   		ChatModel = "",
+    		PostProcessModel = "",
+    		SupportsRealtime = false,
+    		SupportsTranscription = true,
+    		TranscriptionTemperature = null,
+    		// Local CrispASR subprocess — no HTTP multipart, so bias/temp fields are irrelevant 			here.
+    		ContextBiasMode = "none",
+    		Language = "en"
+	    },
+	    new ApiProvider
+	    {
+    		Id = "cohere-gguf-server",
+    		Name = "Cohere Local (CrispASR server)",
+   		 BaseUrl = "local://cohere-gguf-server",
+   		 TranscriptionModel = "",
+    		ChatModel = "",
+    		PostProcessModel = "",
+    		SupportsRealtime = false,
+    		SupportsTranscription = true,
+    		TranscriptionTemperature = null,
+    		ContextBiasMode = "none",
+    		Language = "en"
+	    },
+	    new ApiProvider
+	    {
+    		Id = "cohere-gguf-cuda-server",
+    		Name = "Cohere Local (CrispASR CUDA)",
+    		BaseUrl = "local://cohere-gguf-cuda-server",
+    		TranscriptionModel = "",
+    		ChatModel = "",
+    		PostProcessModel = "",
+    		SupportsRealtime = false,
+    		SupportsTranscription = true,
+    		TranscriptionTemperature = null,
+    		ContextBiasMode = "none",
+    		Language = "en"
+	    },
+	    new ApiProvider
+	    {
+    		Id = "cohere-gguf-cuda-server-q8",
+    		Name = "Cohere Local (CrispASR CUDA Q8)",
+    		BaseUrl = "local://cohere-gguf-cuda-server-q8",
+    		TranscriptionModel = "",
+    		ChatModel = "",
+    		PostProcessModel = "",
+    		SupportsRealtime = false,
+    		SupportsTranscription = true,
+    		TranscriptionTemperature = null,
+    		ContextBiasMode = "cohere_terms",
+    		Language = "en"
+	    },
+	    new ApiProvider
+            {
+                Id = "qwen3-asr",
+                Name = "Qwen3-ASR Local",
+                BaseUrl = "http://localhost:8102",
+                TranscriptionModel = "",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                // Qwen3-ASR accepts language via form field; no context bias support.
+                ContextBiasMode = "none",
+                Language = "en"
             }
         };
     }

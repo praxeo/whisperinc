@@ -97,6 +97,43 @@
 
                 <CheckBox x:Name="ChkSupportsTranscription" Content="Supports /v1/audio/transcriptions"/>
                 <CheckBox x:Name="ChkSupportsRealtime" Content="Supports Mistral Realtime WebSocket (Mistral only)"/>
+
+                <Separator Background="#333" Margin="0,4,0,8"/>
+
+                <Label Content="Transcription Temperature (0.0-1.0, blank = provider default)"/>
+                <TextBox x:Name="TxtTranscriptionTemperature" Margin="0,0,0,4"/>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
+                           Text="Lower = more deterministic. Cohere: 0.1, OpenAI: 0.0"/>
+
+                <Label Content="Language (ISO 639-1 code, e.g. en, es, fr)"/>
+                <ComboBox x:Name="CmbLanguage" Margin="0,0,0,4">
+                    <ComboBoxItem Content="en (English)" Tag="en"/>
+                    <ComboBoxItem Content="es (Spanish)" Tag="es"/>
+                    <ComboBoxItem Content="fr (French)" Tag="fr"/>
+                    <ComboBoxItem Content="de (German)" Tag="de"/>
+                    <ComboBoxItem Content="it (Italian)" Tag="it"/>
+                    <ComboBoxItem Content="pt (Portuguese)" Tag="pt"/>
+                    <ComboBoxItem Content="nl (Dutch)" Tag="nl"/>
+                    <ComboBoxItem Content="ja (Japanese)" Tag="ja"/>
+                    <ComboBoxItem Content="ko (Korean)" Tag="ko"/>
+                    <ComboBoxItem Content="zh (Chinese)" Tag="zh"/>
+                    <ComboBoxItem Content="ru (Russian)" Tag="ru"/>
+                    <ComboBoxItem Content="ar (Arabic)" Tag="ar"/>
+                    <ComboBoxItem Content="hi (Hindi)" Tag="hi"/>
+                </ComboBox>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
+                           Text="Leave blank for auto-detection (where supported)"/>
+
+                <Label Content="Context Bias Mode (how to send bias terms)"/>
+                <ComboBox x:Name="CmbContextBiasMode" Margin="0,0,0,4">
+                    <ComboBoxItem Content="None (don't send bias)" Tag="none"/>
+                    <ComboBoxItem Content="Whisper Prompt (OpenAI-compatible)" Tag="whisper_prompt"/>
+                    <ComboBoxItem Content="Cohere Terms (Cohere v2 API)" Tag="cohere_terms"/>
+                </ComboBox>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
+                           Text="Whisper Prompt: OpenAI, Groq, DeepInfra, local servers"/>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
+                           Text="Cohere Terms: Cohere v2 cloud API only"/>
             </StackPanel>
         </ScrollViewer>
 

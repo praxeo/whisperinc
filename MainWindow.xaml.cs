@@ -134,7 +134,6 @@ namespace WhisperInk
         private const string RealtimeModel = "voxtral-mini-transcribe-realtime-2602";
         private const string RealtimeWsUrl = "ws://localhost:8765/v1/realtime";
 
-        // Active provider's resolved endpoints (set in ApplyActiveProvider)
         private string _audioApiUrl = "";
         private string _audioModel = "";
         private string _chatApiUrl = "";
@@ -143,8 +142,8 @@ namespace WhisperInk
         private string _activeApiKey = "";
         private bool _activeSupportsRealtime = false;
         private bool _activeSupportsTranscription = true;
-        private string _activeAuthHeaderName = "";   // blank = "Authorization: Bearer", else custom header
-        private string _activeModelFieldName = "model"; // "model" or "model_id" etc.
+        private string _activeAuthHeaderName = "";
+        private string _activeModelFieldName = "model";
 
         private static readonly string ConfigFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk");
@@ -167,31 +166,37 @@ namespace WhisperInk
         private int _targetStreamingDelayMs = 480;
         private string _proxyPath = "";
 
-        // ── Dictation mode: "Realtime" or "Batch" ──────────────────────
         private string _dictationMode = "Realtime";
         private bool IsRealtimeMode => _dictationMode == "Realtime";
 
-        // ── Context biasing for batch transcription ────────────────────
-        // Delivery method (none / whisper_prompt / cohere_terms) is controlled
-        // per-provider via ApiProvider.ContextBiasMode.
         private List<string> _contextBiasTerms = new();
 
-        // ── Post-processing correction for batch transcription ───────
         private bool _postProcessBatch = false;
         private string _postProcessPrompt = new AppConfig().PostProcessPrompt;
 
-        // ── API Provider state ─────────────────────────────────────────
         private List<ApiProvider> _providers = new();
         private string _activeProviderId = "mistral";
 
-        // ── FIX: capture the target window before recording starts ────
         private IntPtr _targetWindow = IntPtr.Zero;
 
         private readonly HttpClient _httpClient = new();
         private CohereOnnxTranscriber? _cohereOnnx;
+        private CohereGgufTranscriber? _cohereGguf;
+        private CohereGgufServerTranscriber? _cohereGgufServer;
+        private CohereGgufCudaServerTranscriber? _cohereGgufCudaServer;
+        private CohereGgufCudaQ8ServerTranscriber? _cohereGgufCudaQ8Server;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
+
+        // ── In-memory WAV capture (Path 1 optimization) ───────────────
+        // Captures each audio chunk into an in-memory WaveFileWriter
+        // alongside the disk writer. When transcribing via local GGUF
+        // server providers, we upload these bytes directly and skip the
+        // disk-read round-trip, saving ~20-30ms per dictation.
+        private MemoryStream? _memWavStream;
+        private WaveFileWriter? _memWavWriter;
+        private byte[]? _lastWavBytes;
 
         private DispatcherTimer _animationTimer = null!;
         private readonly Random _rng = new();
@@ -200,7 +205,6 @@ namespace WhisperInk
         private RecordingMode _currentMode = RecordingMode.Dictation;
         private enum SoundType { Start, Stop, Success, Error }
 
-        // ── Realtime streaming state ───────────────────────────────────
         private ClientWebSocket? _realtimeWs;
         private CancellationTokenSource? _realtimeCts;
         private Task? _receiveTask;
@@ -217,6 +221,32 @@ namespace WhisperInk
             try { File.AppendAllText(LogFile, $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n"); } catch { }
         }
 
+        /// <summary>
+        /// Read audio duration in milliseconds from a WAV file path.
+        /// Used to compute real-time-factor (RTFx) for logging.
+        /// </summary>
+        private static double GetWavDurationMs(string path)
+        {
+            try
+            {
+                using var reader = new NAudio.Wave.WaveFileReader(path);
+                return reader.TotalTime.TotalMilliseconds;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>Read audio duration in ms from WAV bytes in memory.</summary>
+        private static double GetWavDurationMs(byte[] wavBytes)
+        {
+            try
+            {
+                using var ms = new MemoryStream(wavBytes, writable: false);
+                using var reader = new NAudio.Wave.WaveFileReader(ms);
+                return reader.TotalTime.TotalMilliseconds;
+            }
+            catch { return 0; }
+        }
+
         public MainWindow()
         {
             InitializeComponent();
@@ -227,6 +257,10 @@ namespace WhisperInk
                 if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId);
                 try { _proxyProcess?.Kill(); } catch { }
                 try { _cohereOnnx?.Dispose(); } catch { }
+                try { _cohereGguf?.Dispose(); } catch { }
+                try { _cohereGgufServer?.Dispose(); } catch { }
+                try { _cohereGgufCudaServer?.Dispose(); } catch { }
+                try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
             };
         }
 
@@ -246,7 +280,6 @@ namespace WhisperInk
 
             LoadConfig();
 
-            // Auto-start the Mistral proxy if configured and active provider supports realtime
             if (!string.IsNullOrWhiteSpace(_proxyPath) && _activeSupportsRealtime)
             {
                 Log($"Starting proxy: {_proxyPath}");
@@ -351,9 +384,23 @@ namespace WhisperInk
             lblStatus.Content = $"{provTag} ({modeTag})";
         }
 
-        /// <summary>True when the active provider is the local Cohere ONNX model.</summary>
         private bool IsLocalOnnxProvider =>
             GetActiveProvider()?.Id == "cohere-onnx";
+
+        private bool IsLocalGgufProvider =>
+            GetActiveProvider()?.Id == "cohere-gguf";
+
+        private bool IsLocalGgufServerProvider =>
+            GetActiveProvider()?.Id == "cohere-gguf-server";
+
+        private bool IsLocalGgufCudaServerProvider =>
+            GetActiveProvider()?.Id == "cohere-gguf-cuda-server";
+
+        private bool IsLocalGgufCudaQ8ServerProvider =>
+            GetActiveProvider()?.Id == "cohere-gguf-cuda-server-q8";
+
+        private bool IsLocalProvider =>
+            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider;
 
         // ── Config ──────────────────────────────────────────────────────
 
@@ -390,7 +437,6 @@ namespace WhisperInk
                     if (root.TryGetProperty("PostProcessBatch", out var ppb)) _postProcessBatch = ppb.GetBoolean();
                     if (root.TryGetProperty("PostProcessPrompt", out var ppp)) _postProcessPrompt = ppp.GetString() ?? _postProcessPrompt;
 
-                    // ── Load providers ──
                     if (root.TryGetProperty("Providers", out var provArray) && provArray.ValueKind == JsonValueKind.Array)
                     {
                         _providers = new List<ApiProvider>();
@@ -409,18 +455,18 @@ namespace WhisperInk
                             if (pEl.TryGetProperty("TranscriptionEndpoint", out var te)) p.TranscriptionEndpoint = te.GetString() ?? "";
                             if (pEl.TryGetProperty("AuthHeaderName", out var ahn)) p.AuthHeaderName = ahn.GetString() ?? "";
                             if (pEl.TryGetProperty("ModelFieldName", out var mfn)) p.ModelFieldName = mfn.GetString() ?? "";
-                            // New fields — gracefully absent from older config files
                             if (pEl.TryGetProperty("TranscriptionTemperature", out var tt) && tt.ValueKind != JsonValueKind.Null)
                                 p.TranscriptionTemperature = tt.GetDouble();
                             if (pEl.TryGetProperty("ContextBiasMode", out var cbm))
                                 p.ContextBiasMode = cbm.GetString() ?? "none";
+                            if (pEl.TryGetProperty("Language", out var lang))
+                                p.Language = lang.GetString() ?? "en";
                             _providers.Add(p);
                         }
                     }
                     if (root.TryGetProperty("ActiveProviderId", out var apid))
                         _activeProviderId = apid.GetString() ?? "mistral";
 
-                    // ── Migration: if no providers but MistralApiKey exists, create defaults ──
                     if (_providers.Count == 0)
                     {
                         _providers = ApiProvider.CreateDefaults();
@@ -435,7 +481,6 @@ namespace WhisperInk
                 }
                 else
                 {
-                    // First run: create defaults
                     _providers = ApiProvider.CreateDefaults();
                     _activeProviderId = "mistral";
                     SaveConfig();
@@ -560,7 +605,7 @@ namespace WhisperInk
         }
 
         // ════════════════════════════════════════════════════════════════
-        // MISTRAL REALTIME STREAMING MODE (Ctrl+Space when mode=Realtime)
+        // MISTRAL REALTIME STREAMING MODE
         // ════════════════════════════════════════════════════════════════
 
         private async void StartRealtimeStreaming()
@@ -837,13 +882,13 @@ namespace WhisperInk
         }
 
         // ════════════════════════════════════════════════════════════════
-        // BATCH DICTATION MODE (Ctrl+Space when mode=Batch)
+        // BATCH DICTATION MODE — now with parallel in-memory WAV capture
         // ════════════════════════════════════════════════════════════════
 
         private void StartBatchDictation()
         {
             if (_isRecording) return;
-            if (string.IsNullOrEmpty(_activeApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalOnnxProvider)
+            if (string.IsNullOrEmpty(_activeApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
             {
                 lblStatus.Content = "No API key!";
                 return;
@@ -851,6 +896,7 @@ namespace WhisperInk
 
             _isRecording = true;
             _suppressingKeys = true;
+            _lastWavBytes = null;
             ReleaseAllModifierKeys();
 
             MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 100, 100));
@@ -867,11 +913,25 @@ namespace WhisperInk
             if (_selectedDeviceNumber < WaveIn.DeviceCount) _waveIn.DeviceNumber = _selectedDeviceNumber;
             else _selectedDeviceNumber = 0;
             _waveIn.WaveFormat = new WaveFormat(16000, 1);
+
+            // Parallel writers: one to disk (for AnalyzeContext replay / debugging),
+            // one to memory (for local GGUF server providers to use directly).
             _writer = new WaveFileWriter(_currentFileName, _waveIn.WaveFormat);
-            _waveIn.DataAvailable += (_, a) => _writer!.Write(a.Buffer, 0, a.BytesRecorded);
+            _memWavStream = new MemoryStream();
+            _memWavWriter = new WaveFileWriter(new IgnoreDisposeStream(_memWavStream), _waveIn.WaveFormat);
+
+            _waveIn.DataAvailable += OnBatchAudioDataAvailable;
             _waveIn.StartRecording();
 
             PlayUiSound(SoundType.Start);
+        }
+
+        private void OnBatchAudioDataAvailable(object? sender, WaveInEventArgs a)
+        {
+            // Write each audio chunk to both sinks in the same callback, so they
+            // stay byte-identical. Tiny CPU cost; no I/O on the memory path.
+            try { _writer?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
+            try { _memWavWriter?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
         }
 
         private async void StopBatchDictation()
@@ -881,8 +941,25 @@ namespace WhisperInk
 
             PlayUiSound(SoundType.Stop);
 
-            try { _waveIn?.StopRecording(); _writer?.Dispose(); _waveIn?.Dispose(); } catch { }
-            _waveIn = null; _writer = null;
+            try { _waveIn?.StopRecording(); } catch { }
+            try { _waveIn?.Dispose(); } catch { }
+            _waveIn = null;
+
+            // Flush both writers and capture in-memory bytes.
+            try { _writer?.Dispose(); } catch { }
+            _writer = null;
+
+            try
+            {
+                _memWavWriter?.Dispose();
+                if (_memWavStream != null)
+                {
+                    _lastWavBytes = _memWavStream.ToArray();
+                    _memWavStream.Dispose();
+                }
+            }
+            catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
+            finally { _memWavWriter = null; _memWavStream = null; }
 
             lblStatus.Content = "Processing...";
             lblStatus.Opacity = 1;
@@ -915,18 +992,19 @@ namespace WhisperInk
         }
 
         // ════════════════════════════════════════════════════════════════
-        // BATCH RECORDING MODE (Ctrl+Alt = AnalyzeContext, always batch)
+        // BATCH RECORDING MODE (Ctrl+Alt = AnalyzeContext)
         // ════════════════════════════════════════════════════════════════
 
         public void StartBatchRecording()
         {
-            if (string.IsNullOrEmpty(_activeApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalOnnxProvider)
+            if (string.IsNullOrEmpty(_activeApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
             {
                 lblStatus.Content = "No API key!";
                 return;
             }
 
             _isRecording = true;
+            _lastWavBytes = null;
 
             try { Clipboard.Clear(); } catch { }
             MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(100, 100, 255));
@@ -944,8 +1022,12 @@ namespace WhisperInk
             if (_selectedDeviceNumber < WaveIn.DeviceCount) _waveIn.DeviceNumber = _selectedDeviceNumber;
             else _selectedDeviceNumber = 0;
             _waveIn.WaveFormat = new WaveFormat(16000, 1);
+
             _writer = new WaveFileWriter(_currentFileName, _waveIn.WaveFormat);
-            _waveIn.DataAvailable += (_, a) => _writer!.Write(a.Buffer, 0, a.BytesRecorded);
+            _memWavStream = new MemoryStream();
+            _memWavWriter = new WaveFileWriter(new IgnoreDisposeStream(_memWavStream), _waveIn.WaveFormat);
+
+            _waveIn.DataAvailable += OnBatchAudioDataAvailable;
             _waveIn.StartRecording();
 
             PlayUiSound(SoundType.Start);
@@ -958,8 +1040,24 @@ namespace WhisperInk
 
             PlayUiSound(SoundType.Stop);
 
-            try { _waveIn?.StopRecording(); _writer?.Dispose(); _waveIn?.Dispose(); } catch { }
-            _waveIn = null; _writer = null;
+            try { _waveIn?.StopRecording(); } catch { }
+            try { _waveIn?.Dispose(); } catch { }
+            _waveIn = null;
+
+            try { _writer?.Dispose(); } catch { }
+            _writer = null;
+
+            try
+            {
+                _memWavWriter?.Dispose();
+                if (_memWavStream != null)
+                {
+                    _lastWavBytes = _memWavStream.ToArray();
+                    _memWavStream.Dispose();
+                }
+            }
+            catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
+            finally { _memWavWriter = null; _memWavStream = null; }
 
             lblStatus.Content = "Processing...";
             lblStatus.Opacity = 1;
@@ -986,13 +1084,13 @@ namespace WhisperInk
             UpdateStatusLabel();
         }
 
-        // ── Transcription (HTTP and local ONNX) ───────────────────────
+        // ── Transcription dispatch ─────────────────────────────────────
 
         private async Task<string?> TranscribeAudioAsync(string filePath)
         {
             if (!File.Exists(filePath)) return null;
 
-            // ── Local ONNX provider: bypass HTTP entirely ──
+            // ── Local ONNX provider ──
             if (IsLocalOnnxProvider)
             {
                 try
@@ -1006,13 +1104,187 @@ namespace WhisperInk
                             return null;
                         }
                     }
-                    var result = await _cohereOnnx.TranscribeAsync(filePath, "en");
-                    Log($"Cohere ONNX result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    string language = GetActiveProvider()?.Language ?? "en";
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    var result = await _cohereOnnx.TranscribeAsync(filePath, language);
+                    sw.Stop();
+                    double audioMs = GetWavDurationMs(filePath);
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    Log($"Cohere ONNX took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
                     return result;
                 }
                 catch (Exception ex)
                 {
                     Log($"Cohere ONNX error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Local GGUF (CrispASR subprocess-per-call) ──
+            if (IsLocalGgufProvider)
+            {
+                try
+                {
+                    if (_cohereGguf == null)
+                    {
+                        _cohereGguf = new CohereGgufTranscriber();
+                        if (!_cohereGguf.ModelFilesExist())
+                        {
+                            Log("CrispASR/Cohere GGUF files not found in %APPDATA%\\.WhisperInk\\cohere-gguf\\");
+                            return null;
+                        }
+                    }
+                    string language = GetActiveProvider()?.Language ?? "en";
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    var result = await _cohereGguf.TranscribeAsync(filePath, language);
+                    sw.Stop();
+                    double audioMs = GetWavDurationMs(filePath);
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    Log($"Cohere GGUF (subprocess) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cohere GGUF error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Local GGUF CPU server (port 8766) — in-memory fast path ──
+            if (IsLocalGgufServerProvider)
+            {
+                try
+                {
+                    if (_cohereGgufServer == null)
+                    {
+                        _cohereGgufServer = new CohereGgufServerTranscriber();
+                        if (!_cohereGgufServer.ModelFilesExist())
+                        {
+                            Log("CrispASR/Cohere GGUF server files not found in %APPDATA%\\.WhisperInk\\cohere-gguf\\");
+                            return null;
+                        }
+                    }
+                    string language = GetActiveProvider()?.Language ?? "en";
+                    var biasTerms = GetActiveProvider()?.ContextBiasMode == "cohere_terms" ? _contextBiasTerms : null;
+                    if (biasTerms != null && biasTerms.Count > 0)
+                        Log($"[bias] sending {biasTerms.Count} terms as prompt: {string.Join(", ", biasTerms)}");
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    // Prefer in-memory bytes when available (saves ~20-30ms).
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _cohereGgufServer.TranscribeAsync(_lastWavBytes, language, biasTerms);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _cohereGgufServer.TranscribeAsync(filePath, language, biasTerms);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Cohere GGUF (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cohere GGUF server error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Local GGUF CUDA server (port 8767) — in-memory fast path ──
+            if (IsLocalGgufCudaServerProvider)
+            {
+                try
+                {
+                    if (_cohereGgufCudaServer == null)
+                    {
+                        _cohereGgufCudaServer = new CohereGgufCudaServerTranscriber();
+                        if (!_cohereGgufCudaServer.ModelFilesExist())
+                        {
+                            Log("CrispASR/Cohere GGUF CUDA server files not found in %APPDATA%\\.WhisperInk\\cohere-gguf-cuda\\");
+                            return null;
+                        }
+                    }
+                    string language = GetActiveProvider()?.Language ?? "en";
+                    var biasTerms = GetActiveProvider()?.ContextBiasMode == "cohere_terms" ? _contextBiasTerms : null;
+                    if (biasTerms != null && biasTerms.Count > 0)
+                        Log($"[bias] sending {biasTerms.Count} terms as prompt: {string.Join(", ", biasTerms)}");
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _cohereGgufCudaServer.TranscribeAsync(_lastWavBytes, language, biasTerms);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _cohereGgufCudaServer.TranscribeAsync(filePath, language, biasTerms);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Cohere GGUF (CUDA/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cohere GGUF CUDA error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Local GGUF CUDA Q8 server (port 8768) — in-memory fast path ──
+            if (IsLocalGgufCudaQ8ServerProvider)
+            {
+                try
+                {
+                    if (_cohereGgufCudaQ8Server == null)
+                    {
+                        _cohereGgufCudaQ8Server = new CohereGgufCudaQ8ServerTranscriber();
+                        if (!_cohereGgufCudaQ8Server.ModelFilesExist())
+                        {
+                            Log("CrispASR/Cohere GGUF CUDA Q8 server files not found in %APPDATA%\\.WhisperInk\\cohere-gguf-cuda-q8\\");
+                            return null;
+                        }
+                    }
+                    string language = GetActiveProvider()?.Language ?? "en";
+                    var biasTerms = GetActiveProvider()?.ContextBiasMode == "cohere_terms" ? _contextBiasTerms : null;
+                    if (biasTerms != null && biasTerms.Count > 0)
+                        Log($"[bias] sending {biasTerms.Count} terms as prompt: {string.Join(", ", biasTerms)}");
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _cohereGgufCudaQ8Server.TranscribeAsync(_lastWavBytes, language, biasTerms);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _cohereGgufCudaQ8Server.TranscribeAsync(filePath, language, biasTerms);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Cohere GGUF (CUDA Q8/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cohere GGUF CUDA Q8 error: {ex.Message}");
                     return null;
                 }
             }
@@ -1024,7 +1296,6 @@ namespace WhisperInk
             {
                 using var request = new HttpRequestMessage(HttpMethod.Post, _audioApiUrl);
 
-                // ── Auth ──
                 if (!string.IsNullOrEmpty(_activeApiKey))
                 {
                     if (!string.IsNullOrWhiteSpace(_activeAuthHeaderName))
@@ -1038,55 +1309,34 @@ namespace WhisperInk
                 var fileContent = new StreamContent(fileStream);
                 fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav");
 
-                // ════════════════════════════════════════════════════
-                // FIELD ORDER MATTERS: Cohere v2 requires all string
-                // fields to appear BEFORE the file part in the body.
-                // We always put file last — safe for all providers.
-                // ════════════════════════════════════════════════════
-
-                // ── 1. Model ──
                 if (!string.IsNullOrWhiteSpace(_audioModel))
                     content.Add(new StringContent(_audioModel), _activeModelFieldName);
 
-                // ── 2. Language ──
-                // Bearer-auth providers (OpenAI-compat AND Cohere) all accept "language".
-                // Custom-header providers (ElevenLabs xi-api-key) use different field
-                // names or auto-detect, so we skip it for those.
+                string language = activeProvider?.Language ?? "en";
                 if (string.IsNullOrWhiteSpace(_activeAuthHeaderName))
-                    content.Add(new StringContent("en"), "language");
+                    content.Add(new StringContent(language), "language");
 
-                // ── 3. Temperature (if provider configures one) ──
                 if (activeProvider?.TranscriptionTemperature.HasValue == true)
                     content.Add(
                         new StringContent(activeProvider.TranscriptionTemperature.Value
                             .ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)),
                         "temperature");
 
-                // ── 4. Context biasing ──
-                // Delivery method is per-provider; unsupported providers ignore unknown fields,
-                // but we only send when explicitly configured to avoid padding request size.
                 if (_contextBiasTerms.Count > 0)
                 {
                     string biasMode = activeProvider?.ContextBiasMode ?? "none";
                     switch (biasMode)
                     {
                         case "cohere_terms":
-                            // Cohere v2: JSON array of up to 100 domain-specific strings
                             content.Add(new StringContent(JsonSerializer.Serialize(_contextBiasTerms)), "context_bias_terms");
                             break;
 
                         case "whisper_prompt":
-                            // OpenAI Whisper / Groq / DeepInfra / local servers:
-                            // A text string that primes the decoder vocabulary — comma-join works well.
-                            // Keep under ~224 tokens (Whisper's prompt buffer limit).
                             content.Add(new StringContent(string.Join(", ", _contextBiasTerms)), "prompt");
                             break;
-
-                        // "none" — don't send anything
                     }
                 }
 
-                // ── 5. File LAST ──
                 content.Add(fileContent, "file", "audio.wav");
 
                 request.Content = content;
@@ -1133,8 +1383,6 @@ namespace WhisperInk
             }
             catch (Exception ex) { Log($"AI error: {ex.Message}"); return null; }
         }
-
-        // ── Post-processing correction for batch transcription ────────
 
         private async Task<string?> PostProcessTranscription(string rawText)
         {
@@ -1250,8 +1498,6 @@ namespace WhisperInk
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP_BYTE, UIntPtr.Zero);
         }
 
-        // ── WebSocket helpers ──────────────────────────────────────────
-
         private async Task SendTextMessageSafe(string message, CancellationToken ct)
         {
             if (_realtimeWs == null || _realtimeWs.State != WebSocketState.Open) return;
@@ -1266,8 +1512,6 @@ namespace WhisperInk
             finally { _wsSendLock.Release(); }
         }
 
-        // ── Keyboard helpers ──────────────────────────────────────────
-
         private void ReleaseAllModifierKeys()
         {
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
@@ -1278,8 +1522,6 @@ namespace WhisperInk
             keybd_event((byte)VK_LWIN, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
             keybd_event((byte)VK_RWIN, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
         }
-
-        // ── UI helpers ──────────────────────────────────────────────────
 
         private void ResetUi()
         {
@@ -1311,8 +1553,8 @@ namespace WhisperInk
                 try
                 {
                     int sampleRate = 44100;
-                    int duration = type switch { SoundType.Start => 80, SoundType.Stop => 80, SoundType.Success => 120, SoundType.Error => 200, _ => 0 };
-                    double freq = type switch { SoundType.Start => 880, SoundType.Stop => 440, SoundType.Success => 1200, SoundType.Error => 300, _ => 0 };
+                    int duration = type switch { SoundType.Start => 30, SoundType.Stop => 30, SoundType.Success => 50, SoundType.Error => 120, _ => 0 };
+                    double freq = type switch { SoundType.Start => 1200, SoundType.Stop => 800, SoundType.Success => 1600, SoundType.Error => 300, _ => 0 };
 
                     int samples = sampleRate * duration / 1000;
                     using var ms = new MemoryStream();
@@ -1349,13 +1591,10 @@ namespace WhisperInk
             });
         }
 
-        // ── Context menu ────────────────────────────────────────────────
-
         private void Window_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
         {
             var menu = new ContextMenu();
 
-            // ── API Provider selector ──
             var providerMenu = new MenuItem { Header = $"🔌 Provider: {GetActiveProvider()?.Name ?? "?"}" };
             foreach (var provider in _providers)
             {
@@ -1388,7 +1627,6 @@ namespace WhisperInk
 
             menu.Items.Add(new Separator());
 
-            // ── Dictation Mode toggle ──
             var modeMenu = new MenuItem { Header = $"⚡ Mode: {_dictationMode}" };
             var rtItem = new MenuItem { Header = "Realtime (live typing)", IsChecked = IsRealtimeMode };
             rtItem.Click += (_, _) =>
@@ -1409,7 +1647,6 @@ namespace WhisperInk
 
             menu.Items.Add(new Separator());
 
-            // ── Microphone ──
             var micMenu = new MenuItem { Header = "🎙 Microphone" };
             for (int i = 0; i < WaveIn.DeviceCount; i++)
             {
@@ -1421,14 +1658,12 @@ namespace WhisperInk
             }
             menu.Items.Add(micMenu);
 
-            // ── Sound toggle ──
             var soundItem = new MenuItem { Header = _isSoundEnabled ? "🔊 Sound: ON" : "🔇 Sound: OFF" };
             soundItem.Click += (_, _) => { _isSoundEnabled = !_isSoundEnabled; SaveConfig(); };
             menu.Items.Add(soundItem);
 
             menu.Items.Add(new Separator());
 
-            // ── Streaming Delay (only relevant for realtime) ──
             var delayMenu = new MenuItem { Header = "⏱ Streaming Delay" };
             foreach (int ms in new[] { 240, 480, 1000, 1500, 2400 })
             {
@@ -1442,7 +1677,6 @@ namespace WhisperInk
 
             menu.Items.Add(new Separator());
 
-            // ── System Prompt ──
             var promptItem = new MenuItem { Header = "📝 System Prompt" };
             promptItem.Click += (_, _) =>
             {
@@ -1451,19 +1685,28 @@ namespace WhisperInk
             };
             menu.Items.Add(promptItem);
 
-            // ── History ──
+            var biasItem = new MenuItem { Header = "🎯 Context Bias Terms" };
+            biasItem.Click += (_, _) =>
+            {
+                var biasWindow = new ContextBiasWindow(_contextBiasTerms);
+                if (biasWindow.ShowDialog() == true)
+                {
+                    _contextBiasTerms = biasWindow.BiasTerms;
+                    SaveConfig();
+                }
+            };
+            menu.Items.Add(biasItem);
+
             var historyItem = new MenuItem { Header = "📋 History" };
             historyItem.Click += (_, _) => new HistoryWindow().Show();
             menu.Items.Add(historyItem);
 
             menu.Items.Add(new Separator());
 
-            // ── Config path ──
             var configItem = new MenuItem { Header = $"📂 Config: {ConfigFile}" };
             configItem.Click += (_, _) => Process.Start("explorer.exe", $"/select,\"{ConfigFile}\"");
             menu.Items.Add(configItem);
 
-            // ── Post-process toggle ──
             var ppItem = new MenuItem { Header = _postProcessBatch ? "🩺 Med Correction: ON" : "🩺 Med Correction: OFF" };
             ppItem.Click += (_, _) =>
             {
@@ -1473,7 +1716,6 @@ namespace WhisperInk
             };
             menu.Items.Add(ppItem);
 
-            // ── Exit ──
             var exitItem = new MenuItem { Header = "❌ Exit" };
             exitItem.Click += (_, _) => Application.Current.Shutdown();
             menu.Items.Add(exitItem);
@@ -1485,5 +1727,28 @@ namespace WhisperInk
         {
             if (e.LeftButton == MouseButtonState.Pressed) DragMove();
         }
+    }
+
+    /// <summary>
+    /// Wrapper stream that forwards all operations to the inner stream but
+    /// ignores Dispose. Needed because WaveFileWriter disposes its underlying
+    /// stream on completion — but we need the MemoryStream to stay open long
+    /// enough to call ToArray() afterward.
+    /// </summary>
+    internal sealed class IgnoreDisposeStream : Stream
+    {
+        private readonly Stream _inner;
+        public IgnoreDisposeStream(Stream inner) { _inner = inner; }
+        public override bool CanRead => _inner.CanRead;
+        public override bool CanSeek => _inner.CanSeek;
+        public override bool CanWrite => _inner.CanWrite;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+        public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+        public override void SetLength(long value) => _inner.SetLength(value);
+        public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
+        protected override void Dispose(bool disposing) { /* intentionally do not dispose inner */ }
     }
 }

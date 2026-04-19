@@ -47,6 +47,23 @@ namespace WhisperInk
             TxtPostProcessModel.Text = _current.PostProcessModel;
             ChkSupportsTranscription.IsChecked = _current.SupportsTranscription;
             ChkSupportsRealtime.IsChecked = _current.SupportsRealtime;
+            TxtTranscriptionTemperature.Text = _current.TranscriptionTemperature?.ToString() ?? "";
+            
+            // Set language dropdown
+            var langItem = CmbLanguage.Items.Cast<ComboBoxItem>()
+                .FirstOrDefault(item => item.Tag?.ToString() == _current.Language);
+            if (langItem != null)
+                CmbLanguage.SelectedItem = langItem;
+            else
+                CmbLanguage.SelectedIndex = 0;
+            
+            // Set context bias mode dropdown
+            var biasItem = CmbContextBiasMode.Items.Cast<ComboBoxItem>()
+                .FirstOrDefault(item => item.Tag?.ToString() == _current.ContextBiasMode);
+            if (biasItem != null)
+                CmbContextBiasMode.SelectedItem = biasItem;
+            else
+                CmbContextBiasMode.SelectedIndex = 0;
         }
 
         private void CommitCurrentFields()
@@ -63,6 +80,18 @@ namespace WhisperInk
             _current.PostProcessModel = TxtPostProcessModel.Text.Trim();
             _current.SupportsTranscription = ChkSupportsTranscription.IsChecked == true;
             _current.SupportsRealtime = ChkSupportsRealtime.IsChecked == true;
+            
+            // Parse temperature
+            if (double.TryParse(TxtTranscriptionTemperature.Text, out double temp))
+                _current.TranscriptionTemperature = temp;
+            else
+                _current.TranscriptionTemperature = null;
+            
+            // Get language from dropdown
+            _current.Language = (CmbLanguage.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag?.ToString() ?? "en";
+            
+            // Get context bias mode from dropdown
+            _current.ContextBiasMode = CmbContextBiasMode.SelectedValue?.ToString() ?? "none";
         }
 
         private void BtnAdd_Click(object sender, RoutedEventArgs e)
@@ -149,7 +178,10 @@ namespace WhisperInk
             ChatModel = src.ChatModel,
             PostProcessModel = src.PostProcessModel,
             SupportsRealtime = src.SupportsRealtime,
-            SupportsTranscription = src.SupportsTranscription
+            SupportsTranscription = src.SupportsTranscription,
+            TranscriptionTemperature = src.TranscriptionTemperature,
+            Language = src.Language,
+            ContextBiasMode = src.ContextBiasMode
         };
     }
 }
