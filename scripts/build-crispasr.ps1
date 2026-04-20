@@ -1,4 +1,4 @@
-﻿# build-crispasr.ps1
+# build-crispasr.ps1
 # Build CrispASR (whisper.cpp fork) on Windows and deploy the binary + DLLs
 # alongside the Cohere/Parakeet GGUF model so the transcribers find everything.
 #
@@ -7,7 +7,9 @@
 #   - CMake 3.14+
 #   - Git
 #
-# For a CUDA build on a GPU box, change -DGGML_CUDA=OFF to ON below.
+# Clones CrispASR as a sibling of the whisperinc repo this script lives in,
+# so the two source trees stay together. For a CUDA build on a GPU box,
+# change -DGGML_CUDA=OFF to ON below.
 $ErrorActionPreference = "Stop"
 
 $whisperincRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
