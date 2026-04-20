@@ -8,6 +8,20 @@ A WPF (C#/.NET 8) system-wide dictation tool for Windows. Hold a global hotkey, 
 
 ---
 
+## Quick install
+
+Three commands from a fresh clone on a Windows box with the .NET 8 SDK:
+
+```powershell
+git clone https://github.com/praxeo/whisperinc.git
+cd whisperinc
+.\scripts\install.ps1 -Desktop
+```
+
+That publishes a self-contained build to `_publish\` and creates Start Menu + Desktop shortcuts. Launch from the Start Menu. Right-click the tray icon for the support menu; hold `Ctrl+Space` in any window to dictate.
+
+Uninstall with `.\scripts\uninstall.ps1`. It removes shortcuts and the auto-start entry but preserves `%APPDATA%\.WhisperInk\` (config, history, models).
+
 ## Table of Contents
 
 1. [Features](#features)
@@ -18,7 +32,9 @@ A WPF (C#/.NET 8) system-wide dictation tool for Windows. Hold a global hotkey, 
 6. [Architecture](#architecture)
 7. [Configuration & data locations](#configuration--data-locations)
 8. [Build & publish](#build--publish)
-9. [Troubleshooting](#troubleshooting)
+9. [Getting help](#getting-help)
+10. [Troubleshooting](#troubleshooting)
+11. [Design docs](#design-docs)
 
 ---
 
@@ -485,11 +501,44 @@ dotnet publish -c Release -r win-x64 --self-contained false
 dotnet publish -c Release -r win-x64 --self-contained true
 ```
 
-Helper scripts: `publish.ps1` (self-contained) and `publish-framework-dependent.ps1`.
+Helper scripts:
+
+- `publish.ps1` — self-contained build into `_publish\`.
+- `publish-framework-dependent.ps1` — smaller framework-dependent build into `_publish-fd\`.
+- `scripts\install.ps1 [-Desktop]` — runs the self-contained publish then creates Start Menu (and optionally Desktop) shortcuts. The one-shot path from a fresh clone.
+- `scripts\install-shortcuts.ps1 [-Desktop]` — create shortcuts for an already-published build.
+- `scripts\uninstall.ps1 [-RemoveBinaries]` — remove shortcuts and the auto-start registry entry. Leaves `%APPDATA%\.WhisperInk\` alone unless you also pass `-RemoveBinaries`, which wipes `_publish*` too.
+- `scripts\generate-icon.ps1` — regenerate `Assets\icon.ico` from code (only needed if you want to change the glyph).
 
 NuGet dependencies (`WhisperInk.csproj`):
 - `NAudio 2.2.1` — microphone capture.
 - `Microsoft.ML.OnnxRuntime.Gpu.Windows 1.24.4` — ONNX inference; loads DirectML, falls back to CPU.
+
+---
+
+## Getting help
+
+If something isn't working, right-click the tray icon and pick **Copy support bundle**. That drops a zip onto your desktop and puts it on the clipboard so you can paste it straight into Slack / Discord / an issue. The bundle contains:
+
+- The last 500 lines of `%APPDATA%\.WhisperInk\debug.log`
+- `config.json` with `ApiKey` fields redacted (`***redacted***`)
+- `about.txt` with app version, commit hash, .NET and OS versions, installed providers, and which local model files are present
+
+API keys are redacted; GGUF weights are never included (too large).
+
+For a quick live view of what the active provider needs, the tray also has **Diagnose active provider** — it prints a file/port check block (`crispasr.exe FOUND 1.1 MB`, `port 8104 reachable: YES`) so you can see exactly what's in place before you touch anything.
+
+**Tray menu quick reference:**
+
+- **Show Window** — restore the floating bar (left-click or double-click the tray icon does the same thing).
+- **Open debug log / config folder / model folder** — opens the paths in Notepad / Explorer.
+- **Copy support bundle** — described above.
+- **Diagnose active provider** — on-demand health probe with per-file detail.
+- **About…** — version, commit hash, build date.
+- **View README** — opens this page.
+- **Quit on close** — if checked, the X / Alt+F4 actually exits instead of hiding.
+- **Launch at Windows start** — HKCU Run entry; user-level, no admin needed.
+- **Quit** — explicit exit.
 
 ---
 
@@ -537,6 +586,14 @@ Should auto-clear via `ReleaseAllModifierKeys()`. If it ever happens, tapping th
 
 **Mic not listed**
 NAudio enumerates WASAPI devices on launch. Plug in your mic *before* starting WhisperInk, or restart the app after plugging in.
+
+---
+
+## Design docs
+
+Longer-form plans and sprint prompts live under `plans/`:
+
+- [`plans/packaging-polish-prompt.md`](plans/packaging-polish-prompt.md) — the specification that drove the tray icon, install scripts, health probe, support bundle, diagnose flow, and auto-start wiring.
 
 ---
 
