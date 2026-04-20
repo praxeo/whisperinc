@@ -326,6 +326,27 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",
                 Language = "en"
+            },
+            new ApiProvider
+            {
+                // Cohere Transcribe Q6_K CPU — auto-spawned CrispASR server.
+                // Same pattern as Q4 but points at port 8105 and the
+                // cohere-transcribe-q6_k.gguf file. Q6_K is K-quant mixed
+                // precision, noticeably closer to F16 accuracy than Q4_K
+                // at essentially the same RTFx (~1.05× on 8 CPU threads).
+                // Accuracy-first pick; use Q4 only if disk footprint matters.
+                Id = "cohere-local-q6k",
+                Name = "Cohere Local Q6_K (CrispASR)",
+                BaseUrl = "http://localhost:8105",
+                TranscriptionEndpoint = "http://localhost:8105/v1/audio/transcriptions",
+                TranscriptionModel = "cohere",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en"
             }
         };
     }

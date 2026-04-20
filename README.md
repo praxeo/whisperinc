@@ -285,6 +285,32 @@ The file is literally named `cohere-transcribe-q4_k.gguf` — the dispatch in Wh
 
 In WhisperInk → **Providers…** → pick **`Cohere Local Q4 (CrispASR)`** → Active, Batch. Ctrl+Space to dictate. Port defaults to 8104; change in the provider's Base URL field if another app is on that port.
 
+### Cohere Local Q6_K (CrispASR) — auto-managed server
+
+Same pattern as Q4 but swaps in `cohere-transcribe-q6_k.gguf` on port 8105. Q6_K is K-quant mixed-precision, so accuracy sits very close to F16 while the CPU RTFx stays effectively identical to Q4_K (~1.05–1.08× on 8 threads per the upstream benchmarks). Use this as the accuracy-first local Cohere; use Q4 only when disk footprint or memory pressure actually matters. The dispatch passes the same `backendHint: "cohere"` as the Q4 path.
+
+#### One-time setup
+
+```powershell
+.\scripts\download-cohere-q6k.ps1
+```
+
+Or inline:
+
+```powershell
+$dir = "$env:APPDATA\.WhisperInk\cohere-gguf"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+curl.exe -L --fail --progress-bar `
+  -o "$dir\cohere-transcribe-q6_k.gguf" `
+  "https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF/resolve/main/cohere-transcribe-q6_k.gguf"
+```
+
+Filename is fixed at `cohere-transcribe-q6_k.gguf` — the dispatch looks for that exact name, not a glob.
+
+#### Use it
+
+In WhisperInk → **Providers…** → pick **`Cohere Local Q6_K (CrispASR)`** → Active, Batch. Port defaults to 8105.
+
 ### What about Canary / Qwen3-ASR / Voxtral?
 
 The built-in Parakeet preset is the only one with auto-spawn wired up right now. For any other CrispASR backend, the manual path still works: start the server yourself and point a cloned provider at it. Swap the GGUF file, adjust the port, done.
@@ -408,6 +434,7 @@ Default providers (see `AppConfig.cs`):
 | `qwen3-asr` | Qwen3-ASR Local | HTTP | `localhost:8102`, OpenAI-compat |
 | `parakeet-local` | Parakeet Local (CrispASR) | HTTP | `localhost:8103`, auto-spawned via `CrispAsrServerTranscriber` |
 | `cohere-local-q4` | Cohere Local Q4 (CrispASR) | HTTP | `localhost:8104`, auto-spawned Q4_K Cohere Transcribe |
+| `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | HTTP | `localhost:8105`, auto-spawned Q6_K Cohere Transcribe (accuracy-first) |
 
 ### Text injection
 

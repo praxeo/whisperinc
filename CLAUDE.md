@@ -82,6 +82,7 @@ Default providers (`AppConfig.CreateDefaults()`):
 | `qwen3-asr` | Qwen3-ASR Local | HTTP 8102 | OpenAI-compatible |
 | `parakeet-local` | Parakeet Local (CrispASR) | HTTP 8103 | Auto-spawned via `CrispAsrServerTranscriber` |
 | `cohere-local-q4` | Cohere Local Q4 (CrispASR) | HTTP 8104 | Auto-spawned, Q4_K GGUF, explicit `--backend cohere` |
+| `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | HTTP 8105 | Auto-spawned, Q6_K GGUF, explicit `--backend cohere`, near-F16 accuracy |
 
 ### CrispAsrServerTranscriber (the generic one)
 

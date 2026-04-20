@@ -187,6 +187,7 @@ namespace WhisperInk
         private CohereGgufCudaQ8ServerTranscriber? _cohereGgufCudaQ8Server;
         private CrispAsrServerTranscriber? _parakeetServer;
         private CrispAsrServerTranscriber? _cohereQ4Server;
+        private CrispAsrServerTranscriber? _cohereQ6kServer;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -273,6 +274,7 @@ namespace WhisperInk
                 try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
                 try { _parakeetServer?.Dispose(); } catch { }
                 try { _cohereQ4Server?.Dispose(); } catch { }
+                try { _cohereQ6kServer?.Dispose(); } catch { }
             };
         }
 
@@ -417,8 +419,11 @@ namespace WhisperInk
         private bool IsCohereLocalQ4Provider =>
             GetActiveProvider()?.Id == "cohere-local-q4";
 
+        private bool IsCohereLocalQ6kProvider =>
+            GetActiveProvider()?.Id == "cohere-local-q6k";
+
         private bool IsLocalProvider =>
-            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider;
+            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider;
 
         // ── Config ──────────────────────────────────────────────────────
 
@@ -974,11 +979,17 @@ namespace WhisperInk
             if (!_isRecording) return;
             _isRecording = false;
 
+            // ── Pipeline timing instrumentation ──
+            var swBatch = System.Diagnostics.Stopwatch.StartNew();
+            long tPlaySound, tWaveStop, tFlush, tTranscribe, tPostProc, tPaste;
+
             PlayUiSound(SoundType.Stop);
+            tPlaySound = swBatch.ElapsedMilliseconds;
 
             try { _waveIn?.StopRecording(); } catch { }
             try { _waveIn?.Dispose(); } catch { }
             _waveIn = null;
+            tWaveStop = swBatch.ElapsedMilliseconds;
 
             // Flush both writers and capture in-memory bytes.
             try { _writer?.Dispose(); } catch { }
@@ -995,11 +1006,13 @@ namespace WhisperInk
             }
             catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
             finally { _memWavWriter = null; _memWavStream = null; }
+            tFlush = swBatch.ElapsedMilliseconds;
 
             lblStatus.Content = "Processing...";
             lblStatus.Opacity = 1;
 
             string? text = await TranscribeAudioAsync(_currentFileName);
+            tTranscribe = swBatch.ElapsedMilliseconds;
             if (!string.IsNullOrEmpty(text))
             {
                 if (_postProcessBatch)
@@ -1007,12 +1020,17 @@ namespace WhisperInk
                     lblStatus.Content = "Correcting...";
                     text = await PostProcessTranscription(text) ?? text;
                 }
+                tPostProc = swBatch.ElapsedMilliseconds;
 
                 if (_targetWindow != IntPtr.Zero)
                     SetForegroundWindow(_targetWindow);
                 PasteTextToActiveWindow(text);
+                tPaste = swBatch.ElapsedMilliseconds;
                 HistoryService.Add(text);
                 PlayUiSound(SoundType.Success);
+
+                int charCount = text?.Length ?? 0;
+                Log($"Batch pipeline: sound={tPlaySound}ms  waveStop={tWaveStop - tPlaySound}ms  flush={tFlush - tWaveStop}ms  transcribe={tTranscribe - tFlush}ms  postproc={tPostProc - tTranscribe}ms  paste={tPaste - tPostProc}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
             }
             else
             {
@@ -1421,6 +1439,57 @@ namespace WhisperInk
                 catch (Exception ex)
                 {
                     Log($"Cohere Q4 error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Cohere Q6_K Local (CrispASR server, auto-spawned) ──────────
+            if (IsCohereLocalQ6kProvider)
+            {
+                try
+                {
+                    var prov = GetActiveProvider();
+                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8105);
+                    if (_cohereQ6kServer == null || _cohereQ6kServer.Port != port)
+                    {
+                        _cohereQ6kServer?.Dispose();
+                        _cohereQ6kServer = new CrispAsrServerTranscriber(
+                            modelGlob: "cohere-transcribe-q6_k.gguf",
+                            port: port,
+                            displayName: "Cohere Q6_K",
+                            backendHint: "cohere");
+                        if (!_cohereQ6kServer.ModelFilesExist())
+                        {
+                            Log($"Cohere Q6_K: {_cohereQ6kServer.DiagnoseMissing()}");
+                            return null;
+                        }
+                    }
+
+                    string language = prov?.Language ?? "en";
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _cohereQ6kServer.TranscribeAsync(_lastWavBytes, language);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _cohereQ6kServer.TranscribeAsync(filePath, language);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Cohere Q6_K (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cohere Q6_K error: {ex.Message}");
                     return null;
                 }
             }
