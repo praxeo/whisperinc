@@ -33,6 +33,7 @@ namespace WhisperInk
         private readonly int    _port;
         private readonly int    _threads;
         private readonly string _displayName;
+        private readonly string? _backendHint;
 
         private readonly string _inferenceUrl;
         private readonly string _healthUrl;
@@ -47,16 +48,17 @@ namespace WhisperInk
             Timeout = TimeSpan.FromSeconds(120)
         };
 
-        public CrispAsrServerTranscriber(string modelGlob, int port, string displayName, int threads = 0)
-            : this(ExePath, ResolveModel(modelGlob), port, displayName, threads) { }
+        public CrispAsrServerTranscriber(string modelGlob, int port, string displayName, int threads = 0, string? backendHint = null)
+            : this(ExePath, ResolveModel(modelGlob), port, displayName, threads, backendHint) { }
 
-        public CrispAsrServerTranscriber(string exePath, string modelPath, int port, string displayName, int threads = 0)
+        public CrispAsrServerTranscriber(string exePath, string modelPath, int port, string displayName, int threads = 0, string? backendHint = null)
         {
             _exePath     = exePath;
             _modelPath   = modelPath;
             _port        = port;
             _threads     = threads <= 0 ? Math.Min(8, Environment.ProcessorCount) : threads;
             _displayName = displayName;
+            _backendHint = backendHint;
             _inferenceUrl = $"http://{ServerHost}:{_port}/v1/audio/transcriptions";
             _healthUrl    = $"http://{ServerHost}:{_port}/health";
         }
@@ -174,6 +176,11 @@ namespace WhisperInk
                 psi.ArgumentList.Add("-m");     psi.ArgumentList.Add(_modelPath);
                 psi.ArgumentList.Add("-t");     psi.ArgumentList.Add(_threads.ToString());
                 psi.ArgumentList.Add("-np");
+                if (!string.IsNullOrWhiteSpace(_backendHint))
+                {
+                    psi.ArgumentList.Add("--backend");
+                    psi.ArgumentList.Add(_backendHint);
+                }
 
                 _serverProc = new Process { StartInfo = psi };
                 if (!_serverProc.Start()) return false;

@@ -186,6 +186,7 @@ namespace WhisperInk
         private CohereGgufCudaServerTranscriber? _cohereGgufCudaServer;
         private CohereGgufCudaQ8ServerTranscriber? _cohereGgufCudaQ8Server;
         private CrispAsrServerTranscriber? _parakeetServer;
+        private CrispAsrServerTranscriber? _cohereQ4Server;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -271,6 +272,7 @@ namespace WhisperInk
                 try { _cohereGgufCudaServer?.Dispose(); } catch { }
                 try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
                 try { _parakeetServer?.Dispose(); } catch { }
+                try { _cohereQ4Server?.Dispose(); } catch { }
             };
         }
 
@@ -412,8 +414,11 @@ namespace WhisperInk
         private bool IsParakeetLocalProvider =>
             GetActiveProvider()?.Id == "parakeet-local";
 
+        private bool IsCohereLocalQ4Provider =>
+            GetActiveProvider()?.Id == "cohere-local-q4";
+
         private bool IsLocalProvider =>
-            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider;
+            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider;
 
         // ── Config ──────────────────────────────────────────────────────
 
@@ -1365,6 +1370,57 @@ namespace WhisperInk
                 catch (Exception ex)
                 {
                     Log($"Parakeet error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Cohere Q4 Local (CrispASR server, auto-spawned) ──────────
+            if (IsCohereLocalQ4Provider)
+            {
+                try
+                {
+                    var prov = GetActiveProvider();
+                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8104);
+                    if (_cohereQ4Server == null || _cohereQ4Server.Port != port)
+                    {
+                        _cohereQ4Server?.Dispose();
+                        _cohereQ4Server = new CrispAsrServerTranscriber(
+                            modelGlob: "cohere-transcribe-q4_k.gguf",
+                            port: port,
+                            displayName: "Cohere Q4",
+                            backendHint: "cohere");
+                        if (!_cohereQ4Server.ModelFilesExist())
+                        {
+                            Log($"Cohere Q4: {_cohereQ4Server.DiagnoseMissing()}");
+                            return null;
+                        }
+                    }
+
+                    string language = prov?.Language ?? "en";
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _cohereQ4Server.TranscribeAsync(_lastWavBytes, language);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _cohereQ4Server.TranscribeAsync(filePath, language);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Cohere Q4 (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Cohere Q4 error: {ex.Message}");
                     return null;
                 }
             }

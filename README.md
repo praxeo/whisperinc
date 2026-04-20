@@ -188,13 +188,13 @@ This fetches `cohere-transcribe-q5_0.gguf` (~1.45 GB) from HuggingFace (`cstr/co
 ```
 
 What this does:
-- Clones `https://github.com/CrispStrobe/CrispASR` into `C:\Users\<you>\OneDrive\Desktop\CrispASR` (edit `$srcRoot` at the top of the script if you want it elsewhere — the current path is hardcoded for the maintainer's machine).
-- Runs `cmake -B build -G "Visual Studio 16 2019" -A x64 -DGGML_CUDA=OFF` then builds the `whisper-cli` target in Release.
-- Copies `crispasr.exe` (or `whisper-cli.exe`) and any `ggml*.dll` runtime deps into `%APPDATA%\.WhisperInk\cohere-gguf\` next to the model.
+- Clones `https://github.com/CrispStrobe/CrispASR` as a **sibling of this repo** (e.g., if whisperinc is at `Documents\GitHub\whisperinc\`, CrispASR lands at `Documents\GitHub\CrispASR\`). The script derives paths from `$PSCommandPath`, no hardcoded user paths.
+- Runs `cmake -B build -G "Visual Studio 17 2022" -A x64 -DGGML_CUDA=OFF -DWHISPER_BUILD_TESTS=OFF` then builds the `whisper-cli` target in Release. That target produces `crispasr.exe` via CMake's `OUTPUT_NAME` — the historical `whisper-cli` name is kept only for internal linking rules.
+- Copies `crispasr.exe` and **every** `*.dll` from `build\bin\Release\` into `%APPDATA%\.WhisperInk\cohere-gguf\` — the 13-ish DLLs include `parakeet.dll`, `cohere.dll`, `crispasr.dll`, the `ggml*.dll` family, `whisper.dll`, etc. Copying only `ggml*` is not enough; the binary dynamically loads the per-backend DLLs at startup and silently exits with `STATUS_DLL_NOT_FOUND` if any are missing.
 
-For a CUDA build, flip `-DGGML_CUDA=OFF` to `ON` in the script.
+For a CUDA build on a GPU box, flip `-DGGML_CUDA=OFF` to `ON` in the script. Requires CUDA Toolkit 12.x on PATH.
 
-The Visual Studio generator string (`Visual Studio 16 2019`) works with VS2022 as long as the v141/v142 toolset is installed. If CMake complains, change it to `Visual Studio 17 2022`.
+The `-DWHISPER_BUILD_TESTS=OFF` flag skips a Catch2 `FetchContent` step that tries to clone from GitHub during configure — saves a few hundred MB and avoids failures on firewalled networks.
 
 #### 3. Point WhisperInk at it
 
@@ -202,8 +202,10 @@ After step 2, `%APPDATA%\.WhisperInk\cohere-gguf\` should contain:
 
 ```
 crispasr.exe
-cohere-transcribe-q5_0.gguf
-ggml.dll, ggml-cpu.dll, ggml-base.dll, ...
+cohere-transcribe-q5_0.gguf   (or whichever GGUF you downloaded)
+canary.dll, canary_ctc.dll, cohere.dll, crispasr.dll,
+ggml.dll, ggml-base.dll, ggml-cpu.dll, granite_speech.dll,
+parakeet.dll, qwen3_asr.dll, voxtral.dll, voxtral4b.dll, whisper.dll
 ```
 
 In the WhisperInk UI, pick one of:
@@ -220,6 +222,11 @@ Source files worth reading if you want to customize ports, flags, or the model f
 WhisperInk ships with a built-in `Parakeet Local (CrispASR)` provider that auto-spawns a `crispasr.exe --server` subprocess the first time you dictate with it selected, keeps the model resident between calls, and tears it down when WhisperInk exits. You don't need to keep a terminal open.
 
 Parakeet TDT 0.6B at Q4_K is ~467 MB and noticeably faster than the 2B Cohere Transcribe model on CPU, so it's a good default for laptops without a GPU. The server exposes CrispASR's OpenAI-compatible `/v1/audio/transcriptions` endpoint, so WhisperInk uses its regular HTTP batch path — no realtime streaming, no special protocol.
+
+**Performance you should expect:**
+- CPU (modern laptop, 8 threads): RTFx 2–3× — a 2-second burst transcribes in <1s, a 10-second utterance in ~3–4s. Cold start adds ~2–3s model-load tax, once per session.
+- CUDA (RTX 3090-class): RTFx 20–50× — near-instant for any reasonable dictation length. Requires a CUDA-built `crispasr.exe` and a CUDA-variant Parakeet provider (not wired up by default — see "Canary / Qwen3-ASR / Voxtral" below for the cloning pattern).
+- Low-power ultrabook CPU (e.g., Ryzen U-series, Intel T-suffix): RTFx 1.5–2×. Still usable for dictation bursts; longer utterances feel slow.
 
 #### One-time setup
 
@@ -244,7 +251,41 @@ In WhisperInk → **Providers…** → pick **`Parakeet Local (CrispASR)`** → 
 
 Changing the port in the provider's `Base URL` field (default `http://localhost:8103`) is honored — the spawned server binds to whatever port the UI says.
 
-#### What about Canary / Qwen3-ASR / Voxtral?
+### Cohere Local Q4 (CrispASR) — auto-managed server
+
+The second built-in auto-spawn provider. Same pattern as Parakeet — lazy-starts `crispasr.exe --server` on port 8104 when selected, keeps the model resident, tears it down on app exit — but runs the Cohere Transcribe 2B GGUF at Q4_K quantization (~1.4 GB). Trades off size/latency for Cohere's higher English accuracy ceiling.
+
+**Performance you should expect:**
+- CPU (modern laptop, 8 threads): RTFx 1–1.5× — roughly half Parakeet's speed at the same quant level, since the underlying model is ~3× larger. A 2-second burst transcribes in ~1–2s, a 10-second utterance in ~8–10s. Cold start adds ~3–5s.
+- CUDA (RTX 3090-class): RTFx 15–30× — comfortably fast for any dictation length, once wired into a CUDA-built `crispasr.exe`.
+
+Unlike Parakeet, Cohere GGUFs don't expose backend metadata that CrispASR's auto-detect reads, so WhisperInk's spawn call passes `--backend cohere` explicitly. That's handled in `MainWindow.xaml.cs` via the `backendHint` parameter on `CrispAsrServerTranscriber`.
+
+#### One-time setup
+
+Same `crispasr.exe` as the Parakeet path. The only extra file is the Q4_K GGUF:
+
+```powershell
+.\scripts\download-cohere-q4.ps1
+```
+
+Or inline:
+
+```powershell
+$dir = "$env:APPDATA\.WhisperInk\cohere-gguf"
+New-Item -ItemType Directory -Force -Path $dir | Out-Null
+curl.exe -L --fail --progress-bar `
+  -o "$dir\cohere-transcribe-q4_k.gguf" `
+  "https://huggingface.co/cstr/cohere-transcribe-03-2026-GGUF/resolve/main/cohere-transcribe-q4_k.gguf"
+```
+
+The file is literally named `cohere-transcribe-q4_k.gguf` — the dispatch in WhisperInk looks for that exact filename, not a glob, so don't rename it.
+
+#### Use it
+
+In WhisperInk → **Providers…** → pick **`Cohere Local Q4 (CrispASR)`** → Active, Batch. Ctrl+Space to dictate. Port defaults to 8104; change in the provider's Base URL field if another app is on that port.
+
+### What about Canary / Qwen3-ASR / Voxtral?
 
 The built-in Parakeet preset is the only one with auto-spawn wired up right now. For any other CrispASR backend, the manual path still works: start the server yourself and point a cloned provider at it. Swap the GGUF file, adjust the port, done.
 
@@ -328,6 +369,7 @@ Then set WhisperInk's proxy path in the config (or leave it to the default `ws:/
 | `AppConfig.cs` | `ApiProvider` model (one per backend) and `AppConfig` (top-level settings, provider list, bias terms, post-process config). `CreateDefaults()` seeds the provider list. |
 | `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe (encoder-decoder, 30s chunks, 5s overlap, greedy decoding). |
 | `CohereGguf*Transcriber.cs` | Four variants for llama.cpp-based Cohere deployments (subprocess / HTTP CPU / HTTP CUDA / HTTP CUDA Q8). |
+| `CrispAsrServerTranscriber.cs` | Generic adapter for the `crispasr.exe --server` mode — model-agnostic, auto-detects backend from GGUF metadata. Used by the Parakeet provider; the path new models should adopt. |
 | `ProviderSettingsWindow.xaml(.cs)` | GUI for editing providers — URLs, keys, auth header, model field, bias mode, Scribe v2 keyterms. |
 | `ContextBiasWindow.xaml(.cs)` | Global context-bias term list (used with `whisper_prompt` / `cohere_terms` modes). |
 | `PromptWindow.xaml(.cs)` | System-prompt editor for AI-edit mode. |
@@ -364,6 +406,8 @@ Default providers (see `AppConfig.cs`):
 | `cohere-gguf-cuda-server` | Cohere Local (CrispASR CUDA) | HTTP | llama.cpp server, CUDA |
 | `cohere-gguf-cuda-server-q8` | Cohere Local (CrispASR CUDA Q8) | HTTP | llama.cpp server, CUDA Q8, cohere_terms |
 | `qwen3-asr` | Qwen3-ASR Local | HTTP | `localhost:8102`, OpenAI-compat |
+| `parakeet-local` | Parakeet Local (CrispASR) | HTTP | `localhost:8103`, auto-spawned via `CrispAsrServerTranscriber` |
+| `cohere-local-q4` | Cohere Local Q4 (CrispASR) | HTTP | `localhost:8104`, auto-spawned Q4_K Cohere Transcribe |
 
 ### Text injection
 
@@ -438,6 +482,28 @@ Mistral only. The local proxy must be running on `127.0.0.1:8765`, your API key 
 
 **Local ONNX is slow**
 Autoregressive decoding on CPU/DirectML is genuinely slow — a 10s utterance can take several seconds. Prefer a cloud provider or a GGUF CUDA server if you have an NVIDIA GPU. INT8 is more accurate but slower than INT4.
+
+**Parakeet/Cohere Q4 is slower than expected (RTFx <2× on a laptop)**
+Windows' default **Balanced** power plan throttles CPU to its base clock even while plugged in — on a Ryzen 5825U that's 2.0 GHz versus the 4.5 GHz boost. Roughly halves ASR throughput. Switch to Ultimate Performance:
+
+```powershell
+powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+powercfg /setactive 5898ace7-acb8-479d-b9c1-54af0f151d1b
+```
+
+First command creates the hidden Ultimate Performance scheme from its well-known GUID, second activates it. No reboot needed. Verify with `Get-CimInstance Win32_Processor` under load — `CurrentClockSpeed` should now reach `MaxClockSpeed` under load, not sit at base.
+
+**CrispASR/Parakeet returns empty transcripts (or `crispasr.exe --help` prints nothing)**
+`crispasr.exe` is exiting with `STATUS_DLL_NOT_FOUND` (exit code `-1073741515` / `0xC0000135`) before it can print anything. One or more of the per-backend DLLs is missing from `%APPDATA%\.WhisperInk\cohere-gguf\`. Re-run the deploy step and make sure **every** `*.dll` from `build\bin\Release\` gets copied, not just `ggml*`. The full set on a current build is 13 files: `canary`, `canary_ctc`, `cohere`, `crispasr`, `ggml`, `ggml-base`, `ggml-cpu`, `granite_speech`, `parakeet`, `qwen3_asr`, `voxtral`, `voxtral4b`, `whisper`. Verify with:
+
+```powershell
+$dir = "$env:APPDATA\.WhisperInk\cohere-gguf"
+& "$dir\crispasr.exe" --help 2>&1 | Select-Object -First 5
+# Exit code 0 and help text = healthy. Exit code -1073741515 = missing DLL.
+```
+
+**CrispASR build succeeds but no executable appears**
+Check `C:\path\to\CrispASR\build\bin\Release\` — the binary is `crispasr.exe`, not `whisper-cli.exe` (CMake renames via `OUTPUT_NAME`). On Windows there's no `whisper-cli` symlink; that's a Unix-only step in the upstream CMakeLists.
 
 **Stuck modifier key after a recording**
 Should auto-clear via `ReleaseAllModifierKeys()`. If it ever happens, tapping the key once releases it. Capture a `debug.log` excerpt and file an issue.

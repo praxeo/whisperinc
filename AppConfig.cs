@@ -305,6 +305,27 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",
                 Language = "en"
+            },
+            new ApiProvider
+            {
+                // Cohere Transcribe Q4_K CPU — auto-spawned CrispASR server.
+                // Mirrors the Parakeet preset but uses port 8104 and the
+                // cohere-transcribe-q4_k.gguf file. The dispatch in
+                // MainWindow.xaml.cs passes backendHint: "cohere" because
+                // Cohere GGUFs may not expose the backend marker that
+                // CrispASR's auto-detect relies on.
+                Id = "cohere-local-q4",
+                Name = "Cohere Local Q4 (CrispASR)",
+                BaseUrl = "http://localhost:8104",
+                TranscriptionEndpoint = "http://localhost:8104/v1/audio/transcriptions",
+                TranscriptionModel = "cohere",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en"
             }
         };
     }
