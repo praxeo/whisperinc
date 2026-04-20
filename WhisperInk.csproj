@@ -6,14 +6,70 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
-    <ApplicationIcon Condition="Exists('Assets\icon.ico')">Assets\icon.ico</ApplicationIcon>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\icon.ico</ApplicationIcon>
     <AssemblyName>WhisperInk</AssemblyName>
     <RootNamespace>WhisperInk</RootNamespace>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <Product>WhisperInk</Product>
+    <AssemblyTitle>WhisperInk</AssemblyTitle>
+    <Description>System-wide dictation for Windows with pluggable ASR providers.</Description>
+    <Company>praxeo</Company>
+    <Copyright>Copyright (c) praxeo</Copyright>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="Assets\icon.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- UseWindowsForms=true adds a global `using System.Windows.Forms` that
+       collides with WPF types (Application, MessageBox, Clipboard, Button,
+       Color). Remove it so WPF code keeps compiling — the tray code
+       references WinForms types with fully qualified names instead. -->
+  <ItemGroup>
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <Target Name="RemoveWinFormsGlobalUsing" BeforeTargets="BeforeCompile">
+    <ItemGroup>
+      <Using Remove="System.Windows.Forms" />
+      <Using Remove="System.Drawing" />
+    </ItemGroup>
+  </Target>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.24.4" />
     <PackageReference Include="NAudio" Version="2.2.1" />
   </ItemGroup>
+
+  <!-- Embed the short git commit hash into AssemblyInformationalVersion so
+       the About dialog and support bundles can identify the exact build.
+       The .NET SDK auto-appends SourceRevisionId to InformationalVersion
+       (`1.0.0+<hash>` format), so the cleanest path is to set
+       SourceRevisionId to the short hash ourselves. Falls back cleanly
+       when git isn't available — the base Version is used unchanged. -->
+  <Target Name="StampGitHash" BeforeTargets="GetAssemblyVersion;CoreGenerateAssemblyInfo;InitializeSourceControlInformation">
+    <Exec Command="git rev-parse --short HEAD"
+          ConsoleToMSBuild="true"
+          StandardOutputImportance="Low"
+          StandardErrorImportance="Low"
+          IgnoreExitCode="true"
+          ContinueOnError="WarnAndContinue">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitShortHash" />
+      <Output TaskParameter="ExitCode"      PropertyName="GitExitCode" />
+    </Exec>
+    <PropertyGroup>
+      <SourceRevisionId Condition="'$(GitExitCode)' == '0' and '$(GitShortHash)' != ''">$(GitShortHash)</SourceRevisionId>
+    </PropertyGroup>
+  </Target>
 
 </Project>
