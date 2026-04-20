@@ -20,7 +20,7 @@ using NAudio.Wave;
 
 namespace WhisperInk
 {
-    public partial class MainWindow : Window
+    public partial class MainWindow : Window, TrayIconHost
     {
         // ── Win32 imports ──────────────────────────────────────────────
         [DllImport("user32.dll")]
@@ -177,6 +177,15 @@ namespace WhisperInk
         private List<ApiProvider> _providers = new();
         private string _activeProviderId = "mistral";
 
+        // ── Tray / health / UX state (Deliverables 3–6, 8) ──────────
+        private TrayIconManager? _tray;
+        private HealthProbe? _healthProbe;
+        private HealthReport _lastHealth = new();
+        private bool _quitOnClose = false;
+        private bool _launchAtStartup = false;
+        private bool _hasSeenFirstRun = false;
+        private bool _exiting = false;
+
         private IntPtr _targetWindow = IntPtr.Zero;
 
         private readonly HttpClient _httpClient = new();
@@ -262,20 +271,33 @@ namespace WhisperInk
         {
             InitializeComponent();
             _hookCallback = HookCallback;
-            Loaded += MainWindow_Loaded;
-            Closing += (_, _) =>
+            Loaded  += MainWindow_Loaded;
+            Closing += MainWindow_Closing;
+        }
+
+        private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+        {
+            // Hide to tray by default; only actually close when the user
+            // chose "Quit on close" or invoked the tray's Quit item.
+            if (!_exiting && !_quitOnClose)
             {
-                if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId);
-                try { _proxyProcess?.Kill(); } catch { }
-                try { _cohereOnnx?.Dispose(); } catch { }
-                try { _cohereGguf?.Dispose(); } catch { }
-                try { _cohereGgufServer?.Dispose(); } catch { }
-                try { _cohereGgufCudaServer?.Dispose(); } catch { }
-                try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
-                try { _parakeetServer?.Dispose(); } catch { }
-                try { _cohereQ4Server?.Dispose(); } catch { }
-                try { _cohereQ6kServer?.Dispose(); } catch { }
-            };
+                e.Cancel = true;
+                HideToTray();
+                return;
+            }
+
+            if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId);
+            try { _proxyProcess?.Kill(); } catch { }
+            try { _cohereOnnx?.Dispose(); } catch { }
+            try { _cohereGguf?.Dispose(); } catch { }
+            try { _cohereGgufServer?.Dispose(); } catch { }
+            try { _cohereGgufCudaServer?.Dispose(); } catch { }
+            try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
+            try { _parakeetServer?.Dispose(); } catch { }
+            try { _cohereQ4Server?.Dispose(); } catch { }
+            try { _cohereQ6kServer?.Dispose(); } catch { }
+            try { _healthProbe?.Dispose(); } catch { }
+            try { _tray?.Dispose(); } catch { }
         }
 
         private void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -342,6 +364,10 @@ namespace WhisperInk
             try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n"); } catch { }
 
             UpdateStatusLabel();
+
+            InitializeTrayAndHealth();
+            SyncLaunchAtStartupFromRegistry();
+            RunFirstRunCheck();
         }
 
         // ── Provider helpers ────────────────────────────────────────────
@@ -388,6 +414,7 @@ namespace WhisperInk
             }
 
             UpdateStatusLabel();
+            _healthProbe?.RequestProbe();
         }
 
         private void UpdateStatusLabel()
@@ -396,6 +423,13 @@ namespace WhisperInk
             string provTag = provider?.Name ?? "?";
             string modeTag = IsRealtimeMode ? "RT" : "Batch";
             lblStatus.Content = $"{provTag} ({modeTag})";
+            UpdateHealthDot();
+        }
+
+        private void UpdateHealthDot()
+        {
+            try { lblHealthDot.Text = _lastHealth.Dot; } catch { }
+            try { lblHealthDot.ToolTip = _lastHealth.Summary; } catch { }
         }
 
         private bool IsLocalOnnxProvider =>
@@ -491,6 +525,9 @@ namespace WhisperInk
                     }
                     if (root.TryGetProperty("ActiveProviderId", out var apid))
                         _activeProviderId = apid.GetString() ?? "mistral";
+                    if (root.TryGetProperty("QuitOnClose", out var qoc))       _quitOnClose      = qoc.GetBoolean();
+                    if (root.TryGetProperty("LaunchAtStartup", out var las))   _launchAtStartup  = las.GetBoolean();
+                    if (root.TryGetProperty("HasSeenFirstRun", out var hsfr))  _hasSeenFirstRun  = hsfr.GetBoolean();
 
                     if (_providers.Count == 0)
                     {
@@ -554,7 +591,10 @@ namespace WhisperInk
                     PostProcessBatch = _postProcessBatch,
                     PostProcessPrompt = _postProcessPrompt,
                     Providers = _providers,
-                    ActiveProviderId = _activeProviderId
+                    ActiveProviderId = _activeProviderId,
+                    QuitOnClose     = _quitOnClose,
+                    LaunchAtStartup = _launchAtStartup,
+                    HasSeenFirstRun = _hasSeenFirstRun
                 };
                 File.WriteAllText(ConfigFile, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
             }
@@ -1938,8 +1978,12 @@ namespace WhisperInk
             };
             menu.Items.Add(ppItem);
 
-            var exitItem = new MenuItem { Header = "❌ Exit" };
-            exitItem.Click += (_, _) => Application.Current.Shutdown();
+            var hideItem = new MenuItem { Header = "⬇ Hide to tray" };
+            hideItem.Click += (_, _) => HideToTray();
+            menu.Items.Add(hideItem);
+
+            var exitItem = new MenuItem { Header = "❌ Quit" };
+            exitItem.Click += (_, _) => QuitApplication();
             menu.Items.Add(exitItem);
 
             menu.IsOpen = true;
@@ -1948,6 +1992,232 @@ namespace WhisperInk
         private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             if (e.LeftButton == MouseButtonState.Pressed) DragMove();
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        // TRAY + HEALTH + SUPPORT BUNDLE + FIRST-RUN (Deliverables 3–6, 8)
+        // ════════════════════════════════════════════════════════════════
+
+        private void InitializeTrayAndHealth()
+        {
+            try
+            {
+                _tray = new TrayIconManager(this);
+            }
+            catch (Exception ex) { Log($"Tray init failed: {ex.Message}"); }
+
+            try
+            {
+                _healthProbe = new HealthProbe(GetActiveProvider, OnHealthReport);
+                _healthProbe.Start();
+            }
+            catch (Exception ex) { Log($"Health probe init failed: {ex.Message}"); }
+        }
+
+        private void OnHealthReport(HealthReport r)
+        {
+            _lastHealth = r;
+            Dispatcher.BeginInvoke(() =>
+            {
+                UpdateHealthDot();
+                _tray?.NotifyHealth(r);
+                UpdateSetupBannerVisibility();
+            });
+        }
+
+        private void UpdateSetupBannerVisibility()
+        {
+            if (_lastHealth.Status == HealthStatus.Fail)
+            {
+                lblBanner.Text = $"Setup needed: {_lastHealth.Summary} — click to fix";
+                SetupBanner.Visibility = Visibility.Visible;
+                Height = 68;
+            }
+            else
+            {
+                SetupBanner.Visibility = Visibility.Collapsed;
+                Height = 38;
+            }
+        }
+
+        private void SetupBanner_Click(object sender, MouseButtonEventArgs e)
+        {
+            var prov = GetActiveProvider();
+            if (prov == null) return;
+
+            // Cloud providers with a missing key → open the provider
+            // settings dialog. Local providers → open the model folder
+            // so the user can drop files in.
+            bool isLocal = prov.Id is "cohere-onnx"
+                               or "cohere-gguf"
+                               or "cohere-gguf-server"
+                               or "cohere-gguf-cuda-server"
+                               or "cohere-gguf-cuda-server-q8"
+                               or "parakeet-local"
+                               or "cohere-local-q4"
+                               or "cohere-local-q6k";
+
+            if (isLocal)
+            {
+                try
+                {
+                    string modelFolder = Path.Combine(ConfigFolder, "cohere-gguf");
+                    if (!Directory.Exists(modelFolder)) Directory.CreateDirectory(modelFolder);
+                    Process.Start(new ProcessStartInfo(modelFolder) { UseShellExecute = true });
+                }
+                catch (Exception ex) { Log($"Open model folder failed: {ex.Message}"); }
+            }
+            else
+            {
+                var win = new ProviderSettingsWindow(_providers, _activeProviderId);
+                if (win.ShowDialog() == true)
+                {
+                    _providers = win.ResultProviders;
+                    ApplyActiveProvider();
+                    SaveConfig();
+                    UpdateStatusLabel();
+                    _healthProbe?.RequestProbe();
+                }
+            }
+        }
+
+        private void RunFirstRunCheck()
+        {
+            if (!_hasSeenFirstRun)
+            {
+                _hasSeenFirstRun = true;
+                SaveConfig();
+                _tray?.ShowBalloon(
+                    "WhisperInk is running",
+                    "Hold Ctrl+Space to dictate. Right-click the tray icon for support, logs, and diagnostics.");
+            }
+        }
+
+        private void SyncLaunchAtStartupFromRegistry()
+        {
+            // External toggles (Task Manager → Startup apps, scripts, etc.)
+            // can flip the registry entry behind our back. Treat the
+            // registry as the source of truth at launch.
+            bool regEnabled = AutoStart.IsEnabled();
+            if (regEnabled != _launchAtStartup)
+            {
+                _launchAtStartup = regEnabled;
+                SaveConfig();
+            }
+        }
+
+        private void HideToTray()
+        {
+            try { Hide(); } catch { }
+        }
+
+        // ── TrayIconHost ────────────────────────────────────────────────
+
+        public string ActiveProviderName => GetActiveProvider()?.Name ?? "?";
+        public string DebugLogPath       => LogFile;
+        // Explicit impl — would otherwise collide with the existing private
+        // static field also named ConfigFolder.
+        string TrayIconHost.ConfigFolder => MainWindow.ConfigFolder;
+        string TrayIconHost.ModelFolder  => Path.Combine(MainWindow.ConfigFolder, "cohere-gguf");
+        public HealthReport CurrentHealth => _lastHealth;
+        public bool QuitOnClose          => _quitOnClose;
+        public bool LaunchAtStartup      => _launchAtStartup;
+
+        public void ShowMainWindow()
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (!IsVisible) Show();
+                if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+                Activate();
+                Topmost = true;
+            });
+        }
+
+        public void CopySupportBundle()
+        {
+            try
+            {
+                string zip = SupportBundle.Build(_providers, _activeProviderId);
+                _tray?.ShowBalloon("Support bundle ready",
+                    $"Saved to Desktop and copied to clipboard — paste into Slack / email.\n{Path.GetFileName(zip)}");
+                Log($"Support bundle written: {zip}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Support bundle failed: {ex.Message}");
+                System.Windows.MessageBox.Show($"Could not build support bundle:\n{ex.Message}",
+                    "WhisperInk", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+            }
+        }
+
+        public void DiagnoseActiveProvider()
+        {
+            Dispatcher.BeginInvoke(async () =>
+            {
+                string block = await ProviderDiagnostics.BuildAsync(GetActiveProvider());
+                var win = new Window
+                {
+                    Title                 = "Diagnose active provider",
+                    Width                 = 640,
+                    Height                = 400,
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                    ShowInTaskbar         = false,
+                    Background            = System.Windows.Media.Brushes.Black,
+                };
+                var tb = new System.Windows.Controls.TextBox
+                {
+                    Text               = block,
+                    IsReadOnly         = true,
+                    FontFamily         = new System.Windows.Media.FontFamily("Consolas"),
+                    FontSize           = 12,
+                    Foreground         = System.Windows.Media.Brushes.White,
+                    Background         = System.Windows.Media.Brushes.Black,
+                    BorderThickness    = new Thickness(0),
+                    VerticalScrollBarVisibility   = System.Windows.Controls.ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = System.Windows.Controls.ScrollBarVisibility.Auto,
+                    AcceptsReturn      = true,
+                    TextWrapping       = TextWrapping.NoWrap,
+                    Padding            = new Thickness(12),
+                };
+                win.Content = tb;
+                win.ShowDialog();
+            });
+        }
+
+        public void ShowAboutDialog()
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                var w = new AboutWindow();
+                w.ShowDialog();
+            });
+        }
+
+        public void QuitApplication()
+        {
+            _exiting = true;
+            Dispatcher.BeginInvoke(() => System.Windows.Application.Current.Shutdown());
+        }
+
+        public void SetQuitOnClose(bool enabled)
+        {
+            if (_quitOnClose == enabled) return;
+            _quitOnClose = enabled;
+            SaveConfig();
+        }
+
+        public void SetLaunchAtStartup(bool enabled)
+        {
+            if (_launchAtStartup == enabled) return;
+            _launchAtStartup = enabled;
+            SaveConfig();
+            try
+            {
+                string exe = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                AutoStart.SetEnabled(enabled, exe);
+            }
+            catch (Exception ex) { Log($"Auto-start registry write failed: {ex.Message}"); }
         }
     }
 

@@ -383,5 +383,23 @@ namespace WhisperInk
         // ── API Provider configuration ──────────────────────────────────
         public List<ApiProvider> Providers { get; set; } = new();
         public string ActiveProviderId { get; set; } = "mistral";
+
+        // ── UX / window behaviour ───────────────────────────────────────
+        // When true the main window's close triggers a full process
+        // exit; when false (default) it hides to the tray and WhisperInk
+        // keeps running in the background. Matches the typical Windows
+        // tray-app expectation.
+        public bool QuitOnClose { get; set; } = false;
+
+        // When true, an HKCU\...\Run entry is kept up to date so
+        // WhisperInk launches at Windows sign-in. Synced from the
+        // registry at startup so external toggles (Task Manager →
+        // Startup apps) stay coherent.
+        public bool LaunchAtStartup { get; set; } = false;
+
+        // Tracks whether the first-run onboarding banner/balloon has
+        // been shown once already. Flipped to true after the first
+        // successful load with a valid config present.
+        public bool HasSeenFirstRun { get; set; } = false;
     }
 }

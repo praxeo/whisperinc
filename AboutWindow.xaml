@@ -1,0 +1,55 @@
+<Window x:Class="WhisperInk.AboutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="About WhisperInk"
+        Width="460" Height="340"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False">
+    <Grid Background="#1A1A1A">
+        <StackPanel Margin="24" VerticalAlignment="Center">
+            <TextBlock Text="WhisperInk"
+                       Foreground="#FFFFFF"
+                       FontSize="24" FontWeight="Bold" Margin="0,0,0,8"/>
+            <TextBlock x:Name="lblTagline"
+                       Text="System-wide dictation for Windows"
+                       Foreground="#BBBBBB" FontSize="12" Margin="0,0,0,16"/>
+
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="150"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Version"      Foreground="#888" FontSize="12"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="lblVersion" Foreground="#EEE" FontSize="12"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Commit"       Foreground="#888" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="lblCommit"  Foreground="#EEE" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Built"        Foreground="#888" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="lblBuild"   Foreground="#EEE" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text=".NET runtime" Foreground="#888" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="lblRuntime" Foreground="#EEE" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="OS"           Foreground="#888" FontSize="12" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="4" Grid.Column="1" x:Name="lblOs"      Foreground="#EEE" FontSize="12" Margin="0,4,0,0"/>
+            </Grid>
+
+            <TextBlock Margin="0,20,0,0">
+                <Hyperlink x:Name="lnkReadme"
+                           Foreground="#66B3FF"
+                           Click="Readme_Click">
+                    View README on GitHub
+                </Hyperlink>
+            </TextBlock>
+
+            <Button Content="Close" Width="80" HorizontalAlignment="Right" Margin="0,24,0,0"
+                    Click="Close_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

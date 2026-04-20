@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="WhisperInk"
-        Height="38" Width="210"
+        Height="38" Width="220"
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
@@ -12,35 +12,68 @@
         MouseRightButtonUp="Window_MouseRightButtonUp"
         MouseLeftButtonDown="Window_MouseLeftButtonDown">
 
-    <Border x:Name="MainBorder" CornerRadius="8" Background="#CC1A1A1A"
-            BorderBrush="#404040" BorderThickness="2">
-        <Grid Margin="6,2">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
-            <Label x:Name="lblStatus" Grid.Column="0"
-                   Content="Ready" Foreground="#CCCCCC"
-                   FontSize="11" Padding="0"
-                   VerticalAlignment="Center"/>
-
-            <StackPanel x:Name="HistogramPanel" Grid.Column="1"
-                        Orientation="Horizontal"
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Center"
-                        Visibility="Collapsed" Margin="4,0,0,0">
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
-                <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+        <!-- First-run / setup banner. Collapsed by default; shown when
+             the active provider is missing something it needs. -->
+        <Border x:Name="SetupBanner" Grid.Row="0"
+                CornerRadius="8" Background="#CC5A2A0A"
+                BorderBrush="#B0702A" BorderThickness="2"
+                Margin="0,0,0,4" Padding="8,4"
+                Visibility="Collapsed"
+                MouseLeftButtonUp="SetupBanner_Click"
+                Cursor="Hand">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="⚠ " Foreground="#FFD080" FontSize="11" VerticalAlignment="Center"/>
+                <TextBlock x:Name="lblBanner"
+                           Text="Setup needed — click to fix"
+                           Foreground="#FFE8CC" FontSize="11"
+                           VerticalAlignment="Center"/>
             </StackPanel>
-        </Grid>
-    </Border>
+        </Border>
+
+        <Border x:Name="MainBorder" Grid.Row="1"
+                CornerRadius="8" Background="#CC1A1A1A"
+                BorderBrush="#404040" BorderThickness="2">
+            <Grid Margin="6,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock x:Name="lblHealthDot" Grid.Column="0"
+                           Text="🟡" FontSize="10"
+                           VerticalAlignment="Center"
+                           Margin="0,0,4,0"
+                           ToolTip="Provider health — yellow = unknown, green = ready, red = failed"/>
+
+                <Label x:Name="lblStatus" Grid.Column="1"
+                       Content="Ready" Foreground="#CCCCCC"
+                       FontSize="11" Padding="0"
+                       VerticalAlignment="Center"/>
+
+                <StackPanel x:Name="HistogramPanel" Grid.Column="2"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Visibility="Collapsed" Margin="4,0,0,0">
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                    <Border Width="3" Height="2" Background="#66FF66" Margin="1,0" CornerRadius="1"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
 </Window>
