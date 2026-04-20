@@ -144,11 +144,21 @@ namespace WhisperInk
 
         public static DateTime GetBuildDate()
         {
+            // Single-file publish zeroes out Assembly.Location, so read
+            // the exe's last-write time via AppContext / the process exe
+            // path instead.
             try
             {
-                string path = Assembly.GetExecutingAssembly().Location;
-                if (!string.IsNullOrEmpty(path) && File.Exists(path))
-                    return File.GetLastWriteTime(path);
+                string? exe = null;
+                try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName; } catch { }
+                if (string.IsNullOrEmpty(exe))
+                {
+                    string dir = AppContext.BaseDirectory;
+                    string candidate = Path.Combine(dir, "WhisperInk.exe");
+                    if (File.Exists(candidate)) exe = candidate;
+                }
+                if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
+                    return File.GetLastWriteTime(exe);
             }
             catch { }
             return DateTime.MinValue;
