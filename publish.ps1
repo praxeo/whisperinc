@@ -1,15 +1,19 @@
 # ===================================================================
-#      Publish WhisperInk as a single EXE (self-contained)
+#      Publish WhisperInk as a self-contained single EXE
 # ===================================================================
+# Produces a standalone build in $repoRoot\_publish\ that includes the
+# .NET 8 runtime and every dependency. Roughly 80 MB. Target machine
+# does not need the .NET 8 Desktop Runtime installed.
+# ===================================================================
+$ErrorActionPreference = "Stop"
 
 $ProjectName = "WhisperInk"
-
-$SolutionDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$ProjectFile = Join-Path $SolutionDir $ProjectName "$ProjectName.csproj"
-$PublishDir = Join-Path $SolutionDir "_publish"
+$repoRoot    = Split-Path -Parent $PSCommandPath
+$ProjectFile = Join-Path $repoRoot "$ProjectName.csproj"
+$PublishDir  = Join-Path $repoRoot "_publish"
 
 Write-Host "----------------------------------" -ForegroundColor Cyan
-Write-Host "Publishing: $ProjectName"
+Write-Host "Publishing (self-contained): $ProjectName"
 Write-Host "----------------------------------" -ForegroundColor Cyan
 Write-Host "Project: $ProjectFile"
 Write-Host "Output:  $PublishDir"
@@ -25,32 +29,23 @@ if (Test-Path $PublishDir) {
     Remove-Item -Recurse -Force $PublishDir
 }
 
-$Arguments = @(
-    "publish",
-    $ProjectFile,
-    "-c", "Release",
-    "-r", "win-x64",
-    "--self-contained", "true",
-    "-p:PublishSingleFile=true",
-    "-p:PublishTrimmed=false",
-    "-p:PublishReadyToRun=true",
-    "-o", $PublishDir
-)
+& dotnet publish $ProjectFile `
+    -c Release `
+    -r win-x64 `
+    --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:PublishTrimmed=false `
+    -p:PublishReadyToRun=true `
+    -o $PublishDir
 
-Write-Host "Running:" -ForegroundColor Green
-Write-Host "dotnet $Arguments"
-Write-Host ""
-
-& dotnet $Arguments
-
-if ($?) {
-    Write-Host "----------------------------------" -ForegroundColor Green
-    Write-Host "Publish succeeded!" -ForegroundColor Green
-    Write-Host "EXE location: $PublishDir"
-    Write-Host "----------------------------------" -ForegroundColor Green
-    Invoke-Item $PublishDir
-} else {
+if ($LASTEXITCODE -ne 0) {
     Write-Host "----------------------------------" -ForegroundColor Red
-    Write-Host "ERROR: Publish failed." -ForegroundColor Red
+    Write-Host "ERROR: Publish failed (exit $LASTEXITCODE)." -ForegroundColor Red
     Write-Host "----------------------------------" -ForegroundColor Red
+    exit $LASTEXITCODE
 }
+
+Write-Host "----------------------------------" -ForegroundColor Green
+Write-Host "Publish succeeded." -ForegroundColor Green
+Write-Host "EXE: $(Join-Path $PublishDir "$ProjectName.exe")"
+Write-Host "----------------------------------" -ForegroundColor Green

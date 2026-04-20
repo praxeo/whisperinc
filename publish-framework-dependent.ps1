@@ -1,12 +1,16 @@
 # ===================================================================
-#      Publish WhisperInk as a single EXE (framework-dependent)
+#      Publish WhisperInk as a framework-dependent single EXE
 # ===================================================================
+# Smaller than the self-contained build (~5 MB vs ~80 MB) but requires
+# the .NET 8 **Desktop** Runtime on the target machine (not just the
+# base runtime — WPF needs the Desktop variant).
+# ===================================================================
+$ErrorActionPreference = "Stop"
 
 $ProjectName = "WhisperInk"
-
-$SolutionDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$ProjectFile = Join-Path $SolutionDir $ProjectName "$ProjectName.csproj"
-$PublishDir = Join-Path $SolutionDir "_publish-fd"
+$repoRoot    = Split-Path -Parent $PSCommandPath
+$ProjectFile = Join-Path $repoRoot "$ProjectName.csproj"
+$PublishDir  = Join-Path $repoRoot "_publish-fd"
 
 Write-Host "----------------------------------" -ForegroundColor Cyan
 Write-Host "Publishing (framework-dependent): $ProjectName"
@@ -25,30 +29,21 @@ if (Test-Path $PublishDir) {
     Remove-Item -Recurse -Force $PublishDir
 }
 
-$Arguments = @(
-    "publish",
-    $ProjectFile,
-    "-c", "Release",
-    "-r", "win-x64",
-    "--self-contained", "false",
-    "-p:PublishSingleFile=true",
-    "-o", $PublishDir
-)
+& dotnet publish $ProjectFile `
+    -c Release `
+    -r win-x64 `
+    --self-contained false `
+    -p:PublishSingleFile=true `
+    -o $PublishDir
 
-Write-Host "Running:" -ForegroundColor Green
-Write-Host "dotnet $Arguments"
-Write-Host ""
-
-& dotnet $Arguments
-
-if ($?) {
-    Write-Host "----------------------------------" -ForegroundColor Green
-    Write-Host "Publish succeeded!" -ForegroundColor Green
-    Write-Host "EXE location: $PublishDir"
-    Write-Host "----------------------------------" -ForegroundColor Green
-    Invoke-Item $PublishDir
-} else {
+if ($LASTEXITCODE -ne 0) {
     Write-Host "----------------------------------" -ForegroundColor Red
-    Write-Host "ERROR: Publish failed." -ForegroundColor Red
+    Write-Host "ERROR: Publish failed (exit $LASTEXITCODE)." -ForegroundColor Red
     Write-Host "----------------------------------" -ForegroundColor Red
+    exit $LASTEXITCODE
 }
+
+Write-Host "----------------------------------" -ForegroundColor Green
+Write-Host "Publish succeeded." -ForegroundColor Green
+Write-Host "EXE: $(Join-Path $PublishDir "$ProjectName.exe")"
+Write-Host "----------------------------------" -ForegroundColor Green
