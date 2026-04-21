@@ -34,6 +34,7 @@ namespace WhisperInk
         private readonly int    _threads;
         private readonly string _displayName;
         private readonly string? _backendHint;
+        private readonly string? _gpuBackend;
 
         private readonly string _inferenceUrl;
         private readonly string _healthUrl;
@@ -48,10 +49,10 @@ namespace WhisperInk
             Timeout = TimeSpan.FromSeconds(120)
         };
 
-        public CrispAsrServerTranscriber(string modelGlob, int port, string displayName, int threads = 0, string? backendHint = null)
-            : this(ExePath, ResolveModel(modelGlob), port, displayName, threads, backendHint) { }
+        public CrispAsrServerTranscriber(string modelGlob, int port, string displayName, int threads = 0, string? backendHint = null, string? gpuBackend = null)
+            : this(ExePath, ResolveModel(modelGlob), port, displayName, threads, backendHint, gpuBackend) { }
 
-        public CrispAsrServerTranscriber(string exePath, string modelPath, int port, string displayName, int threads = 0, string? backendHint = null)
+        public CrispAsrServerTranscriber(string exePath, string modelPath, int port, string displayName, int threads = 0, string? backendHint = null, string? gpuBackend = null)
         {
             _exePath     = exePath;
             _modelPath   = modelPath;
@@ -59,9 +60,13 @@ namespace WhisperInk
             _threads     = threads <= 0 ? Math.Min(8, Environment.ProcessorCount) : threads;
             _displayName = displayName;
             _backendHint = backendHint;
+            _gpuBackend  = string.IsNullOrWhiteSpace(gpuBackend) ? null : gpuBackend.Trim().ToLowerInvariant();
             _inferenceUrl = $"http://{ServerHost}:{_port}/v1/audio/transcriptions";
             _healthUrl    = $"http://{ServerHost}:{_port}/health";
         }
+
+        /// <summary>The --gpu-backend value actually passed to crispasr, or null to let it auto-pick.</summary>
+        public string? GpuBackend => _gpuBackend;
 
         public string ExeFolder => ModelFolder;
         public string ModelPath => _modelPath;
@@ -180,6 +185,22 @@ namespace WhisperInk
                 {
                     psi.ArgumentList.Add("--backend");
                     psi.ArgumentList.Add(_backendHint);
+                }
+                if (!string.IsNullOrWhiteSpace(_gpuBackend))
+                {
+                    // Recognized values per v0.4.12: "auto" | "cuda" | "vulkan" | "metal" | "cpu".
+                    // Pass-through only; "auto" or null omits the flag (server default).
+                    if (_gpuBackend == "cpu")
+                    {
+                        // Force CPU by disabling GPU outright — more robust than --gpu-backend cpu
+                        // on some driver combinations.
+                        psi.ArgumentList.Add("-ng");
+                    }
+                    else if (_gpuBackend != "auto")
+                    {
+                        psi.ArgumentList.Add("--gpu-backend");
+                        psi.ArgumentList.Add(_gpuBackend);
+                    }
                 }
 
                 _serverProc = new Process { StartInfo = psi };

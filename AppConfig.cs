@@ -384,6 +384,15 @@ namespace WhisperInk
         public List<ApiProvider> Providers { get; set; } = new();
         public string ActiveProviderId { get; set; } = "mistral";
 
+        // ── Local GPU backend for CrispASR-based providers ──────────────
+        // Controls the --gpu-backend flag passed to crispasr.exe when spawning a
+        // local server for the Cohere Local Q4 / Q6_K / Parakeet providers.
+        // Valid values (case-insensitive): "auto", "vulkan", "cuda", "metal", "cpu".
+        // Default "auto" lets crispasr pick the best compiled backend.
+        // Set "cpu" to disable GPU entirely (uses -ng flag), or "vulkan" to force Vulkan.
+        // On the 5825U APU, Vulkan and CPU are within ~10% of each other on Q4_K server mode.
+        public string CrispGpuBackend { get; set; } = "auto";
+
         // ── UX / window behaviour ───────────────────────────────────────
         // When true the main window's close triggers a full process
         // exit; when false (default) it hides to the tray and WhisperInk

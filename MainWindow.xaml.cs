@@ -185,6 +185,7 @@ namespace WhisperInk
         private bool _launchAtStartup = false;
         private bool _hasSeenFirstRun = false;
         private bool _exiting = false;
+        private string _crispGpuBackend = "auto";
 
         private IntPtr _targetWindow = IntPtr.Zero;
 
@@ -459,6 +460,23 @@ namespace WhisperInk
         private bool IsLocalProvider =>
             IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider;
 
+        private static bool IsCrispLocalProviderId(string? id) =>
+            id is "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k";
+
+        // Clamp a user-supplied GPU backend string onto the set crispasr understands.
+        // Anything unrecognized collapses to "auto" so a typo in config.json can't
+        // crash the server-spawn path.
+        private static string NormalizeGpuBackend(string? raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return "auto";
+            var v = raw.Trim().ToLowerInvariant();
+            return v switch
+            {
+                "auto" or "cpu" or "vulkan" or "cuda" or "metal" => v,
+                _ => "auto"
+            };
+        }
+
         // ── Config ──────────────────────────────────────────────────────
 
         private void LoadConfig()
@@ -528,6 +546,8 @@ namespace WhisperInk
                     if (root.TryGetProperty("QuitOnClose", out var qoc))       _quitOnClose      = qoc.GetBoolean();
                     if (root.TryGetProperty("LaunchAtStartup", out var las))   _launchAtStartup  = las.GetBoolean();
                     if (root.TryGetProperty("HasSeenFirstRun", out var hsfr))  _hasSeenFirstRun  = hsfr.GetBoolean();
+                    if (root.TryGetProperty("CrispGpuBackend", out var cgb))
+                        _crispGpuBackend = cgb.GetString() ?? "auto";
 
                     if (_providers.Count == 0)
                     {
@@ -594,7 +614,8 @@ namespace WhisperInk
                     ActiveProviderId = _activeProviderId,
                     QuitOnClose     = _quitOnClose,
                     LaunchAtStartup = _launchAtStartup,
-                    HasSeenFirstRun = _hasSeenFirstRun
+                    HasSeenFirstRun = _hasSeenFirstRun,
+                    CrispGpuBackend = _crispGpuBackend
                 };
                 File.WriteAllText(ConfigFile, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
             }
@@ -1439,14 +1460,16 @@ namespace WhisperInk
                 {
                     var prov = GetActiveProvider();
                     int port = TryParsePortFromUrl(prov?.BaseUrl, 8104);
-                    if (_cohereQ4Server == null || _cohereQ4Server.Port != port)
+                    if (_cohereQ4Server == null || _cohereQ4Server.Port != port
+                        || !string.Equals(_cohereQ4Server.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
                     {
                         _cohereQ4Server?.Dispose();
                         _cohereQ4Server = new CrispAsrServerTranscriber(
                             modelGlob: "cohere-transcribe-q4_k.gguf",
                             port: port,
                             displayName: "Cohere Q4",
-                            backendHint: "cohere");
+                            backendHint: "cohere",
+                            gpuBackend: _crispGpuBackend);
                         if (!_cohereQ4Server.ModelFilesExist())
                         {
                             Log($"Cohere Q4: {_cohereQ4Server.DiagnoseMissing()}");
@@ -1490,14 +1513,16 @@ namespace WhisperInk
                 {
                     var prov = GetActiveProvider();
                     int port = TryParsePortFromUrl(prov?.BaseUrl, 8105);
-                    if (_cohereQ6kServer == null || _cohereQ6kServer.Port != port)
+                    if (_cohereQ6kServer == null || _cohereQ6kServer.Port != port
+                        || !string.Equals(_cohereQ6kServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
                     {
                         _cohereQ6kServer?.Dispose();
                         _cohereQ6kServer = new CrispAsrServerTranscriber(
                             modelGlob: "cohere-transcribe-q6_k.gguf",
                             port: port,
                             displayName: "Cohere Q6_K",
-                            backendHint: "cohere");
+                            backendHint: "cohere",
+                            gpuBackend: _crispGpuBackend);
                         if (!_cohereQ6kServer.ModelFilesExist())
                         {
                             Log($"Cohere Q6_K: {_cohereQ6kServer.DiagnoseMissing()}");
