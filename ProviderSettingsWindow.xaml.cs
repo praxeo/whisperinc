@@ -14,7 +14,15 @@ namespace WhisperInk
         /// <summary>On save, returns the edited provider list.</summary>
         public List<ApiProvider> ResultProviders { get; private set; } = new();
 
-        public ProviderSettingsWindow(List<ApiProvider> providers, string activeId)
+        /// <summary>The provider visible in the combo when Save was pressed.
+        /// MainWindow uses this as the new active provider.</summary>
+        public string? ResultActiveProviderId { get; private set; }
+
+        /// <summary>Normalized CrispASR GPU backend selected when Save was pressed.</summary>
+        public string ResultGpuBackend { get; private set; } = "auto";
+
+        public ProviderSettingsWindow(List<ApiProvider> providers, string activeId,
+            string currentGpuBackend, string detectedGpuSummary)
         {
             InitializeComponent();
 
@@ -26,6 +34,15 @@ namespace WhisperInk
             var active = _providers.FirstOrDefault(p => p.Id == activeId) ?? _providers.FirstOrDefault();
             if (active != null)
                 CmbProviders.SelectedItem = active;
+
+            // GPU backend combo — set the saved value, or fall back to Auto
+            string gpu = (currentGpuBackend ?? "auto").Trim().ToLowerInvariant();
+            var gpuItem = CmbGpuBackend.Items.Cast<ComboBoxItem>()
+                .FirstOrDefault(i => string.Equals(i.Tag?.ToString(), gpu, StringComparison.OrdinalIgnoreCase));
+            CmbGpuBackend.SelectedItem = gpuItem ?? CmbGpuBackend.Items[0];
+
+            if (!string.IsNullOrWhiteSpace(detectedGpuSummary))
+                GpuBackendStatusLabel.Text = detectedGpuSummary;
         }
 
         private void CmbProviders_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -48,7 +65,7 @@ namespace WhisperInk
             ChkSupportsTranscription.IsChecked = _current.SupportsTranscription;
             ChkSupportsRealtime.IsChecked = _current.SupportsRealtime;
             TxtTranscriptionTemperature.Text = _current.TranscriptionTemperature?.ToString() ?? "";
-            
+
             // Set language dropdown
             var langItem = CmbLanguage.Items.Cast<ComboBoxItem>()
                 .FirstOrDefault(item => item.Tag?.ToString() == _current.Language);
@@ -56,7 +73,7 @@ namespace WhisperInk
                 CmbLanguage.SelectedItem = langItem;
             else
                 CmbLanguage.SelectedIndex = 0;
-            
+
             // Set context bias mode dropdown
             var biasItem = CmbContextBiasMode.Items.Cast<ComboBoxItem>()
                 .FirstOrDefault(item => item.Tag?.ToString() == _current.ContextBiasMode);
@@ -83,16 +100,16 @@ namespace WhisperInk
             _current.PostProcessModel = TxtPostProcessModel.Text.Trim();
             _current.SupportsTranscription = ChkSupportsTranscription.IsChecked == true;
             _current.SupportsRealtime = ChkSupportsRealtime.IsChecked == true;
-            
+
             // Parse temperature
             if (double.TryParse(TxtTranscriptionTemperature.Text, out double temp))
                 _current.TranscriptionTemperature = temp;
             else
                 _current.TranscriptionTemperature = null;
-            
+
             // Get language from dropdown
             _current.Language = (CmbLanguage.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag?.ToString() ?? "en";
-            
+
             // Get context bias mode from dropdown
             _current.ContextBiasMode = CmbContextBiasMode.SelectedValue?.ToString() ?? "none";
 
@@ -171,6 +188,10 @@ namespace WhisperInk
             }
 
             ResultProviders = _providers;
+            // The provider currently shown in the combo is the one the user
+            // wants active. MainWindow re-applies this on close.
+            ResultActiveProviderId = (CmbProviders.SelectedItem as ApiProvider)?.Id ?? _current?.Id;
+            ResultGpuBackend = (CmbGpuBackend.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "auto";
             DialogResult = true;
             Close();
         }

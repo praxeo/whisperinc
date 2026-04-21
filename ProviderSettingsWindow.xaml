@@ -40,16 +40,23 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Provider selector -->
-        <DockPanel Grid.Row="0" Margin="0,0,0,10">
-            <Label DockPanel.Dock="Left" Content="Provider:" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="12"/>
-            <Button x:Name="BtnDelete" DockPanel.Dock="Right" Content="✕ Delete" Click="BtnDelete_Click"
-                    Background="#4A2020" Margin="4,0,0,0"/>
-            <Button x:Name="BtnAdd" DockPanel.Dock="Right" Content="+ Add" Click="BtnAdd_Click"/>
-            <ComboBox x:Name="CmbProviders" DisplayMemberPath="Name"
-                      Background="#2D2D2D" Foreground="#CCC" FontSize="12"
-                      SelectionChanged="CmbProviders_SelectionChanged"/>
-        </DockPanel>
+        <!-- Provider selector — the provider visible here becomes the
+             active provider when Save is pressed. -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <DockPanel>
+                <Label DockPanel.Dock="Left" Content="Active provider:" VerticalAlignment="Center" Margin="0,0,6,0" FontSize="12"/>
+                <Button x:Name="BtnDelete" DockPanel.Dock="Right" Content="✕ Delete" Click="BtnDelete_Click"
+                        Background="#4A2020" Margin="4,0,0,0"/>
+                <Button x:Name="BtnAdd" DockPanel.Dock="Right" Content="+ Add" Click="BtnAdd_Click"/>
+                <ComboBox x:Name="CmbProviders" DisplayMemberPath="Name"
+                          Background="#2D2D2D" Foreground="#CCC" FontSize="12"
+                          SelectionChanged="CmbProviders_SelectionChanged"
+                          ToolTip="The provider shown here is the one that will be used for the next dictation after you click Save."/>
+            </DockPanel>
+            <TextBlock x:Name="ActiveProviderHint"
+                       Foreground="#888" FontSize="10" Margin="0,2,0,0"
+                       Text="Saving the dialog applies this provider immediately — no restart needed."/>
+        </StackPanel>
 
         <!-- Provider fields -->
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
@@ -153,6 +160,27 @@
                                  FontFamily="Consolas"
                                  TextChanged="TxtScribeKeyterms_TextChanged"/>
                         <TextBlock x:Name="KeytermsCountLabel" Margin="0,4,0,0" Foreground="#666" FontSize="10"/>
+                    </StackPanel>
+                </GroupBox>
+
+                <Separator Background="#333" Margin="0,8,0,8"/>
+
+                <GroupBox Header="Advanced — Local GPU Backend" Margin="0,0,0,4"
+                          BorderBrush="#444" Foreground="#AAAAAA">
+                    <StackPanel Margin="4,4,4,4">
+                        <Label Content="Backend for Cohere Local Q4 / Q6_K providers"/>
+                        <ComboBox x:Name="CmbGpuBackend" Margin="0,0,0,4"
+                                  ToolTip="Controls how Cohere Local Q4 and Q6_K providers run. Auto lets crispasr choose; Vulkan uses the integrated GPU; CPU disables GPU entirely. Changes take effect on the next dictation — any running server is restarted.">
+                            <ComboBoxItem Content="Auto (recommended)" Tag="auto"/>
+                            <ComboBoxItem Content="Vulkan (GPU)" Tag="vulkan"/>
+                            <ComboBoxItem Content="CUDA (NVIDIA GPU)" Tag="cuda"/>
+                            <ComboBoxItem Content="CPU only" Tag="cpu"/>
+                            <ComboBoxItem x:Name="GpuBackendMetalItem" Content="Metal (macOS)" Tag="metal" IsEnabled="False"/>
+                        </ComboBox>
+                        <TextBlock x:Name="GpuBackendStatusLabel"
+                                   Margin="0,2,0,0" Foreground="#888" FontSize="10"
+                                   TextWrapping="Wrap"
+                                   Text="Detecting GPU…"/>
                     </StackPanel>
                 </GroupBox>
             </StackPanel>

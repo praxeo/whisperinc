@@ -47,6 +47,7 @@ namespace WhisperInk
         {
             items.Add(Item("Show Window", _ => _host.ShowMainWindow()));
             items.Add(ProviderLabel());
+            items.Add(GpuBackendSubMenu());
             items.Add(new System.Windows.Forms.ToolStripSeparator());
 
             items.Add(Item("Open debug log",    _ => OpenPath(_host.DebugLogPath)));
@@ -68,6 +69,32 @@ namespace WhisperInk
 
             items.Add(new System.Windows.Forms.ToolStripSeparator());
             items.Add(Item("Quit", _ => _host.QuitApplication()));
+        }
+
+        private System.Windows.Forms.ToolStripMenuItem GpuBackendSubMenu()
+        {
+            string current = _host.CrispGpuBackend;
+            var parent = new System.Windows.Forms.ToolStripMenuItem("Local GPU backend");
+            if (!string.IsNullOrWhiteSpace(_host.DetectedGpuSummary))
+                parent.ToolTipText = _host.DetectedGpuSummary;
+
+            (string label, string value)[] options =
+            {
+                ("Auto (recommended)", "auto"),
+                ("Vulkan (GPU)",       "vulkan"),
+                ("CUDA (NVIDIA GPU)",  "cuda"),
+                ("CPU only",           "cpu"),
+            };
+            foreach (var (label, value) in options)
+            {
+                string capture = value;
+                bool active = string.Equals(current, capture, StringComparison.OrdinalIgnoreCase);
+                string prefix = active ? "● " : "   ";
+                var mi = new System.Windows.Forms.ToolStripMenuItem(prefix + label);
+                mi.Click += (_, _) => _host.SetCrispGpuBackend(capture);
+                parent.DropDownItems.Add(mi);
+            }
+            return parent;
         }
 
         private System.Windows.Forms.ToolStripMenuItem ProviderLabel()
@@ -205,6 +232,9 @@ namespace WhisperInk
         bool QuitOnClose      { get; }
         bool LaunchAtStartup  { get; }
 
+        string CrispGpuBackend    { get; }
+        string DetectedGpuSummary { get; }
+
         void ShowMainWindow();
         void CopySupportBundle();
         void DiagnoseActiveProvider();
@@ -212,5 +242,6 @@ namespace WhisperInk
         void QuitApplication();
         void SetQuitOnClose(bool enabled);
         void SetLaunchAtStartup(bool enabled);
+        void SetCrispGpuBackend(string value);
     }
 }

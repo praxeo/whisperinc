@@ -404,8 +404,7 @@ namespace WhisperInk
 
         private void SwitchProvider(string providerId)
         {
-            _activeProviderId = providerId;
-            ApplyActiveProvider();
+            ApplyProviderSwitch(providerId);
             SaveConfig();
 
             if (IsRealtimeMode && !_activeSupportsRealtime)
@@ -415,7 +414,137 @@ namespace WhisperInk
             }
 
             UpdateStatusLabel();
+            UpdateLocalModelBanner();
             _healthProbe?.RequestProbe();
+        }
+
+        /// <summary>
+        /// Core of every active-provider transition — from tray menu, context
+        /// menu, or dialog close. Logs the change, flips the id, disposes any
+        /// local CrispASR server owned by the previous provider (so we don't
+        /// leak ~2 GB of resident model per switch), and re-derives the
+        /// cached per-provider state (_audioApiUrl, _activeApiKey, …).
+        /// Does not persist by itself — the caller owns SaveConfig().
+        /// </summary>
+        private void ApplyProviderSwitch(string newId)
+        {
+            string oldId = _activeProviderId;
+            if (string.Equals(oldId, newId, StringComparison.Ordinal))
+            {
+                // Same provider — still refresh derived state because cloud-side
+                // settings (URL, key) might have been edited in the dialog.
+                ApplyActiveProvider();
+                return;
+            }
+
+            _activeProviderId = newId;
+
+            // The outgoing provider's local server is no longer needed — dispose it
+            // so we don't keep ~2 GB of resident model for a provider we're not
+            // using. The incoming provider spawns its own server on first dictation.
+            DisposeCrispLocalServerFor(oldId);
+
+            ApplyActiveProvider();
+            Log($"Active provider changed: {oldId} -> {newId}");
+        }
+
+        private void DisposeCrispLocalServerFor(string? providerId)
+        {
+            switch (providerId)
+            {
+                case "parakeet-local":
+                    try { _parakeetServer?.Dispose(); } catch { }
+                    _parakeetServer = null;
+                    break;
+                case "cohere-local-q4":
+                    try { _cohereQ4Server?.Dispose(); } catch { }
+                    _cohereQ4Server = null;
+                    break;
+                case "cohere-local-q6k":
+                    try { _cohereQ6kServer?.Dispose(); } catch { }
+                    _cohereQ6kServer = null;
+                    break;
+            }
+        }
+
+        /// <summary>Applies a new CrispASR GPU backend. Disposes running
+        /// servers so the next dictation respawns with the new flag.</summary>
+        private void ApplyGpuBackendChange(string? raw)
+        {
+            string normalized = NormalizeGpuBackend(raw);
+            if (!string.Equals(_crispGpuBackend, normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                string old = _crispGpuBackend;
+                _crispGpuBackend = normalized;
+                DisposeCrispLocalServers();
+                Log($"Crisp GPU backend changed: {old} -> {normalized}");
+            }
+            else
+            {
+                _crispGpuBackend = normalized;
+            }
+        }
+
+        /// <summary>Dispose of any lazy-spawned CrispASR-based local servers so
+        /// the next dictation re-spawns them with the current settings.</summary>
+        private void DisposeCrispLocalServers()
+        {
+            try { _parakeetServer?.Dispose(); } catch { }
+            try { _cohereQ4Server?.Dispose(); } catch { }
+            try { _cohereQ6kServer?.Dispose(); } catch { }
+            _parakeetServer = null;
+            _cohereQ4Server = null;
+            _cohereQ6kServer = null;
+        }
+
+        /// <summary>If the active provider is a local GGUF one and its model
+        /// file is missing, surface a non-modal banner in the main window
+        /// telling the user exactly which file to drop into the model folder.
+        /// Otherwise, let the normal health-probe banner drive the UI.</summary>
+        private void UpdateLocalModelBanner()
+        {
+            try
+            {
+                string modelFolder = Path.Combine(ConfigFolder, "cohere-gguf");
+                string? missing = GetActiveProvider()?.Id switch
+                {
+                    "parakeet-local"   => MissingIfAbsent(modelFolder, "parakeet-*.gguf"),
+                    "cohere-local-q4"  => MissingIfAbsent(modelFolder, "cohere-transcribe-q4_k.gguf"),
+                    "cohere-local-q6k" => MissingIfAbsent(modelFolder, "cohere-transcribe-q6_k.gguf"),
+                    _                  => null
+                };
+
+                if (missing != null)
+                {
+                    lblBanner.Text = $"Model file missing: {missing} — drop it into {modelFolder}";
+                    SetupBanner.Visibility = Visibility.Visible;
+                    Height = 68;
+                }
+                else
+                {
+                    // Hand control back to the health probe's banner logic.
+                    UpdateSetupBannerVisibility();
+                }
+            }
+            catch (Exception ex) { Log($"Local banner update failed: {ex.Message}"); }
+        }
+
+        private static string? MissingIfAbsent(string folder, string pattern)
+        {
+            try
+            {
+                if (!Directory.Exists(folder)) return pattern;
+                // Literal name first (no glob) then the glob pattern.
+                if (!pattern.Contains('*'))
+                {
+                    string full = Path.Combine(folder, pattern);
+                    return File.Exists(full) ? null : pattern;
+                }
+                foreach (var _ in Directory.EnumerateFiles(folder, pattern))
+                    return null;
+                return pattern;
+            }
+            catch { return pattern; }
         }
 
         private void UpdateStatusLabel()
@@ -547,7 +676,13 @@ namespace WhisperInk
                     if (root.TryGetProperty("LaunchAtStartup", out var las))   _launchAtStartup  = las.GetBoolean();
                     if (root.TryGetProperty("HasSeenFirstRun", out var hsfr))  _hasSeenFirstRun  = hsfr.GetBoolean();
                     if (root.TryGetProperty("CrispGpuBackend", out var cgb))
-                        _crispGpuBackend = cgb.GetString() ?? "auto";
+                    {
+                        string raw = cgb.GetString() ?? "auto";
+                        string norm = NormalizeGpuBackend(raw);
+                        if (!string.Equals(raw.Trim(), norm, StringComparison.OrdinalIgnoreCase))
+                            Log($"Unknown CrispGpuBackend '{raw}' in config → normalized to '{norm}'.");
+                        _crispGpuBackend = norm;
+                    }
 
                     if (_providers.Count == 0)
                     {
@@ -1896,19 +2031,7 @@ namespace WhisperInk
             }
             providerMenu.Items.Add(new Separator());
             var configProvidersItem = new MenuItem { Header = "⚙ Configure Providers..." };
-            configProvidersItem.Click += (_, _) =>
-            {
-                var win = new ProviderSettingsWindow(_providers, _activeProviderId);
-                if (win.ShowDialog() == true)
-                {
-                    _providers = win.ResultProviders;
-                    if (!_providers.Any(p => p.Id == _activeProviderId))
-                        _activeProviderId = _providers.First().Id;
-                    ApplyActiveProvider();
-                    SaveConfig();
-                    UpdateStatusLabel();
-                }
-            };
+            configProvidersItem.Click += (_, _) => OpenProviderSettingsDialog();
             providerMenu.Items.Add(configProvidersItem);
             menu.Items.Add(providerMenu);
 
@@ -2037,6 +2160,16 @@ namespace WhisperInk
                 _healthProbe.Start();
             }
             catch (Exception ex) { Log($"Health probe init failed: {ex.Message}"); }
+
+            // One-shot GPU probe — runs crispasr.exe --help on a worker thread
+            // so the UI can show "Detected: AMD Radeon Graphics (Vulkan)" next
+            // to the backend combo. Failure is non-fatal.
+            try { _ = CrispGpuProbe.StartAsync(); }
+            catch (Exception ex) { Log($"GPU probe init failed: {ex.Message}"); }
+
+            // Surface any missing local-model banner at startup.
+            try { UpdateLocalModelBanner(); }
+            catch (Exception ex) { Log($"Banner init failed: {ex.Message}"); }
         }
 
         private void OnHealthReport(HealthReport r)
@@ -2046,7 +2179,10 @@ namespace WhisperInk
             {
                 UpdateHealthDot();
                 _tray?.NotifyHealth(r);
-                UpdateSetupBannerVisibility();
+                // UpdateLocalModelBanner takes priority — missing GGUF is the
+                // actionable failure, and it falls through to UpdateSetupBannerVisibility
+                // when nothing is missing.
+                UpdateLocalModelBanner();
             });
         }
 
@@ -2094,16 +2230,43 @@ namespace WhisperInk
             }
             else
             {
-                var win = new ProviderSettingsWindow(_providers, _activeProviderId);
-                if (win.ShowDialog() == true)
-                {
-                    _providers = win.ResultProviders;
-                    ApplyActiveProvider();
-                    SaveConfig();
-                    UpdateStatusLabel();
-                    _healthProbe?.RequestProbe();
-                }
+                OpenProviderSettingsDialog();
             }
+        }
+
+        /// <summary>Opens the provider settings dialog and applies whatever the
+        /// user chose when they save — provider list edits, the new active
+        /// provider, and the local-GPU backend toggle.</summary>
+        private void OpenProviderSettingsDialog()
+        {
+            var win = new ProviderSettingsWindow(
+                _providers, _activeProviderId, _crispGpuBackend, CrispGpuProbe.Summary);
+            if (win.ShowDialog() != true) return;
+
+            _providers = win.ResultProviders;
+
+            string? desiredActive = win.ResultActiveProviderId;
+            if (!string.IsNullOrWhiteSpace(desiredActive) &&
+                _providers.Any(p => p.Id == desiredActive))
+            {
+                ApplyProviderSwitch(desiredActive!);
+            }
+            else
+            {
+                // Active provider wasn't in the edited list (rare — deleted). Fall
+                // back to the first provider so we never end up with a dangling id.
+                if (!_providers.Any(p => p.Id == _activeProviderId))
+                    ApplyProviderSwitch(_providers.First().Id);
+                else
+                    ApplyActiveProvider();
+            }
+
+            ApplyGpuBackendChange(win.ResultGpuBackend);
+
+            SaveConfig();
+            UpdateStatusLabel();
+            UpdateLocalModelBanner();
+            _healthProbe?.RequestProbe();
         }
 
         private void RunFirstRunCheck()
@@ -2147,6 +2310,18 @@ namespace WhisperInk
         public HealthReport CurrentHealth => _lastHealth;
         public bool QuitOnClose          => _quitOnClose;
         public bool LaunchAtStartup      => _launchAtStartup;
+
+        public string CrispGpuBackend    => _crispGpuBackend;
+        public string DetectedGpuSummary => CrispGpuProbe.Summary;
+
+        public void SetCrispGpuBackend(string value)
+        {
+            Dispatcher.BeginInvoke(() =>
+            {
+                ApplyGpuBackendChange(value);
+                SaveConfig();
+            });
+        }
 
         public void ShowMainWindow()
         {
