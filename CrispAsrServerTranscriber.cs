@@ -85,7 +85,7 @@ namespace WhisperInk
             return "";
         }
 
-        public async Task<string?> TranscribeAsync(string filePath, string language = "en")
+        public async Task<string?> TranscribeAsync(string filePath, string language = "en", string? prompt = null)
         {
             if (_disposed) return null;
             if (!File.Exists(filePath)) return null;
@@ -97,7 +97,7 @@ namespace WhisperInk
 
                 using var fileStream = File.OpenRead(filePath);
                 var fileContent = new StreamContent(fileStream);
-                return await PostMultipartAsync(fileContent, language).ConfigureAwait(false);
+                return await PostMultipartAsync(fileContent, language, prompt).ConfigureAwait(false);
             }
             catch
             {
@@ -106,7 +106,7 @@ namespace WhisperInk
             }
         }
 
-        public async Task<string?> TranscribeAsync(byte[] wavBytes, string language = "en")
+        public async Task<string?> TranscribeAsync(byte[] wavBytes, string language = "en", string? prompt = null)
         {
             if (_disposed) return null;
             if (wavBytes == null || wavBytes.Length == 0) return null;
@@ -117,7 +117,7 @@ namespace WhisperInk
                     return null;
 
                 var fileContent = new ByteArrayContent(wavBytes);
-                return await PostMultipartAsync(fileContent, language).ConfigureAwait(false);
+                return await PostMultipartAsync(fileContent, language, prompt).ConfigureAwait(false);
             }
             catch
             {
@@ -126,7 +126,7 @@ namespace WhisperInk
             }
         }
 
-        private async Task<string?> PostMultipartAsync(HttpContent fileContent, string language)
+        private async Task<string?> PostMultipartAsync(HttpContent fileContent, string language, string? prompt = null)
         {
             using (fileContent)
             {
@@ -136,6 +136,8 @@ namespace WhisperInk
                 using var content = new MultipartFormDataContent();
                 if (!string.IsNullOrWhiteSpace(language))
                     content.Add(new StringContent(language), "language");
+                if (!string.IsNullOrWhiteSpace(prompt))
+                    content.Add(new StringContent(prompt), "prompt");
                 content.Add(new StringContent("json"), "response_format");
                 content.Add(fileContent, "file", "audio.wav");
 

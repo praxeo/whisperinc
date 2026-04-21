@@ -347,6 +347,29 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",
                 Language = "en"
+            },
+            new ApiProvider
+            {
+                // Mistral Voxtral-Mini-3B local via CrispASR server (batch mode).
+                // Voxtral is a speech-LLM: Whisper encoder + Mistral 3B LLM with
+                // audio-token injection, which means free-form prompt conditioning
+                // is native to the architecture — context bias terms flow via the
+                // OpenAI "prompt" field (whisper_prompt mode).
+                // Needs explicit --backend voxtral; auto-detect does not cover it.
+                // Place the GGUF in %APPDATA%\.WhisperInk\cohere-gguf\ —
+                // e.g. voxtral-mini-3b-2507-q4_k.gguf from cstr/voxtral-mini-3b-2507-GGUF.
+                Id = "voxtral-local",
+                Name = "Voxtral Local (CrispASR)",
+                BaseUrl = "http://localhost:8106",
+                TranscriptionEndpoint = "http://localhost:8106/v1/audio/transcriptions",
+                TranscriptionModel = "voxtral",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "whisper_prompt",
+                Language = "en"
             }
         };
     }

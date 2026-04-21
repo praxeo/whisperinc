@@ -198,6 +198,7 @@ namespace WhisperInk
         private CrispAsrServerTranscriber? _parakeetServer;
         private CrispAsrServerTranscriber? _cohereQ4Server;
         private CrispAsrServerTranscriber? _cohereQ6kServer;
+        private CrispAsrServerTranscriber? _voxtralServer;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -297,6 +298,7 @@ namespace WhisperInk
             try { _parakeetServer?.Dispose(); } catch { }
             try { _cohereQ4Server?.Dispose(); } catch { }
             try { _cohereQ6kServer?.Dispose(); } catch { }
+            try { _voxtralServer?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
         }
@@ -464,6 +466,10 @@ namespace WhisperInk
                     try { _cohereQ6kServer?.Dispose(); } catch { }
                     _cohereQ6kServer = null;
                     break;
+                case "voxtral-local":
+                    try { _voxtralServer?.Dispose(); } catch { }
+                    _voxtralServer = null;
+                    break;
             }
         }
 
@@ -492,9 +498,11 @@ namespace WhisperInk
             try { _parakeetServer?.Dispose(); } catch { }
             try { _cohereQ4Server?.Dispose(); } catch { }
             try { _cohereQ6kServer?.Dispose(); } catch { }
+            try { _voxtralServer?.Dispose(); } catch { }
             _parakeetServer = null;
             _cohereQ4Server = null;
             _cohereQ6kServer = null;
+            _voxtralServer = null;
         }
 
         /// <summary>If the active provider is a local GGUF one and its model
@@ -511,6 +519,7 @@ namespace WhisperInk
                     "parakeet-local"   => MissingIfAbsent(modelFolder, "parakeet-*.gguf"),
                     "cohere-local-q4"  => MissingIfAbsent(modelFolder, "cohere-transcribe-q4_k.gguf"),
                     "cohere-local-q6k" => MissingIfAbsent(modelFolder, "cohere-transcribe-q6_k.gguf"),
+                    "voxtral-local"    => MissingIfAbsent(modelFolder, "voxtral-mini-3b*.gguf"),
                     _                  => null
                 };
 
@@ -586,11 +595,14 @@ namespace WhisperInk
         private bool IsCohereLocalQ6kProvider =>
             GetActiveProvider()?.Id == "cohere-local-q6k";
 
+        private bool IsVoxtralLocalProvider =>
+            GetActiveProvider()?.Id == "voxtral-local";
+
         private bool IsLocalProvider =>
-            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider;
+            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider || IsVoxtralLocalProvider;
 
         private static bool IsCrispLocalProviderId(string? id) =>
-            id is "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k";
+            id is "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k" or "voxtral-local";
 
         // Clamp a user-supplied GPU backend string onto the set crispasr understands.
         // Anything unrecognized collapses to "auto" so a typo in config.json can't
@@ -1545,13 +1557,15 @@ namespace WhisperInk
                 {
                     var prov = GetActiveProvider();
                     int port = TryParsePortFromUrl(prov?.BaseUrl, 8103);
-                    if (_parakeetServer == null || _parakeetServer.Port != port)
+                    if (_parakeetServer == null || _parakeetServer.Port != port
+                        || !string.Equals(_parakeetServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
                     {
                         _parakeetServer?.Dispose();
                         _parakeetServer = new CrispAsrServerTranscriber(
                             modelGlob: "parakeet-*.gguf",
                             port: port,
-                            displayName: "Parakeet");
+                            displayName: "Parakeet",
+                            gpuBackend: _crispGpuBackend);
                         if (!_parakeetServer.ModelFilesExist())
                         {
                             Log($"Parakeet: {_parakeetServer.DiagnoseMissing()}");
@@ -1690,6 +1704,70 @@ namespace WhisperInk
                 catch (Exception ex)
                 {
                     Log($"Cohere Q6_K error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Voxtral Local (CrispASR server, auto-spawned) ────────────
+            // Mistral Voxtral-Mini-3B speech-LLM. Backend hint required because
+            // CrispASR's auto-detect doesn't cover voxtral GGUFs. Context bias
+            // terms ride the OpenAI `prompt` field — voxtral is a true LLM so
+            // the prompt is interpreted as conditioning context rather than as
+            // a Whisper-style decoder seed.
+            if (IsVoxtralLocalProvider)
+            {
+                try
+                {
+                    var prov = GetActiveProvider();
+                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8106);
+                    if (_voxtralServer == null || _voxtralServer.Port != port
+                        || !string.Equals(_voxtralServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
+                    {
+                        _voxtralServer?.Dispose();
+                        _voxtralServer = new CrispAsrServerTranscriber(
+                            modelGlob: "voxtral-mini-3b*.gguf",
+                            port: port,
+                            displayName: "Voxtral",
+                            backendHint: "voxtral",
+                            gpuBackend: _crispGpuBackend);
+                        if (!_voxtralServer.ModelFilesExist())
+                        {
+                            Log($"Voxtral: {_voxtralServer.DiagnoseMissing()}");
+                            return null;
+                        }
+                    }
+
+                    string language = prov?.Language ?? "en";
+                    string? prompt = (prov?.ContextBiasMode == "whisper_prompt" && _contextBiasTerms.Count > 0)
+                        ? string.Join(", ", _contextBiasTerms)
+                        : null;
+                    if (!string.IsNullOrEmpty(prompt))
+                        Log($"[bias] sending {_contextBiasTerms.Count} terms as prompt to Voxtral: {prompt}");
+
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _voxtralServer.TranscribeAsync(_lastWavBytes, language, prompt);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _voxtralServer.TranscribeAsync(filePath, language, prompt);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Voxtral (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Voxtral error: {ex.Message}");
                     return null;
                 }
             }
@@ -2216,7 +2294,8 @@ namespace WhisperInk
                                or "cohere-gguf-cuda-server-q8"
                                or "parakeet-local"
                                or "cohere-local-q4"
-                               or "cohere-local-q6k";
+                               or "cohere-local-q6k"
+                               or "voxtral-local";
 
             if (isLocal)
             {

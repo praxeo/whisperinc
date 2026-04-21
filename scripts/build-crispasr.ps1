@@ -28,7 +28,24 @@ if (-not (Test-Path $srcRoot)) {
 }
 
 Push-Location $srcRoot
-cmake -B build -G "Visual Studio 17 2022" -A x64 -DGGML_CUDA=OFF -DWHISPER_BUILD_TESTS=OFF
+# GGML_VULKAN=ON gives the iGPU/dGPU offload path for Cohere/Voxtral/etc.
+# Requires LunarG Vulkan SDK installed (VULKAN_SDK env var); winget package
+# is "KhronosGroup.VulkanSDK". Without it, cmake's find_package(Vulkan) fails
+# and the configure step errors before anything builds.
+#
+# CUDA is auto-enabled if a CUDA Toolkit 12.x install is detected (nvcc on
+# PATH or CUDA_PATH env var). Off otherwise. This lets the same script
+# produce a CPU+Vulkan build on a laptop without CUDA, and a CPU+Vulkan+CUDA
+# build on a workstation with an NVIDIA GPU.
+$cudaFlag = "OFF"
+$nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+if ($nvcc -or $env:CUDA_PATH) {
+    $cudaFlag = "ON"
+    Write-Host "CUDA Toolkit detected — enabling -DGGML_CUDA=ON" -ForegroundColor Cyan
+} else {
+    Write-Host "CUDA Toolkit not detected — building without CUDA" -ForegroundColor Yellow
+}
+cmake -B build -G "Visual Studio 17 2022" -A x64 "-DGGML_CUDA=$cudaFlag" -DGGML_VULKAN=ON -DWHISPER_BUILD_TESTS=OFF
 cmake --build build --config Release --target whisper-cli
 Pop-Location
 

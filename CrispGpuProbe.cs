@@ -1,9 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace WhisperInk
@@ -53,67 +51,104 @@ namespace WhisperInk
 
         private static string ProbeSync()
         {
-            if (!File.Exists(ExePath))
-                return "crispasr.exe missing — GPU detection unavailable.";
+            // Preferred path: ask the Vulkan loader directly. vulkaninfo ships with
+            // the Vulkan SDK and with most modern GPU drivers, and unlike parsing
+            // `crispasr --help` it actually enumerates installed Vulkan devices —
+            // the --help output never triggers ggml init banners (no model loads).
+            var vk = TryVulkanInfo();
+            if (vk != null) return vk;
 
-            var psi = new ProcessStartInfo
-            {
-                FileName               = ExePath,
-                WorkingDirectory       = ModelFolder,
-                UseShellExecute        = false,
-                CreateNoWindow         = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-            };
-            psi.ArgumentList.Add("--help");
+            // Fallback: try CUDA via nvidia-smi for boxes without vulkaninfo.
+            var cuda = TryNvidiaSmi();
+            if (cuda != null) return cuda;
 
-            var stderr = new StringBuilder();
-            var stdout = new StringBuilder();
-
-            using var p = new Process { StartInfo = psi };
-            p.OutputDataReceived += (_, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
-            p.ErrorDataReceived  += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
-
-            if (!p.Start()) return "GPU probe: could not start crispasr.exe";
-            p.BeginOutputReadLine();
-            p.BeginErrorReadLine();
-
-            // --help should exit fast; cap at 8s to be safe.
-            if (!p.WaitForExit(8000))
-            {
-                try { p.Kill(entireProcessTree: true); } catch { }
-                return "GPU probe timed out.";
-            }
-            // Drain async buffers.
-            p.WaitForExit();
-
-            return Summarize(stderr.ToString() + "\n" + stdout.ToString());
+            // Last resort: surface a useful hint instead of a definitive "no GPU"
+            // claim, because the actual --gpu-backend flag is still honored by
+            // crispasr at server-spawn time even when this probe can't see anything.
+            return "GPU probe inconclusive — try Vulkan/CUDA anyway; crispasr will fall back to CPU if unavailable.";
         }
 
-        private static string Summarize(string blob)
+        private static string? TryVulkanInfo()
         {
-            // crispasr / ggml print lines like:
-            //   ggml_vulkan: Found 1 Vulkan devices:
-            //   ggml_vulkan: 0 = AMD Radeon(TM) Graphics (AMD proprietary driver) ...
-            //   ggml_cuda_init: found 1 CUDA devices:
-            //   Device 0: NVIDIA GeForce RTX 4090 ...
-            var devices = new System.Collections.Generic.List<string>();
-
-            foreach (Match m in Regex.Matches(blob, @"ggml_vulkan:\s*\d+\s*=\s*([^\r\n|]+?)(?:\s*\||$)", RegexOptions.IgnoreCase))
+            try
             {
-                var name = m.Groups[1].Value.Trim();
-                if (!string.IsNullOrEmpty(name)) devices.Add(name + " (Vulkan)");
+                var psi = new ProcessStartInfo
+                {
+                    FileName               = "vulkaninfo",
+                    UseShellExecute        = false,
+                    CreateNoWindow         = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError  = true,
+                };
+                psi.ArgumentList.Add("--summary");
+
+                using var p = new Process { StartInfo = psi };
+                if (!p.Start()) return null;
+
+                string stdout = p.StandardOutput.ReadToEnd();
+                string stderr = p.StandardError.ReadToEnd();
+                if (!p.WaitForExit(5000))
+                {
+                    try { p.Kill(entireProcessTree: true); } catch { }
+                    return null;
+                }
+
+                var devices = new System.Collections.Generic.List<string>();
+                foreach (Match m in Regex.Matches(stdout + "\n" + stderr,
+                             @"deviceName\s*=\s*([^\r\n]+)", RegexOptions.IgnoreCase))
+                {
+                    var name = m.Groups[1].Value.Trim();
+                    if (!string.IsNullOrEmpty(name)) devices.Add(name + " (Vulkan)");
+                }
+
+                if (devices.Count == 0) return null;
+                return "Detected: " + string.Join(", ", devices);
             }
-            foreach (Match m in Regex.Matches(blob, @"Device\s+\d+:\s*([^,\r\n]+)", RegexOptions.IgnoreCase))
+            catch
             {
-                var name = m.Groups[1].Value.Trim();
-                if (!string.IsNullOrEmpty(name)) devices.Add(name + " (CUDA)");
+                return null;
             }
-
-            if (devices.Count == 0)
-                return "No GPU detected — CPU will be used regardless of backend setting.";
-
-            return "Detected: " + string.Join(", ", devices);
         }
+
+        private static string? TryNvidiaSmi()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName               = "nvidia-smi",
+                    UseShellExecute        = false,
+                    CreateNoWindow         = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError  = true,
+                };
+                psi.ArgumentList.Add("--query-gpu=name");
+                psi.ArgumentList.Add("--format=csv,noheader");
+
+                using var p = new Process { StartInfo = psi };
+                if (!p.Start()) return null;
+
+                string stdout = p.StandardOutput.ReadToEnd();
+                if (!p.WaitForExit(3000))
+                {
+                    try { p.Kill(entireProcessTree: true); } catch { }
+                    return null;
+                }
+
+                var devices = new System.Collections.Generic.List<string>();
+                foreach (var line in stdout.Split('\n'))
+                {
+                    var name = line.Trim();
+                    if (!string.IsNullOrEmpty(name)) devices.Add(name + " (CUDA)");
+                }
+                if (devices.Count == 0) return null;
+                return "Detected: " + string.Join(", ", devices);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
     }
 }

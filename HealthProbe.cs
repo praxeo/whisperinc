@@ -115,6 +115,9 @@ namespace WhisperInk
                 case "cohere-local-q6k":
                     return await ProbeLocalServerAsync("cohere-transcribe-q6_k.gguf", prov.BaseUrl, 8105).ConfigureAwait(false);
 
+                case "voxtral-local":
+                    return await ProbeLocalServerAsync("voxtral-mini-3b*.gguf", prov.BaseUrl, 8106).ConfigureAwait(false);
+
                 case "qwen3-asr":
                 case "local":
                     return await ProbeHttpHealthAsync(prov.BaseUrl).ConfigureAwait(false);

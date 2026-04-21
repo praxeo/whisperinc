@@ -56,6 +56,10 @@ namespace WhisperInk
                     await AppendLocalGgufCheckAsync(sb, prov, modelGlob: "cohere-transcribe-q6_k.gguf");
                     break;
 
+                case "voxtral-local":
+                    await AppendLocalGgufCheckAsync(sb, prov, modelGlob: "voxtral-mini-3b*.gguf");
+                    break;
+
                 case "qwen3-asr":
                 case "local":
                     sb.AppendLine($"  Base URL:                        {prov.BaseUrl}");
