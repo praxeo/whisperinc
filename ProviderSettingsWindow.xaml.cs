@@ -110,8 +110,10 @@ namespace WhisperInk
             // Get language from dropdown
             _current.Language = (CmbLanguage.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag?.ToString() ?? "en";
 
-            // Get context bias mode from dropdown
-            _current.ContextBiasMode = CmbContextBiasMode.SelectedValue?.ToString() ?? "none";
+            // Get context bias mode from dropdown. ComboBox has no SelectedValuePath set,
+            // so SelectedValue returns the entire ComboBoxItem; read its Tag explicitly to
+            // get the canonical value ("none" / "whisper_prompt" / "cohere_terms").
+            _current.ContextBiasMode = (CmbContextBiasMode.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "none";
 
             _current.ScribeKeytermsRaw = TxtScribeKeyterms.Text;
         }
