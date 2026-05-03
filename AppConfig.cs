@@ -370,6 +370,27 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 ContextBiasMode = "whisper_prompt",
                 Language = "en"
+            },
+            new ApiProvider
+            {
+                // IBM Granite Speech 4.1 2B local via CrispASR server.
+                // Granite Speech is a speech-LLM (Granite 3B LLM + audio encoder
+                // + projector). Like Voxtral, prompt-style conditioning is native;
+                // ContextBiasMode = whisper_prompt sends bias terms via the OpenAI
+                // `prompt` field. Backend hint matches granite_speech.dll.
+                // Place granite-speech-*.gguf in %APPDATA%\.WhisperInk\cohere-gguf\.
+                Id = "granite-local",
+                Name = "Granite Speech 4.1 Local (CrispASR)",
+                BaseUrl = "http://localhost:8107",
+                TranscriptionEndpoint = "http://localhost:8107/v1/audio/transcriptions",
+                TranscriptionModel = "granite",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "whisper_prompt",
+                Language = "en"
             }
         };
     }

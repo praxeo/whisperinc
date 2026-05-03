@@ -199,6 +199,7 @@ namespace WhisperInk
         private CrispAsrServerTranscriber? _cohereQ4Server;
         private CrispAsrServerTranscriber? _cohereQ6kServer;
         private CrispAsrServerTranscriber? _voxtralServer;
+        private CrispAsrServerTranscriber? _graniteServer;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -299,6 +300,7 @@ namespace WhisperInk
             try { _cohereQ4Server?.Dispose(); } catch { }
             try { _cohereQ6kServer?.Dispose(); } catch { }
             try { _voxtralServer?.Dispose(); } catch { }
+            try { _graniteServer?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
         }
@@ -470,6 +472,10 @@ namespace WhisperInk
                     try { _voxtralServer?.Dispose(); } catch { }
                     _voxtralServer = null;
                     break;
+                case "granite-local":
+                    try { _graniteServer?.Dispose(); } catch { }
+                    _graniteServer = null;
+                    break;
             }
         }
 
@@ -499,10 +505,12 @@ namespace WhisperInk
             try { _cohereQ4Server?.Dispose(); } catch { }
             try { _cohereQ6kServer?.Dispose(); } catch { }
             try { _voxtralServer?.Dispose(); } catch { }
+            try { _graniteServer?.Dispose(); } catch { }
             _parakeetServer = null;
             _cohereQ4Server = null;
             _cohereQ6kServer = null;
             _voxtralServer = null;
+            _graniteServer = null;
         }
 
         /// <summary>If the active provider is a local GGUF one and its model
@@ -520,6 +528,7 @@ namespace WhisperInk
                     "cohere-local-q4"  => MissingIfAbsent(modelFolder, "cohere-transcribe-q4_k.gguf"),
                     "cohere-local-q6k" => MissingIfAbsent(modelFolder, "cohere-transcribe-q6_k.gguf"),
                     "voxtral-local"    => MissingIfAbsent(modelFolder, "voxtral-mini-3b*.gguf"),
+                    "granite-local"    => MissingIfAbsent(modelFolder, "granite-speech-*.gguf"),
                     _                  => null
                 };
 
@@ -598,11 +607,14 @@ namespace WhisperInk
         private bool IsVoxtralLocalProvider =>
             GetActiveProvider()?.Id == "voxtral-local";
 
+        private bool IsGraniteLocalProvider =>
+            GetActiveProvider()?.Id == "granite-local";
+
         private bool IsLocalProvider =>
-            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider || IsVoxtralLocalProvider;
+            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider || IsVoxtralLocalProvider || IsGraniteLocalProvider;
 
         private static bool IsCrispLocalProviderId(string? id) =>
-            id is "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k" or "voxtral-local";
+            id is "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k" or "voxtral-local" or "granite-local";
 
         // Clamp a user-supplied GPU backend string onto the set crispasr understands.
         // Anything unrecognized collapses to "auto" so a typo in config.json can't
@@ -1772,6 +1784,67 @@ namespace WhisperInk
                 }
             }
 
+            // ── Granite Speech Local (CrispASR server, auto-spawned) ─────
+            // IBM Granite Speech 4.1 2B speech-LLM. Same shape as Voxtral:
+            // explicit backend hint + prompt-style context bias.
+            if (IsGraniteLocalProvider)
+            {
+                try
+                {
+                    var prov = GetActiveProvider();
+                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8107);
+                    if (_graniteServer == null || _graniteServer.Port != port
+                        || !string.Equals(_graniteServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
+                    {
+                        _graniteServer?.Dispose();
+                        _graniteServer = new CrispAsrServerTranscriber(
+                            modelGlob: "granite-speech-*.gguf",
+                            port: port,
+                            displayName: "Granite",
+                            backendHint: "granite",
+                            gpuBackend: _crispGpuBackend);
+                        if (!_graniteServer.ModelFilesExist())
+                        {
+                            Log($"Granite: {_graniteServer.DiagnoseMissing()}");
+                            return null;
+                        }
+                    }
+
+                    string language = prov?.Language ?? "en";
+                    string? prompt = (prov?.ContextBiasMode == "whisper_prompt" && _contextBiasTerms.Count > 0)
+                        ? string.Join(", ", _contextBiasTerms)
+                        : null;
+                    if (!string.IsNullOrEmpty(prompt))
+                        Log($"[bias] sending {_contextBiasTerms.Count} terms as prompt to Granite: {prompt}");
+
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _graniteServer.TranscribeAsync(_lastWavBytes, language, prompt);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        result  = await _graniteServer.TranscribeAsync(filePath, language, prompt);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Granite (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Granite error: {ex.Message}");
+                    return null;
+                }
+            }
+
             // ── HTTP providers ────────────────────────────────────────
             var activeProvider = GetActiveProvider();
 
@@ -2295,7 +2368,8 @@ namespace WhisperInk
                                or "parakeet-local"
                                or "cohere-local-q4"
                                or "cohere-local-q6k"
-                               or "voxtral-local";
+                               or "voxtral-local"
+                               or "granite-local";
 
             if (isLocal)
             {
