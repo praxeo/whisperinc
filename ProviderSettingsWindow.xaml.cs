@@ -221,7 +221,9 @@ namespace WhisperInk
             TranscriptionTemperature = src.TranscriptionTemperature,
             Language = src.Language,
             ContextBiasMode = src.ContextBiasMode,
-            ScribeKeytermsRaw = src.ScribeKeytermsRaw
+            ScribeKeytermsRaw = src.ScribeKeytermsRaw,
+            TagAudioEvents = src.TagAudioEvents,
+            NoVerbatim = src.NoVerbatim
         };
     }
 }

@@ -691,6 +691,10 @@ namespace WhisperInk
                                 p.Language = lang.GetString() ?? "en";
                             if (pEl.TryGetProperty("ScribeKeytermsRaw", out var skr))
                                 p.ScribeKeytermsRaw = skr.GetString() ?? "";
+                            if (pEl.TryGetProperty("TagAudioEvents", out var tae) && tae.ValueKind != JsonValueKind.Null)
+                                p.TagAudioEvents = tae.GetBoolean();
+                            if (pEl.TryGetProperty("NoVerbatim", out var nv) && nv.ValueKind != JsonValueKind.Null)
+                                p.NoVerbatim = nv.GetBoolean();
                             _providers.Add(p);
                         }
                     }
@@ -1908,6 +1912,18 @@ namespace WhisperInk
                         // JSON fallback (uncomment if repeated fields return 422):
                         // content.Add(new StringContent(JsonSerializer.Serialize(keyterms)), "keyterms");
                     }
+                }
+
+                // ElevenLabs Scribe v2 — tag_audio_events / no_verbatim.
+                // Same xi-api-key guard as keyterms: only sent for ElevenLabs.
+                // Both are emitted unconditionally because the API defaults
+                // (tag_audio_events=true, no_verbatim=false) are wrong for
+                // clinical dictation; we want our config values to win.
+                if (!string.IsNullOrWhiteSpace(activeProvider?.AuthHeaderName))
+                {
+                    content.Add(new StringContent(activeProvider.TagAudioEvents ? "true" : "false"), "tag_audio_events");
+                    content.Add(new StringContent(activeProvider.NoVerbatim ? "true" : "false"), "no_verbatim");
+                    Log($"[scribe] tag_audio_events={activeProvider.TagAudioEvents} no_verbatim={activeProvider.NoVerbatim}");
                 }
 
                 content.Add(fileContent, "file", "audio.wav");

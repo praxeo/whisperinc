@@ -78,6 +78,21 @@ namespace WhisperInk
         // ~20% cost surcharge per ElevenLabs pricing.
         public string ScribeKeytermsRaw { get; set; } = "";
 
+        // ── ElevenLabs Scribe v2 audio event tagging ─────────────────────
+        // When true, transcript includes (laughter), (coughing), etc.
+        // Default false → clean clinical dictation output. API default is true,
+        // so we MUST send this field explicitly to suppress events.
+        // Only sent when this provider uses xi-api-key auth (ElevenLabs).
+        public bool TagAudioEvents { get; set; } = false;
+
+        // ── ElevenLabs Scribe v2 no_verbatim ─────────────────────────────
+        // When true, strips filler words ("um", "uh"), false starts, and
+        // non-speech sounds from the transcript. Default true → clean
+        // dictation. CAVEAT: may also strip meaningful hesitations if
+        // transcribing patient interviews — flip to false for those.
+        // Scribe v2 only. Only sent for xi-api-key auth (ElevenLabs).
+        public bool NoVerbatim { get; set; } = true;
+
         public List<string> GetValidatedKeyterms(out List<string> warnings)
         {
             warnings = new List<string>();
@@ -165,7 +180,11 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                // Clinical-dictation defaults: suppress (laughter)/(coughing)
+                // tags and strip um/uh fillers from output.
+                TagAudioEvents = false,
+                NoVerbatim = true
             },
             new ApiProvider
             {
