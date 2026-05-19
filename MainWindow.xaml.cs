@@ -189,7 +189,18 @@ namespace WhisperInk
 
         private IntPtr _targetWindow = IntPtr.Zero;
 
-        private readonly HttpClient _httpClient = new();
+        // Saved clipboard contents from before the most recent paste, restored
+        // asynchronously after SimulateCtrlV() so dictation doesn't clobber what
+        // the user had copied. If a new paste arrives during the restore window,
+        // we cancel and reuse the pending data — that way rapid-fire dictation
+        // still ends with the *original* clipboard, not the previous transcript.
+        private IDataObject? _pendingRestoreData;
+        private CancellationTokenSource? _pendingRestoreCts;
+
+        // Bounded timeout so a stalled SendAsync surfaces as TaskCanceledException
+        // (caught + logged by the global handler) instead of pretending to work.
+        // Successful ElevenLabs calls have measured at 300–870 ms in normal use.
+        private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
         private CohereOnnxTranscriber? _cohereOnnx;
         private CohereGgufTranscriber? _cohereGguf;
         private CohereGgufServerTranscriber? _cohereGgufServer;
@@ -953,7 +964,7 @@ namespace WhisperInk
             }
             catch (Exception ex)
             {
-                Log($"Realtime start error: {ex.Message}");
+                Log($"[diag] StartRealtimeStreaming: ERROR {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 ForceCleanupRealtime($"Error: {ex.Message}");
             }
         }
@@ -975,7 +986,7 @@ namespace WhisperInk
                 await SendTextMessageSafe(msg, cts.Token);
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex) { Log($"Audio send error: {ex.Message}"); }
+            catch (Exception ex) { Log($"[diag] OnAudioDataAvailable: ERROR {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"); }
         }
 
         private async Task ReceiveTranscriptionLoop(ClientWebSocket ws, CancellationToken ct)
@@ -1074,53 +1085,63 @@ namespace WhisperInk
         {
             if (!_isRecording || _isStopping) return;
             _isStopping = true;
-
-            PlayUiSound(SoundType.Stop);
-
-            try { _waveIn?.StopRecording(); } catch { }
-            try { _waveIn?.Dispose(); } catch { }
-            _waveIn = null;
+            Log("[diag] StopRealtimeStreaming: enter");
 
             try
             {
-                if (_realtimeWs?.State == WebSocketState.Open && _realtimeCts != null && !_realtimeCts.IsCancellationRequested)
+                PlayUiSound(SoundType.Stop);
+
+                try { _waveIn?.StopRecording(); } catch { }
+                try { _waveIn?.Dispose(); } catch { }
+                _waveIn = null;
+
+                try
                 {
-                    var commit = JsonSerializer.Serialize(new { type = "input_audio_buffer.commit" });
-                    await SendTextMessageSafe(commit, _realtimeCts.Token);
-                    await Task.Delay(500);
+                    if (_realtimeWs?.State == WebSocketState.Open && _realtimeCts != null && !_realtimeCts.IsCancellationRequested)
+                    {
+                        var commit = JsonSerializer.Serialize(new { type = "input_audio_buffer.commit" });
+                        await SendTextMessageSafe(commit, _realtimeCts.Token);
+                        await Task.Delay(500);
+                    }
                 }
-            }
-            catch { }
-
-            _isRecording = false;
-
-            if (_realtimeWs != null && _realtimeWs.State == WebSocketState.Open)
-            {
-                try { await _realtimeWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "Finished", CancellationToken.None); }
                 catch { }
+
+                _isRecording = false;
+
+                if (_realtimeWs != null && _realtimeWs.State == WebSocketState.Open)
+                {
+                    try { await _realtimeWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "Finished", CancellationToken.None); }
+                    catch { }
+                }
+
+                try { _realtimeCts?.Cancel(); } catch { }
+                try { _realtimeWs?.Dispose(); } catch { }
+                _realtimeWs = null;
+
+                if (_receiveTask != null)
+                {
+                    try { await Task.WhenAny(_receiveTask, Task.Delay(1000)); } catch { }
+                    _receiveTask = null;
+                }
+
+                if (!string.IsNullOrWhiteSpace(_accumulatedTranscript))
+                {
+                    HistoryService.Add(_accumulatedTranscript.Trim());
+                    PlayUiSound(SoundType.Success);
+                }
+
+                ReleaseAllModifierKeys();
+
+                _isStopping = false;
+                ResetUi();
+                UpdateStatusLabel();
+                Log("[diag] StopRealtimeStreaming: exit");
             }
-
-            try { _realtimeCts?.Cancel(); } catch { }
-            try { _realtimeWs?.Dispose(); } catch { }
-            _realtimeWs = null;
-
-            if (_receiveTask != null)
+            catch (Exception ex)
             {
-                try { await Task.WhenAny(_receiveTask, Task.Delay(1000)); } catch { }
-                _receiveTask = null;
+                Log($"[diag] StopRealtimeStreaming: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                throw;
             }
-
-            if (!string.IsNullOrWhiteSpace(_accumulatedTranscript))
-            {
-                HistoryService.Add(_accumulatedTranscript.Trim());
-                PlayUiSound(SoundType.Success);
-            }
-
-            ReleaseAllModifierKeys();
-
-            _isStopping = false;
-            ResetUi();
-            UpdateStatusLabel();
         }
 
         private void ForceCleanupRealtime(string statusMessage)
@@ -1202,70 +1223,85 @@ namespace WhisperInk
         {
             if (!_isRecording) return;
             _isRecording = false;
-
-            // ── Pipeline timing instrumentation ──
-            var swBatch = System.Diagnostics.Stopwatch.StartNew();
-            long tPlaySound, tWaveStop, tFlush, tTranscribe, tPostProc, tPaste;
-
-            PlayUiSound(SoundType.Stop);
-            tPlaySound = swBatch.ElapsedMilliseconds;
-
-            try { _waveIn?.StopRecording(); } catch { }
-            try { _waveIn?.Dispose(); } catch { }
-            _waveIn = null;
-            tWaveStop = swBatch.ElapsedMilliseconds;
-
-            // Flush both writers and capture in-memory bytes.
-            try { _writer?.Dispose(); } catch { }
-            _writer = null;
+            Log("[diag] StopBatchDictation: enter");
 
             try
             {
-                _memWavWriter?.Dispose();
-                if (_memWavStream != null)
+                // ── Pipeline timing instrumentation ──
+                var swBatch = System.Diagnostics.Stopwatch.StartNew();
+                long tPlaySound, tWaveStop, tFlush, tTranscribe, tPostProc, tPaste;
+
+                PlayUiSound(SoundType.Stop);
+                tPlaySound = swBatch.ElapsedMilliseconds;
+
+                try { _waveIn?.StopRecording(); } catch { }
+                try { _waveIn?.Dispose(); } catch { }
+                _waveIn = null;
+                tWaveStop = swBatch.ElapsedMilliseconds;
+
+                // Flush both writers and capture in-memory bytes.
+                try { _writer?.Dispose(); } catch { }
+                _writer = null;
+
+                try
                 {
-                    _lastWavBytes = _memWavStream.ToArray();
-                    _memWavStream.Dispose();
+                    _memWavWriter?.Dispose();
+                    if (_memWavStream != null)
+                    {
+                        _lastWavBytes = _memWavStream.ToArray();
+                        _memWavStream.Dispose();
+                    }
                 }
-            }
-            catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
-            finally { _memWavWriter = null; _memWavStream = null; }
-            tFlush = swBatch.ElapsedMilliseconds;
+                catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
+                finally { _memWavWriter = null; _memWavStream = null; }
+                tFlush = swBatch.ElapsedMilliseconds;
 
-            lblStatus.Content = "Processing...";
-            lblStatus.Opacity = 1;
+                lblStatus.Content = "Processing...";
+                lblStatus.Opacity = 1;
 
-            string? text = await TranscribeAudioAsync(_currentFileName);
-            tTranscribe = swBatch.ElapsedMilliseconds;
-            if (!string.IsNullOrEmpty(text))
-            {
-                if (_postProcessBatch)
+                Log("[diag] StopBatchDictation: pre-transcribe");
+                string? text = await TranscribeAudioAsync(_currentFileName);
+                tTranscribe = swBatch.ElapsedMilliseconds;
+                Log($"[diag] StopBatchDictation: post-transcribe, text.Length={text?.Length ?? -1}");
+                if (!string.IsNullOrEmpty(text))
                 {
-                    lblStatus.Content = "Correcting...";
-                    text = await PostProcessTranscription(text) ?? text;
+                    if (_postProcessBatch)
+                    {
+                        lblStatus.Content = "Correcting...";
+                        text = await PostProcessTranscription(text) ?? text;
+                    }
+                    tPostProc = swBatch.ElapsedMilliseconds;
+
+                    if (_targetWindow != IntPtr.Zero)
+                        SetForegroundWindow(_targetWindow);
+                    Log("[diag] StopBatchDictation: pre-paste");
+                    PasteTextToActiveWindow(text);
+                    tPaste = swBatch.ElapsedMilliseconds;
+                    Log("[diag] StopBatchDictation: post-paste, pre-history");
+                    HistoryService.Add(text);
+                    Log("[diag] StopBatchDictation: post-history");
+                    PlayUiSound(SoundType.Success);
+
+                    int charCount = text?.Length ?? 0;
+                    Log($"Batch pipeline: sound={tPlaySound}ms  waveStop={tWaveStop - tPlaySound}ms  flush={tFlush - tWaveStop}ms  transcribe={tTranscribe - tFlush}ms  postproc={tPostProc - tTranscribe}ms  paste={tPaste - tPostProc}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
                 }
-                tPostProc = swBatch.ElapsedMilliseconds;
+                else
+                {
+                    PlayUiSound(SoundType.Error);
+                    lblStatus.Content = "Error";
+                    await Task.Delay(1500);
+                }
 
-                if (_targetWindow != IntPtr.Zero)
-                    SetForegroundWindow(_targetWindow);
-                PasteTextToActiveWindow(text);
-                tPaste = swBatch.ElapsedMilliseconds;
-                HistoryService.Add(text);
-                PlayUiSound(SoundType.Success);
-
-                int charCount = text?.Length ?? 0;
-                Log($"Batch pipeline: sound={tPlaySound}ms  waveStop={tWaveStop - tPlaySound}ms  flush={tFlush - tWaveStop}ms  transcribe={tTranscribe - tFlush}ms  postproc={tPostProc - tTranscribe}ms  paste={tPaste - tPostProc}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
+                ReleaseAllModifierKeys();
+                ResetUi();
+                UpdateStatusLabel();
+                Log("[diag] StopBatchDictation: exit");
             }
-            else
+            catch (Exception ex)
             {
-                PlayUiSound(SoundType.Error);
-                lblStatus.Content = "Error";
-                await Task.Delay(1500);
+                Log($"[diag] StopBatchDictation: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                throw;
             }
-
-            ReleaseAllModifierKeys();
-            ResetUi();
-            UpdateStatusLabel();
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -1314,51 +1350,67 @@ namespace WhisperInk
         {
             if (!_isRecording) return;
             _isRecording = false;
-
-            PlayUiSound(SoundType.Stop);
-
-            try { _waveIn?.StopRecording(); } catch { }
-            try { _waveIn?.Dispose(); } catch { }
-            _waveIn = null;
-
-            try { _writer?.Dispose(); } catch { }
-            _writer = null;
+            Log("[diag] StopBatchRecording: enter");
 
             try
             {
-                _memWavWriter?.Dispose();
-                if (_memWavStream != null)
+                PlayUiSound(SoundType.Stop);
+
+                try { _waveIn?.StopRecording(); } catch { }
+                try { _waveIn?.Dispose(); } catch { }
+                _waveIn = null;
+
+                try { _writer?.Dispose(); } catch { }
+                _writer = null;
+
+                try
                 {
-                    _lastWavBytes = _memWavStream.ToArray();
-                    _memWavStream.Dispose();
+                    _memWavWriter?.Dispose();
+                    if (_memWavStream != null)
+                    {
+                        _lastWavBytes = _memWavStream.ToArray();
+                        _memWavStream.Dispose();
+                    }
                 }
+                catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
+                finally { _memWavWriter = null; _memWavStream = null; }
+
+                lblStatus.Content = "Processing...";
+                lblStatus.Opacity = 1;
+
+                string selectedText = GetSelectedText();
+                Log("[diag] StopBatchRecording: pre-transcribe");
+                string? transcribedVoice = await TranscribeAudioAsync(_currentFileName);
+                Log($"[diag] StopBatchRecording: post-transcribe, len={transcribedVoice?.Length ?? -1}");
+
+                if (!string.IsNullOrEmpty(transcribedVoice))
+                {
+                    lblStatus.Content = "AI...";
+                    string? aiResponse = await ProcessAiQueryAsync(selectedText, transcribedVoice);
+                    Log($"[diag] StopBatchRecording: post-AI, len={aiResponse?.Length ?? -1}");
+                    if (!string.IsNullOrEmpty(aiResponse))
+                    {
+                        Log("[diag] StopBatchRecording: pre-paste");
+                        PasteTextToActiveWindow(aiResponse);
+                        Log("[diag] StopBatchRecording: post-paste, pre-history");
+                        HistoryService.Add(aiResponse);
+                        Log("[diag] StopBatchRecording: post-history");
+                        PlayUiSound(SoundType.Success);
+                    }
+                    else { PlayUiSound(SoundType.Error); lblStatus.Content = "AI error"; }
+                }
+                else { PlayUiSound(SoundType.Error); lblStatus.Content = "Transcribe error"; }
+
+                ReleaseAllModifierKeys();
+                ResetUi();
+                UpdateStatusLabel();
+                Log("[diag] StopBatchRecording: exit");
             }
-            catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
-            finally { _memWavWriter = null; _memWavStream = null; }
-
-            lblStatus.Content = "Processing...";
-            lblStatus.Opacity = 1;
-
-            string selectedText = GetSelectedText();
-            string? transcribedVoice = await TranscribeAudioAsync(_currentFileName);
-
-            if (!string.IsNullOrEmpty(transcribedVoice))
+            catch (Exception ex)
             {
-                lblStatus.Content = "AI...";
-                string? aiResponse = await ProcessAiQueryAsync(selectedText, transcribedVoice);
-                if (!string.IsNullOrEmpty(aiResponse))
-                {
-                    PasteTextToActiveWindow(aiResponse);
-                    HistoryService.Add(aiResponse);
-                    PlayUiSound(SoundType.Success);
-                }
-                else { PlayUiSound(SoundType.Error); lblStatus.Content = "AI error"; }
+                Log($"[diag] StopBatchRecording: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                throw;
             }
-            else { PlayUiSound(SoundType.Error); lblStatus.Content = "Transcribe error"; }
-
-            ReleaseAllModifierKeys();
-            ResetUi();
-            UpdateStatusLabel();
         }
 
         // ── Transcription dispatch ─────────────────────────────────────
@@ -1851,6 +1903,7 @@ namespace WhisperInk
 
             // ── HTTP providers ────────────────────────────────────────
             var activeProvider = GetActiveProvider();
+            Log($"[diag] Transcribe HTTP: pre-send url={_audioApiUrl} provider={activeProvider?.Id ?? "?"}");
 
             try
             {
@@ -1930,14 +1983,16 @@ namespace WhisperInk
 
                 request.Content = content;
                 var response = await _httpClient.SendAsync(request);
+                Log($"[diag] Transcribe HTTP: send returned status={(int)response.StatusCode}");
                 string responseString = await response.Content.ReadAsStringAsync();
+                Log($"[diag] Transcribe HTTP: body read len={responseString.Length}");
                 Log($"Transcription response ({response.StatusCode}): {responseString[..Math.Min(500, responseString.Length)]}");
 
                 if (!response.IsSuccessStatusCode) return null;
                 using var doc = JsonDocument.Parse(responseString);
                 if (doc.RootElement.TryGetProperty("text", out var textElement)) return textElement.GetString();
             }
-            catch (Exception ex) { Log($"Network error: {ex.Message}"); }
+            catch (Exception ex) { Log($"Network error: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"); }
             return null;
         }
 
@@ -2072,11 +2127,88 @@ namespace WhisperInk
         private void PasteTextToActiveWindow(string text)
         {
             text = " " + text;
-            var staThread = new Thread(() => { try { Clipboard.SetText(text); } catch { } });
+            Log($"[diag] Paste: enter, len={text.Length}");
+
+            // If a previous paste's restore is still pending, its saved data IS the
+            // real prior clipboard (the current clipboard holds the previous transcript).
+            // Reuse it so chained dictations still restore the user's original copy.
+            IDataObject? savedClipboard = _pendingRestoreData;
+            try { _pendingRestoreCts?.Cancel(); } catch { }
+            _pendingRestoreCts = null;
+            _pendingRestoreData = null;
+
+            Exception? clipEx = null;
+            var staThread = new Thread(() =>
+            {
+                if (savedClipboard == null)
+                {
+                    try { savedClipboard = CloneClipboardData(); } catch { }
+                }
+                try { Clipboard.SetText(text); }
+                catch (Exception ex) { clipEx = ex; }
+            });
             staThread.SetApartmentState(ApartmentState.STA);
             staThread.Start();
+            Log("[diag] Paste: STA started, joining");
             staThread.Join();
+            Log(clipEx == null
+                ? "[diag] Paste: STA joined OK, calling SimulateCtrlV"
+                : $"[diag] Paste: STA joined with SetText error {clipEx.GetType().Name}: {clipEx.Message}");
             SimulateCtrlV();
+
+            if (clipEx == null && savedClipboard != null)
+            {
+                var cts = new CancellationTokenSource();
+                _pendingRestoreCts = cts;
+                _pendingRestoreData = savedClipboard;
+                _ = RestoreClipboardAfterDelay(savedClipboard, cts);
+            }
+            Log("[diag] Paste: exit");
+        }
+
+        // Snapshot every format on the clipboard into a new DataObject. Skips
+        // formats that throw on read (delayed-render, COM-marshalled handles)
+        // so a single bad format doesn't lose the rest. Must run on STA thread.
+        private static IDataObject? CloneClipboardData()
+        {
+            var src = Clipboard.GetDataObject();
+            if (src == null) return null;
+            var clone = new DataObject();
+            bool any = false;
+            foreach (var fmt in src.GetFormats(autoConvert: false))
+            {
+                try
+                {
+                    var data = src.GetData(fmt, autoConvert: false);
+                    if (data != null) { clone.SetData(fmt, data); any = true; }
+                }
+                catch { }
+            }
+            return any ? clone : null;
+        }
+
+        // Wait long enough for the target app to consume the simulated Ctrl+V,
+        // then restore the saved clipboard. Cancellable so a fresh paste can
+        // pre-empt this one without racing on Clipboard.SetDataObject.
+        private async Task RestoreClipboardAfterDelay(IDataObject data, CancellationTokenSource cts)
+        {
+            try { await Task.Delay(250, cts.Token); }
+            catch (OperationCanceledException) { return; }
+
+            var t = new Thread(() =>
+            {
+                try { Clipboard.SetDataObject(data, copy: true); } catch { }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+
+            if (ReferenceEquals(_pendingRestoreCts, cts))
+            {
+                _pendingRestoreCts = null;
+                _pendingRestoreData = null;
+                Log("[diag] Paste: clipboard restored");
+            }
         }
 
         private void SimulateCtrlV()
