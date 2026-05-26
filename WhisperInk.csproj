@@ -49,6 +49,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu.Windows" Version="1.24.4" />
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Google.Apis.Auth" Version="1.69.0" />
   </ItemGroup>
 
   <!-- Embed the short git commit hash into AssemblyInformationalVersion so

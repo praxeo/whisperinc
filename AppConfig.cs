@@ -410,6 +410,35 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 ContextBiasMode = "whisper_prompt",
                 Language = "en"
+            },
+            new ApiProvider
+            {
+                // Google Cloud Speech-to-Text v2 — Chirp 3 model. Cloud-only.
+                // Bypasses the generic HTTP multipart path because Chirp 3 needs
+                // OAuth bearer tokens (no API key auth), JSON body with base64
+                // audio inline, and a nested response shape — all handled by
+                // GoogleChirp3Transcriber.
+                //
+                // ApiKey field holds *either* the path to a downloaded service
+                // account JSON key file *or* the raw JSON contents pasted in.
+                // BaseUrl chooses the region (us or eu); change the host prefix
+                // to "https://eu-speech.googleapis.com" for the EU multi-region.
+                //
+                // ContextBiasMode is "none" because biasing for this provider
+                // doesn't flow through the generic switch — the transcriber
+                // unconditionally maps the global ContextBiasTerms into
+                // adaptation.phraseSets[].phrases[] on every request.
+                Id = "google-chirp3",
+                Name = "Google Chirp 3",
+                BaseUrl = "https://us-speech.googleapis.com",
+                TranscriptionModel = "chirp_3",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en"
             }
         };
     }

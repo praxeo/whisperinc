@@ -211,6 +211,7 @@ namespace WhisperInk
         private CrispAsrServerTranscriber? _cohereQ6kServer;
         private CrispAsrServerTranscriber? _voxtralServer;
         private CrispAsrServerTranscriber? _graniteServer;
+        private GoogleChirp3Transcriber? _googleChirp3;
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -312,6 +313,7 @@ namespace WhisperInk
             try { _cohereQ6kServer?.Dispose(); } catch { }
             try { _voxtralServer?.Dispose(); } catch { }
             try { _graniteServer?.Dispose(); } catch { }
+            try { _googleChirp3?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
         }
@@ -620,6 +622,9 @@ namespace WhisperInk
 
         private bool IsGraniteLocalProvider =>
             GetActiveProvider()?.Id == "granite-local";
+
+        private bool IsGoogleChirp3Provider =>
+            GetActiveProvider()?.Id == "google-chirp3";
 
         private bool IsLocalProvider =>
             IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider || IsVoxtralLocalProvider || IsGraniteLocalProvider;
@@ -1897,6 +1902,57 @@ namespace WhisperInk
                 catch (Exception ex)
                 {
                     Log($"Granite error: {ex.Message}");
+                    return null;
+                }
+            }
+
+            // ── Google Chirp 3 (cloud, OAuth + JSON body — bypasses generic HTTP path) ──
+            if (IsGoogleChirp3Provider)
+            {
+                try
+                {
+                    var prov = GetActiveProvider()!;
+                    if (_googleChirp3 == null
+                        || _googleChirp3.NeedsReinit(prov.ApiKey, prov.BaseUrl, prov.TranscriptionModel))
+                    {
+                        _googleChirp3?.Dispose();
+                        _googleChirp3 = new GoogleChirp3Transcriber(prov.ApiKey, prov.BaseUrl, prov.TranscriptionModel);
+                        if (!_googleChirp3.IsReady)
+                        {
+                            Log($"Google Chirp 3: not ready — {_googleChirp3.LastError}");
+                            return null;
+                        }
+                    }
+
+                    string language = prov.Language ?? "en";
+                    var biasTerms = _contextBiasTerms.Count > 0 ? _contextBiasTerms : null;
+                    if (biasTerms != null)
+                        Log($"[bias] sending {biasTerms.Count} terms as adaptation.phraseSets to Google Chirp 3: {string.Join(", ", biasTerms)}");
+
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    string? result;
+                    double audioMs;
+                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
+                    {
+                        result  = await _googleChirp3.TranscribeAsync(_lastWavBytes, language, biasTerms);
+                        audioMs = GetWavDurationMs(_lastWavBytes);
+                    }
+                    else
+                    {
+                        byte[] wav = await File.ReadAllBytesAsync(filePath);
+                        result  = await _googleChirp3.TranscribeAsync(wav, language, biasTerms);
+                        audioMs = GetWavDurationMs(filePath);
+                    }
+
+                    sw.Stop();
+                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+                    string mode = _lastWavBytes != null ? "mem" : "disk";
+                    Log($"Google Chirp 3 ({mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Google Chirp 3 error: {ex.GetType().Name}: {ex.Message}");
                     return null;
                 }
             }
