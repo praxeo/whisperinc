@@ -201,17 +201,12 @@ namespace WhisperInk
         // (caught + logged by the global handler) instead of pretending to work.
         // Successful ElevenLabs calls have measured at 300–870 ms in normal use.
         private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
-        private CohereOnnxTranscriber? _cohereOnnx;
-        private CohereGgufTranscriber? _cohereGguf;
-        private CohereGgufServerTranscriber? _cohereGgufServer;
-        private CohereGgufCudaServerTranscriber? _cohereGgufCudaServer;
-        private CohereGgufCudaQ8ServerTranscriber? _cohereGgufCudaQ8Server;
-        private CrispAsrServerTranscriber? _parakeetServer;
-        private CrispAsrServerTranscriber? _cohereQ4Server;
-        private CrispAsrServerTranscriber? _cohereQ6kServer;
-        private CrispAsrServerTranscriber? _voxtralServer;
-        private CrispAsrServerTranscriber? _graniteServer;
-        private GoogleChirp3Transcriber? _googleChirp3;
+
+        // One transcriber instance per provider, lazily constructed by the
+        // factory on first use. Replaces the old fan-out of 12 per-provider
+        // fields plus their disposal boilerplate.
+        private TranscriberFactory? _transcribers;
+
         private WaveInEvent? _waveIn;
         private WaveFileWriter? _writer;
         private string _currentFileName = "";
@@ -227,6 +222,13 @@ namespace WhisperInk
 
         private DispatcherTimer _animationTimer = null!;
         private readonly Random _rng = new();
+
+        // Watches the Mistral realtime proxy subprocess. The proxy can die
+        // silently — without this heartbeat, the next dictation surfaces the
+        // failure only when the WebSocket connect times out. Tick interval is
+        // 5s, low enough to feel "live" without flooding debug.log.
+        private DispatcherTimer? _proxyHeartbeat;
+        private bool _proxyHealthy = true;
 
         private enum RecordingMode { Dictation, AnalyzeContext }
         private RecordingMode _currentMode = RecordingMode.Dictation;
@@ -302,18 +304,9 @@ namespace WhisperInk
             }
 
             if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId);
+            try { _proxyHeartbeat?.Stop(); } catch { }
             try { _proxyProcess?.Kill(); } catch { }
-            try { _cohereOnnx?.Dispose(); } catch { }
-            try { _cohereGguf?.Dispose(); } catch { }
-            try { _cohereGgufServer?.Dispose(); } catch { }
-            try { _cohereGgufCudaServer?.Dispose(); } catch { }
-            try { _cohereGgufCudaQ8Server?.Dispose(); } catch { }
-            try { _parakeetServer?.Dispose(); } catch { }
-            try { _cohereQ4Server?.Dispose(); } catch { }
-            try { _cohereQ6kServer?.Dispose(); } catch { }
-            try { _voxtralServer?.Dispose(); } catch { }
-            try { _graniteServer?.Dispose(); } catch { }
-            try { _googleChirp3?.Dispose(); } catch { }
+            try { _transcribers?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
         }
@@ -333,6 +326,11 @@ namespace WhisperInk
             _animationTimer.Tick += (_, _) => UpdateHistogram();
 
             LoadConfig();
+
+            // Factory owns one ITranscriber per provider. The GPU-backend
+            // delegate lets it pick up live edits from the settings dialog
+            // without needing to drop and recreate every CrispASR server.
+            _transcribers = new TranscriberFactory(_httpClient, () => _crispGpuBackend, Log);
 
             if (!string.IsNullOrWhiteSpace(_proxyPath) && _activeSupportsRealtime)
             {
@@ -386,6 +384,45 @@ namespace WhisperInk
             InitializeTrayAndHealth();
             SyncLaunchAtStartupFromRegistry();
             RunFirstRunCheck();
+
+            StartProxyHeartbeat();
+        }
+
+        private void StartProxyHeartbeat()
+        {
+            if (_proxyHeartbeat != null) return;
+            _proxyHeartbeat = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _proxyHeartbeat.Tick += (_, _) => CheckProxyHealth();
+            _proxyHeartbeat.Start();
+        }
+
+        private void CheckProxyHealth()
+        {
+            // Heartbeat is meaningful only when the active provider needs a
+            // proxy. For cloud/local providers without realtime support,
+            // we treat the proxy as healthy regardless (it may not even be
+            // running) so the status label doesn't show false warnings.
+            bool needsProxy = _activeSupportsRealtime
+                              && IsRealtimeMode
+                              && !string.IsNullOrWhiteSpace(_proxyPath);
+            if (!needsProxy)
+            {
+                if (!_proxyHealthy)
+                {
+                    _proxyHealthy = true;
+                    UpdateStatusLabel();
+                }
+                return;
+            }
+
+            bool alive = false;
+            try { alive = _proxyProcess != null && !_proxyProcess.HasExited; }
+            catch { alive = false; }
+
+            if (alive == _proxyHealthy) return;
+            _proxyHealthy = alive;
+            Log(alive ? "Mistral proxy recovered." : "Mistral proxy is no longer running — realtime dictation will fail until it restarts.");
+            UpdateStatusLabel();
         }
 
         // ── Provider helpers ────────────────────────────────────────────
@@ -456,44 +493,17 @@ namespace WhisperInk
 
             _activeProviderId = newId;
 
-            // The outgoing provider's local server is no longer needed — dispose it
+            // The outgoing provider's local server is no longer needed — drop it
             // so we don't keep ~2 GB of resident model for a provider we're not
             // using. The incoming provider spawns its own server on first dictation.
-            DisposeCrispLocalServerFor(oldId);
+            _transcribers?.Drop(oldId);
 
             ApplyActiveProvider();
             Log($"Active provider changed: {oldId} -> {newId}");
         }
 
-        private void DisposeCrispLocalServerFor(string? providerId)
-        {
-            switch (providerId)
-            {
-                case "parakeet-local":
-                    try { _parakeetServer?.Dispose(); } catch { }
-                    _parakeetServer = null;
-                    break;
-                case "cohere-local-q4":
-                    try { _cohereQ4Server?.Dispose(); } catch { }
-                    _cohereQ4Server = null;
-                    break;
-                case "cohere-local-q6k":
-                    try { _cohereQ6kServer?.Dispose(); } catch { }
-                    _cohereQ6kServer = null;
-                    break;
-                case "voxtral-local":
-                    try { _voxtralServer?.Dispose(); } catch { }
-                    _voxtralServer = null;
-                    break;
-                case "granite-local":
-                    try { _graniteServer?.Dispose(); } catch { }
-                    _graniteServer = null;
-                    break;
-            }
-        }
-
-        /// <summary>Applies a new CrispASR GPU backend. Disposes running
-        /// servers so the next dictation respawns with the new flag.</summary>
+        /// <summary>Applies a new CrispASR GPU backend. Drops all cached
+        /// transcribers so the next dictation respawns with the new flag.</summary>
         private void ApplyGpuBackendChange(string? raw)
         {
             string normalized = NormalizeGpuBackend(raw);
@@ -501,7 +511,7 @@ namespace WhisperInk
             {
                 string old = _crispGpuBackend;
                 _crispGpuBackend = normalized;
-                DisposeCrispLocalServers();
+                _transcribers?.DropAll();
                 Log($"Crisp GPU backend changed: {old} -> {normalized}");
             }
             else
@@ -510,40 +520,26 @@ namespace WhisperInk
             }
         }
 
-        /// <summary>Dispose of any lazy-spawned CrispASR-based local servers so
-        /// the next dictation re-spawns them with the current settings.</summary>
-        private void DisposeCrispLocalServers()
-        {
-            try { _parakeetServer?.Dispose(); } catch { }
-            try { _cohereQ4Server?.Dispose(); } catch { }
-            try { _cohereQ6kServer?.Dispose(); } catch { }
-            try { _voxtralServer?.Dispose(); } catch { }
-            try { _graniteServer?.Dispose(); } catch { }
-            _parakeetServer = null;
-            _cohereQ4Server = null;
-            _cohereQ6kServer = null;
-            _voxtralServer = null;
-            _graniteServer = null;
-        }
-
-        /// <summary>If the active provider is a local GGUF one and its model
-        /// file is missing, surface a non-modal banner in the main window
-        /// telling the user exactly which file to drop into the model folder.
-        /// Otherwise, let the normal health-probe banner drive the UI.</summary>
+        /// <summary>If the active provider is a local CrispASR one and its
+        /// GGUF is missing, surface a non-modal banner telling the user where
+        /// to drop the file. Otherwise let the normal health-probe banner
+        /// drive the UI.</summary>
         private void UpdateLocalModelBanner()
         {
             try
             {
-                string modelFolder = Path.Combine(ConfigFolder, "cohere-gguf");
-                string? missing = GetActiveProvider()?.Id switch
+                var prov = GetActiveProvider();
+                if (prov == null
+                    || prov.TranscriberKind != TranscriberKind.LocalCrispAsrServer
+                    || string.IsNullOrWhiteSpace(prov.LocalModelGlob))
                 {
-                    "parakeet-local"   => MissingIfAbsent(modelFolder, "parakeet-*.gguf"),
-                    "cohere-local-q4"  => MissingIfAbsent(modelFolder, "cohere-transcribe-q4_k.gguf"),
-                    "cohere-local-q6k" => MissingIfAbsent(modelFolder, "cohere-transcribe-q6_k.gguf"),
-                    "voxtral-local"    => MissingIfAbsent(modelFolder, "voxtral-mini-3b*.gguf"),
-                    "granite-local"    => MissingIfAbsent(modelFolder, "granite-speech-*.gguf"),
-                    _                  => null
-                };
+                    UpdateSetupBannerVisibility();
+                    return;
+                }
+
+                string sub = string.IsNullOrWhiteSpace(prov.LocalModelFolder) ? "cohere-gguf" : prov.LocalModelFolder;
+                string modelFolder = Path.Combine(ConfigFolder, sub);
+                string? missing = MissingIfAbsent(modelFolder, prov.LocalModelGlob);
 
                 if (missing != null)
                 {
@@ -553,7 +549,6 @@ namespace WhisperInk
                 }
                 else
                 {
-                    // Hand control back to the health probe's banner logic.
                     UpdateSetupBannerVisibility();
                 }
             }
@@ -583,7 +578,10 @@ namespace WhisperInk
             var provider = GetActiveProvider();
             string provTag = provider?.Name ?? "?";
             string modeTag = IsRealtimeMode ? "RT" : "Batch";
-            lblStatus.Content = $"{provTag} ({modeTag})";
+            string proxyTag = (_activeSupportsRealtime && IsRealtimeMode && !_proxyHealthy)
+                ? "  ⚠ proxy down"
+                : "";
+            lblStatus.Content = $"{provTag} ({modeTag}){proxyTag}";
             UpdateHealthDot();
         }
 
@@ -593,44 +591,7 @@ namespace WhisperInk
             try { lblHealthDot.ToolTip = _lastHealth.Summary; } catch { }
         }
 
-        private bool IsLocalOnnxProvider =>
-            GetActiveProvider()?.Id == "cohere-onnx";
-
-        private bool IsLocalGgufProvider =>
-            GetActiveProvider()?.Id == "cohere-gguf";
-
-        private bool IsLocalGgufServerProvider =>
-            GetActiveProvider()?.Id == "cohere-gguf-server";
-
-        private bool IsLocalGgufCudaServerProvider =>
-            GetActiveProvider()?.Id == "cohere-gguf-cuda-server";
-
-        private bool IsLocalGgufCudaQ8ServerProvider =>
-            GetActiveProvider()?.Id == "cohere-gguf-cuda-server-q8";
-
-        private bool IsParakeetLocalProvider =>
-            GetActiveProvider()?.Id == "parakeet-local";
-
-        private bool IsCohereLocalQ4Provider =>
-            GetActiveProvider()?.Id == "cohere-local-q4";
-
-        private bool IsCohereLocalQ6kProvider =>
-            GetActiveProvider()?.Id == "cohere-local-q6k";
-
-        private bool IsVoxtralLocalProvider =>
-            GetActiveProvider()?.Id == "voxtral-local";
-
-        private bool IsGraniteLocalProvider =>
-            GetActiveProvider()?.Id == "granite-local";
-
-        private bool IsGoogleChirp3Provider =>
-            GetActiveProvider()?.Id == "google-chirp3";
-
-        private bool IsLocalProvider =>
-            IsLocalOnnxProvider || IsLocalGgufProvider || IsLocalGgufServerProvider || IsLocalGgufCudaServerProvider || IsLocalGgufCudaQ8ServerProvider || IsParakeetLocalProvider || IsCohereLocalQ4Provider || IsCohereLocalQ6kProvider || IsVoxtralLocalProvider || IsGraniteLocalProvider;
-
-        private static bool IsCrispLocalProviderId(string? id) =>
-            id is "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k" or "voxtral-local" or "granite-local";
+        private bool IsLocalProvider => GetActiveProvider()?.IsLocalProvider == true;
 
         // Clamp a user-supplied GPU backend string onto the set crispasr understands.
         // Anything unrecognized collapses to "auto" so a typo in config.json can't
@@ -711,6 +672,25 @@ namespace WhisperInk
                                 p.TagAudioEvents = tae.GetBoolean();
                             if (pEl.TryGetProperty("NoVerbatim", out var nv) && nv.ValueKind != JsonValueKind.Null)
                                 p.NoVerbatim = nv.GetBoolean();
+
+                            // ── New schema fields (added when factory dispatch landed) ──
+                            if (pEl.TryGetProperty("TranscriberKind", out var tk)
+                                && Enum.TryParse<TranscriberKind>(tk.GetString(), ignoreCase: true, out var parsedKind))
+                                p.TranscriberKind = parsedKind;
+                            else
+                                p.TranscriberKind = ApiProvider.InferKindFromLegacyId(p.Id);
+
+                            if (pEl.TryGetProperty("LocalServerPort", out var lsp) && lsp.ValueKind == JsonValueKind.Number)
+                                p.LocalServerPort = lsp.GetInt32();
+                            if (pEl.TryGetProperty("LocalModelGlob", out var lmg))
+                                p.LocalModelGlob = lmg.GetString() ?? "";
+                            if (pEl.TryGetProperty("LocalBackendHint", out var lbh))
+                                p.LocalBackendHint = lbh.GetString() ?? "";
+                            if (pEl.TryGetProperty("LocalGpuBackend", out var lgb))
+                                p.LocalGpuBackend = lgb.GetString() ?? "";
+                            if (pEl.TryGetProperty("LocalModelFolder", out var lmf))
+                                p.LocalModelFolder = lmf.GetString() ?? "";
+
                             _providers.Add(p);
                         }
                     }
@@ -744,14 +724,29 @@ namespace WhisperInk
                         // Append any new built-in defaults that the user's saved config doesn't
                         // have yet (matched by Id). Purely additive — never overwrites anything
                         // the user has edited, never removes anything.
+                        var defaults = ApiProvider.CreateDefaults();
                         var existingIds = new HashSet<string>(_providers.Select(p => p.Id));
-                        foreach (var def in ApiProvider.CreateDefaults())
+                        foreach (var def in defaults)
                         {
                             if (!existingIds.Contains(def.Id))
                             {
                                 _providers.Add(def);
                                 Log($"Added new default provider: {def.Name}");
                             }
+                        }
+
+                        // Backfill Local* fields for known-id providers whose
+                        // config predates the factory schema. Cosmetic-only:
+                        // skips anything the user has already filled in.
+                        var defaultsById = defaults.ToDictionary(d => d.Id, StringComparer.Ordinal);
+                        foreach (var p in _providers)
+                        {
+                            if (!defaultsById.TryGetValue(p.Id, out var def)) continue;
+                            if (string.IsNullOrWhiteSpace(p.LocalModelGlob))   p.LocalModelGlob   = def.LocalModelGlob;
+                            if (string.IsNullOrWhiteSpace(p.LocalBackendHint)) p.LocalBackendHint = def.LocalBackendHint;
+                            if (string.IsNullOrWhiteSpace(p.LocalGpuBackend))  p.LocalGpuBackend  = def.LocalGpuBackend;
+                            if (string.IsNullOrWhiteSpace(p.LocalModelFolder)) p.LocalModelFolder = def.LocalModelFolder;
+                            if (p.LocalServerPort == null)                     p.LocalServerPort  = def.LocalServerPort;
                         }
                     }
                 }
@@ -1418,638 +1413,56 @@ namespace WhisperInk
             }
         }
 
-        // ── Transcription dispatch ─────────────────────────────────────
+        // â”€â”€ Transcription dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        //
+        // Single entry point for every batch transcription. The factory hands
+        // back the right ITranscriber for the active provider (cloud HTTP,
+        // local ONNX, auto-spawned CrispASR server, Google Chirp 3); we don't
+        // care which it is. Adding a new model is now a config-only change â€”
+        // no new branches here.
 
         private async Task<string?> TranscribeAudioAsync(string filePath)
         {
-            if (!File.Exists(filePath)) return null;
+            if (_transcribers == null) return null;
 
-            // ── Local ONNX provider ──
-            if (IsLocalOnnxProvider)
+            var provider = GetActiveProvider();
+            if (provider == null) { Log("[diag] Transcribe: no active provider"); return null; }
+
+            byte[] wavBytes;
+            if (_lastWavBytes is { Length: > 0 })
             {
-                try
-                {
-                    if (_cohereOnnx == null)
-                    {
-                        _cohereOnnx = new CohereOnnxTranscriber();
-                        if (!_cohereOnnx.ModelFilesExist())
-                        {
-                            Log("Cohere ONNX model files not found in %APPDATA%\\.WhisperInk\\cohere-onnx\\");
-                            return null;
-                        }
-                    }
-                    string language = GetActiveProvider()?.Language ?? "en";
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    var result = await _cohereOnnx.TranscribeAsync(filePath, language);
-                    sw.Stop();
-                    double audioMs = GetWavDurationMs(filePath);
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    Log($"Cohere ONNX took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere ONNX error: {ex.Message}");
-                    return null;
-                }
+                wavBytes = _lastWavBytes;
+            }
+            else if (File.Exists(filePath))
+            {
+                wavBytes = await File.ReadAllBytesAsync(filePath);
+            }
+            else
+            {
+                Log("[diag] Transcribe: no audio bytes and file missing");
+                return null;
             }
 
-            // ── Local GGUF (CrispASR subprocess-per-call) ──
-            if (IsLocalGgufProvider)
+            ITranscriber transcriber;
+            try { transcriber = _transcribers.GetOrCreate(provider); }
+            catch (Exception ex) { Log($"Transcriber init failed for {provider.Id}: {ex.Message}"); return null; }
+
+            if (!transcriber.IsReady(out var diag))
             {
-                try
-                {
-                    if (_cohereGguf == null)
-                    {
-                        _cohereGguf = new CohereGgufTranscriber();
-                        if (!_cohereGguf.ModelFilesExist())
-                        {
-                            Log("CrispASR/Cohere GGUF files not found in %APPDATA%\\.WhisperInk\\cohere-gguf\\");
-                            return null;
-                        }
-                    }
-                    string language = GetActiveProvider()?.Language ?? "en";
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    var result = await _cohereGguf.TranscribeAsync(filePath, language);
-                    sw.Stop();
-                    double audioMs = GetWavDurationMs(filePath);
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    Log($"Cohere GGUF (subprocess) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere GGUF error: {ex.Message}");
-                    return null;
-                }
+                Log($"{transcriber.DisplayName}: {diag}");
+                return null;
             }
 
-            // ── Local GGUF CPU server (port 8766) — in-memory fast path ──
-            if (IsLocalGgufServerProvider)
-            {
-                try
-                {
-                    if (_cohereGgufServer == null)
-                    {
-                        _cohereGgufServer = new CohereGgufServerTranscriber();
-                        if (!_cohereGgufServer.ModelFilesExist())
-                        {
-                            Log("CrispASR/Cohere GGUF server files not found in %APPDATA%\\.WhisperInk\\cohere-gguf\\");
-                            return null;
-                        }
-                    }
-                    string language = GetActiveProvider()?.Language ?? "en";
-                    var biasTerms = GetActiveProvider()?.ContextBiasMode == "cohere_terms" ? _contextBiasTerms : null;
-                    if (biasTerms != null && biasTerms.Count > 0)
-                        Log($"[bias] sending {biasTerms.Count} terms as prompt: {string.Join(", ", biasTerms)}");
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            string? result = await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms);
+            sw.Stop();
 
-                    // Prefer in-memory bytes when available (saves ~20-30ms).
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _cohereGgufServer.TranscribeAsync(_lastWavBytes, language, biasTerms);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _cohereGgufServer.TranscribeAsync(filePath, language, biasTerms);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Cohere GGUF (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere GGUF server error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Local GGUF CUDA server (port 8767) — in-memory fast path ──
-            if (IsLocalGgufCudaServerProvider)
-            {
-                try
-                {
-                    if (_cohereGgufCudaServer == null)
-                    {
-                        _cohereGgufCudaServer = new CohereGgufCudaServerTranscriber();
-                        if (!_cohereGgufCudaServer.ModelFilesExist())
-                        {
-                            Log("CrispASR/Cohere GGUF CUDA server files not found in %APPDATA%\\.WhisperInk\\cohere-gguf-cuda\\");
-                            return null;
-                        }
-                    }
-                    string language = GetActiveProvider()?.Language ?? "en";
-                    var biasTerms = GetActiveProvider()?.ContextBiasMode == "cohere_terms" ? _contextBiasTerms : null;
-                    if (biasTerms != null && biasTerms.Count > 0)
-                        Log($"[bias] sending {biasTerms.Count} terms as prompt: {string.Join(", ", biasTerms)}");
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _cohereGgufCudaServer.TranscribeAsync(_lastWavBytes, language, biasTerms);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _cohereGgufCudaServer.TranscribeAsync(filePath, language, biasTerms);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Cohere GGUF (CUDA/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere GGUF CUDA error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Local GGUF CUDA Q8 server (port 8768) — in-memory fast path ──
-            if (IsLocalGgufCudaQ8ServerProvider)
-            {
-                try
-                {
-                    if (_cohereGgufCudaQ8Server == null)
-                    {
-                        _cohereGgufCudaQ8Server = new CohereGgufCudaQ8ServerTranscriber();
-                        if (!_cohereGgufCudaQ8Server.ModelFilesExist())
-                        {
-                            Log("CrispASR/Cohere GGUF CUDA Q8 server files not found in %APPDATA%\\.WhisperInk\\cohere-gguf-cuda-q8\\");
-                            return null;
-                        }
-                    }
-                    string language = GetActiveProvider()?.Language ?? "en";
-                    var biasTerms = GetActiveProvider()?.ContextBiasMode == "cohere_terms" ? _contextBiasTerms : null;
-                    if (biasTerms != null && biasTerms.Count > 0)
-                        Log($"[bias] sending {biasTerms.Count} terms as prompt: {string.Join(", ", biasTerms)}");
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _cohereGgufCudaQ8Server.TranscribeAsync(_lastWavBytes, language, biasTerms);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _cohereGgufCudaQ8Server.TranscribeAsync(filePath, language, biasTerms);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Cohere GGUF (CUDA Q8/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere GGUF CUDA Q8 error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Parakeet (CrispASR server, auto-spawned) ──────────────
-            if (IsParakeetLocalProvider)
-            {
-                try
-                {
-                    var prov = GetActiveProvider();
-                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8103);
-                    if (_parakeetServer == null || _parakeetServer.Port != port
-                        || !string.Equals(_parakeetServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _parakeetServer?.Dispose();
-                        _parakeetServer = new CrispAsrServerTranscriber(
-                            modelGlob: "parakeet-*.gguf",
-                            port: port,
-                            displayName: "Parakeet",
-                            gpuBackend: _crispGpuBackend);
-                        if (!_parakeetServer.ModelFilesExist())
-                        {
-                            Log($"Parakeet: {_parakeetServer.DiagnoseMissing()}");
-                            return null;
-                        }
-                    }
-
-                    string language = prov?.Language ?? "en";
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _parakeetServer.TranscribeAsync(_lastWavBytes, language);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _parakeetServer.TranscribeAsync(filePath, language);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Parakeet (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Parakeet error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Cohere Q4 Local (CrispASR server, auto-spawned) ──────────
-            if (IsCohereLocalQ4Provider)
-            {
-                try
-                {
-                    var prov = GetActiveProvider();
-                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8104);
-                    if (_cohereQ4Server == null || _cohereQ4Server.Port != port
-                        || !string.Equals(_cohereQ4Server.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _cohereQ4Server?.Dispose();
-                        _cohereQ4Server = new CrispAsrServerTranscriber(
-                            modelGlob: "cohere-transcribe-q4_k.gguf",
-                            port: port,
-                            displayName: "Cohere Q4",
-                            backendHint: "cohere",
-                            gpuBackend: _crispGpuBackend);
-                        if (!_cohereQ4Server.ModelFilesExist())
-                        {
-                            Log($"Cohere Q4: {_cohereQ4Server.DiagnoseMissing()}");
-                            return null;
-                        }
-                    }
-
-                    string language = prov?.Language ?? "en";
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _cohereQ4Server.TranscribeAsync(_lastWavBytes, language);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _cohereQ4Server.TranscribeAsync(filePath, language);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Cohere Q4 (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere Q4 error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Cohere Q6_K Local (CrispASR server, auto-spawned) ──────────
-            if (IsCohereLocalQ6kProvider)
-            {
-                try
-                {
-                    var prov = GetActiveProvider();
-                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8105);
-                    if (_cohereQ6kServer == null || _cohereQ6kServer.Port != port
-                        || !string.Equals(_cohereQ6kServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _cohereQ6kServer?.Dispose();
-                        _cohereQ6kServer = new CrispAsrServerTranscriber(
-                            modelGlob: "cohere-transcribe-q6_k.gguf",
-                            port: port,
-                            displayName: "Cohere Q6_K",
-                            backendHint: "cohere",
-                            gpuBackend: _crispGpuBackend);
-                        if (!_cohereQ6kServer.ModelFilesExist())
-                        {
-                            Log($"Cohere Q6_K: {_cohereQ6kServer.DiagnoseMissing()}");
-                            return null;
-                        }
-                    }
-
-                    string language = prov?.Language ?? "en";
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _cohereQ6kServer.TranscribeAsync(_lastWavBytes, language);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _cohereQ6kServer.TranscribeAsync(filePath, language);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Cohere Q6_K (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Cohere Q6_K error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Voxtral Local (CrispASR server, auto-spawned) ────────────
-            // Mistral Voxtral-Mini-3B speech-LLM. Backend hint required because
-            // CrispASR's auto-detect doesn't cover voxtral GGUFs. Context bias
-            // terms ride the OpenAI `prompt` field — voxtral is a true LLM so
-            // the prompt is interpreted as conditioning context rather than as
-            // a Whisper-style decoder seed.
-            if (IsVoxtralLocalProvider)
-            {
-                try
-                {
-                    var prov = GetActiveProvider();
-                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8106);
-                    if (_voxtralServer == null || _voxtralServer.Port != port
-                        || !string.Equals(_voxtralServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _voxtralServer?.Dispose();
-                        _voxtralServer = new CrispAsrServerTranscriber(
-                            modelGlob: "voxtral-mini-3b*.gguf",
-                            port: port,
-                            displayName: "Voxtral",
-                            backendHint: "voxtral",
-                            gpuBackend: _crispGpuBackend);
-                        if (!_voxtralServer.ModelFilesExist())
-                        {
-                            Log($"Voxtral: {_voxtralServer.DiagnoseMissing()}");
-                            return null;
-                        }
-                    }
-
-                    string language = prov?.Language ?? "en";
-                    string? prompt = (prov?.ContextBiasMode == "whisper_prompt" && _contextBiasTerms.Count > 0)
-                        ? string.Join(", ", _contextBiasTerms)
-                        : null;
-                    if (!string.IsNullOrEmpty(prompt))
-                        Log($"[bias] sending {_contextBiasTerms.Count} terms as prompt to Voxtral: {prompt}");
-
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _voxtralServer.TranscribeAsync(_lastWavBytes, language, prompt);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _voxtralServer.TranscribeAsync(filePath, language, prompt);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Voxtral (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Voxtral error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Granite Speech Local (CrispASR server, auto-spawned) ─────
-            // IBM Granite Speech 4.1 2B speech-LLM. Same shape as Voxtral:
-            // explicit backend hint + prompt-style context bias.
-            if (IsGraniteLocalProvider)
-            {
-                try
-                {
-                    var prov = GetActiveProvider();
-                    int port = TryParsePortFromUrl(prov?.BaseUrl, 8107);
-                    if (_graniteServer == null || _graniteServer.Port != port
-                        || !string.Equals(_graniteServer.GpuBackend, NormalizeGpuBackend(_crispGpuBackend), StringComparison.OrdinalIgnoreCase))
-                    {
-                        _graniteServer?.Dispose();
-                        _graniteServer = new CrispAsrServerTranscriber(
-                            modelGlob: "granite-speech-*.gguf",
-                            port: port,
-                            displayName: "Granite",
-                            backendHint: "granite",
-                            gpuBackend: _crispGpuBackend);
-                        if (!_graniteServer.ModelFilesExist())
-                        {
-                            Log($"Granite: {_graniteServer.DiagnoseMissing()}");
-                            return null;
-                        }
-                    }
-
-                    string language = prov?.Language ?? "en";
-                    string? prompt = (prov?.ContextBiasMode == "whisper_prompt" && _contextBiasTerms.Count > 0)
-                        ? string.Join(", ", _contextBiasTerms)
-                        : null;
-                    if (!string.IsNullOrEmpty(prompt))
-                        Log($"[bias] sending {_contextBiasTerms.Count} terms as prompt to Granite: {prompt}");
-
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _graniteServer.TranscribeAsync(_lastWavBytes, language, prompt);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        result  = await _graniteServer.TranscribeAsync(filePath, language, prompt);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Granite (server/{mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Granite error: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── Google Chirp 3 (cloud, OAuth + JSON body — bypasses generic HTTP path) ──
-            if (IsGoogleChirp3Provider)
-            {
-                try
-                {
-                    var prov = GetActiveProvider()!;
-                    if (_googleChirp3 == null
-                        || _googleChirp3.NeedsReinit(prov.ApiKey, prov.BaseUrl, prov.TranscriptionModel))
-                    {
-                        _googleChirp3?.Dispose();
-                        _googleChirp3 = new GoogleChirp3Transcriber(prov.ApiKey, prov.BaseUrl, prov.TranscriptionModel);
-                        if (!_googleChirp3.IsReady)
-                        {
-                            Log($"Google Chirp 3: not ready — {_googleChirp3.LastError}");
-                            return null;
-                        }
-                    }
-
-                    string language = prov.Language ?? "en";
-                    var biasTerms = _contextBiasTerms.Count > 0 ? _contextBiasTerms : null;
-                    if (biasTerms != null)
-                        Log($"[bias] sending {biasTerms.Count} terms as adaptation.phraseSets to Google Chirp 3: {string.Join(", ", biasTerms)}");
-
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    string? result;
-                    double audioMs;
-                    if (_lastWavBytes != null && _lastWavBytes.Length > 0)
-                    {
-                        result  = await _googleChirp3.TranscribeAsync(_lastWavBytes, language, biasTerms);
-                        audioMs = GetWavDurationMs(_lastWavBytes);
-                    }
-                    else
-                    {
-                        byte[] wav = await File.ReadAllBytesAsync(filePath);
-                        result  = await _googleChirp3.TranscribeAsync(wav, language, biasTerms);
-                        audioMs = GetWavDurationMs(filePath);
-                    }
-
-                    sw.Stop();
-                    double rtfx = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-                    string mode = _lastWavBytes != null ? "mem" : "disk";
-                    Log($"Google Chirp 3 ({mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}× — result: {result?[..Math.Min(200, result?.Length ?? 0)]}");
-                    return result;
-                }
-                catch (Exception ex)
-                {
-                    Log($"Google Chirp 3 error: {ex.GetType().Name}: {ex.Message}");
-                    return null;
-                }
-            }
-
-            // ── HTTP providers ────────────────────────────────────────
-            var activeProvider = GetActiveProvider();
-            Log($"[diag] Transcribe HTTP: pre-send url={_audioApiUrl} provider={activeProvider?.Id ?? "?"}");
-
-            try
-            {
-                using var request = new HttpRequestMessage(HttpMethod.Post, _audioApiUrl);
-
-                if (!string.IsNullOrEmpty(_activeApiKey))
-                {
-                    if (!string.IsNullOrWhiteSpace(_activeAuthHeaderName))
-                        request.Headers.Add(_activeAuthHeaderName, _activeApiKey);
-                    else
-                        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _activeApiKey);
-                }
-
-                using var content = new MultipartFormDataContent();
-                using var fileStream = File.OpenRead(filePath);
-                var fileContent = new StreamContent(fileStream);
-                fileContent.Headers.ContentType = MediaTypeHeaderValue.Parse("audio/wav");
-
-                if (!string.IsNullOrWhiteSpace(_audioModel))
-                    content.Add(new StringContent(_audioModel), _activeModelFieldName);
-
-                string language = activeProvider?.Language ?? "en";
-                if (string.IsNullOrWhiteSpace(_activeAuthHeaderName))
-                    content.Add(new StringContent(language), "language");
-
-                if (activeProvider?.TranscriptionTemperature.HasValue == true)
-                    content.Add(
-                        new StringContent(activeProvider.TranscriptionTemperature.Value
-                            .ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)),
-                        "temperature");
-
-                if (_contextBiasTerms.Count > 0)
-                {
-                    string biasMode = activeProvider?.ContextBiasMode ?? "none";
-                    switch (biasMode)
-                    {
-                        case "cohere_terms":
-                            content.Add(new StringContent(JsonSerializer.Serialize(_contextBiasTerms)), "context_bias_terms");
-                            break;
-
-                        case "whisper_prompt":
-                            content.Add(new StringContent(string.Join(", ", _contextBiasTerms)), "prompt");
-                            break;
-                    }
-                }
-
-                // ElevenLabs Scribe v2 keyterms — repeated form fields (FastAPI List[str] convention).
-                // If this yields a 422, switch to the JSON fallback below.
-                if (!string.IsNullOrWhiteSpace(activeProvider?.ScribeKeytermsRaw) &&
-                    !string.IsNullOrWhiteSpace(activeProvider?.AuthHeaderName))
-                {
-                    var keyterms = activeProvider.GetValidatedKeyterms(out var ktWarnings);
-                    foreach (var w in ktWarnings) Log($"[keyterms] {w}");
-                    if (keyterms.Count > 0)
-                    {
-                        Log($"[keyterms] sending {keyterms.Count} terms");
-                        foreach (var term in keyterms)
-                            content.Add(new StringContent(term), "keyterms");
-                        // JSON fallback (uncomment if repeated fields return 422):
-                        // content.Add(new StringContent(JsonSerializer.Serialize(keyterms)), "keyterms");
-                    }
-                }
-
-                // ElevenLabs Scribe v2 — tag_audio_events / no_verbatim.
-                // Same xi-api-key guard as keyterms: only sent for ElevenLabs.
-                // Both are emitted unconditionally because the API defaults
-                // (tag_audio_events=true, no_verbatim=false) are wrong for
-                // clinical dictation; we want our config values to win.
-                if (!string.IsNullOrWhiteSpace(activeProvider?.AuthHeaderName))
-                {
-                    content.Add(new StringContent(activeProvider.TagAudioEvents ? "true" : "false"), "tag_audio_events");
-                    content.Add(new StringContent(activeProvider.NoVerbatim ? "true" : "false"), "no_verbatim");
-                    Log($"[scribe] tag_audio_events={activeProvider.TagAudioEvents} no_verbatim={activeProvider.NoVerbatim}");
-                }
-
-                content.Add(fileContent, "file", "audio.wav");
-
-                request.Content = content;
-                var response = await _httpClient.SendAsync(request);
-                Log($"[diag] Transcribe HTTP: send returned status={(int)response.StatusCode}");
-                string responseString = await response.Content.ReadAsStringAsync();
-                Log($"[diag] Transcribe HTTP: body read len={responseString.Length}");
-                Log($"Transcription response ({response.StatusCode}): {responseString[..Math.Min(500, responseString.Length)]}");
-
-                if (!response.IsSuccessStatusCode) return null;
-                using var doc = JsonDocument.Parse(responseString);
-                if (doc.RootElement.TryGetProperty("text", out var textElement)) return textElement.GetString();
-            }
-            catch (Exception ex) { Log($"Network error: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"); }
-            return null;
+            double audioMs = GetWavDurationMs(wavBytes);
+            double rtfx    = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
+            string mode    = _lastWavBytes is { Length: > 0 } ? "mem" : "disk";
+            string preview = result == null ? "(null)" : result[..Math.Min(200, result.Length)];
+            Log($"{transcriber.DisplayName} ({mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x -- result: {preview}");
+            return result;
         }
 
         private async Task<string?> ProcessAiQueryAsync(string context, string voiceInstruction)
@@ -2368,33 +1781,58 @@ namespace WhisperInk
             });
         }
 
+        // ── Tray context menu ──────────────────────────────────────────
+        // Sequenced top-level builder: every submenu lives in its own
+        // helper so each piece reads as a unit. Read top-to-bottom; the
+        // order here is the order the user sees.
+
         private void Window_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
         {
             var menu = new ContextMenu();
+            menu.Items.Add(BuildProviderMenu());
+            menu.Items.Add(new Separator());
+            menu.Items.Add(BuildModeMenu());
+            menu.Items.Add(new Separator());
+            menu.Items.Add(BuildMicMenu());
+            menu.Items.Add(BuildSoundToggle());
+            menu.Items.Add(new Separator());
+            menu.Items.Add(BuildDelayMenu());
+            menu.Items.Add(new Separator());
+            menu.Items.Add(BuildPromptItem());
+            menu.Items.Add(BuildBiasItem());
+            menu.Items.Add(BuildHistoryItem());
+            menu.Items.Add(new Separator());
+            menu.Items.Add(BuildConfigItem());
+            menu.Items.Add(BuildPostProcessToggle());
+            menu.Items.Add(BuildHideItem());
+            menu.Items.Add(BuildExitItem());
+            menu.IsOpen = true;
+        }
 
+        private static MenuItem MakeItem(string header, Action onClick, bool isChecked = false)
+        {
+            var item = new MenuItem { Header = header, IsChecked = isChecked };
+            item.Click += (_, _) => onClick();
+            return item;
+        }
+
+        private MenuItem BuildProviderMenu()
+        {
             var providerMenu = new MenuItem { Header = $"🔌 Provider: {GetActiveProvider()?.Name ?? "?"}" };
             foreach (var provider in _providers)
             {
                 string pid = provider.Id;
-                var pItem = new MenuItem
-                {
-                    Header = provider.Name,
-                    IsChecked = pid == _activeProviderId
-                };
-                pItem.Click += (_, _) => SwitchProvider(pid);
-                providerMenu.Items.Add(pItem);
+                providerMenu.Items.Add(MakeItem(provider.Name, () => SwitchProvider(pid), isChecked: pid == _activeProviderId));
             }
             providerMenu.Items.Add(new Separator());
-            var configProvidersItem = new MenuItem { Header = "⚙ Configure Providers..." };
-            configProvidersItem.Click += (_, _) => OpenProviderSettingsDialog();
-            providerMenu.Items.Add(configProvidersItem);
-            menu.Items.Add(providerMenu);
+            providerMenu.Items.Add(MakeItem("⚙ Configure Providers...", OpenProviderSettingsDialog));
+            return providerMenu;
+        }
 
-            menu.Items.Add(new Separator());
-
+        private MenuItem BuildModeMenu()
+        {
             var modeMenu = new MenuItem { Header = $"⚡ Mode: {_dictationMode}" };
-            var rtItem = new MenuItem { Header = "Realtime (live typing)", IsChecked = IsRealtimeMode };
-            rtItem.Click += (_, _) =>
+            modeMenu.Items.Add(MakeItem("Realtime (live typing)", () =>
             {
                 if (!_activeSupportsRealtime)
                 {
@@ -2403,55 +1841,66 @@ namespace WhisperInk
                     return;
                 }
                 _dictationMode = "Realtime"; SaveConfig(); UpdateStatusLabel();
-            };
-            modeMenu.Items.Add(rtItem);
-            var batchItem = new MenuItem { Header = "Batch (record → paste)", IsChecked = !IsRealtimeMode };
-            batchItem.Click += (_, _) => { _dictationMode = "Batch"; SaveConfig(); UpdateStatusLabel(); };
-            modeMenu.Items.Add(batchItem);
-            menu.Items.Add(modeMenu);
+            }, isChecked: IsRealtimeMode));
 
-            menu.Items.Add(new Separator());
+            modeMenu.Items.Add(MakeItem("Batch (record → paste)", () =>
+            {
+                _dictationMode = "Batch"; SaveConfig(); UpdateStatusLabel();
+            }, isChecked: !IsRealtimeMode));
+            return modeMenu;
+        }
 
+        private MenuItem BuildMicMenu()
+        {
             var micMenu = new MenuItem { Header = "🎙 Microphone" };
             for (int i = 0; i < WaveIn.DeviceCount; i++)
             {
+                int deviceIndex = i; // capture for the closure
                 var cap = WaveIn.GetCapabilities(i);
-                int deviceIndex = i;
-                var item = new MenuItem { Header = cap.ProductName, IsChecked = i == _selectedDeviceNumber };
-                item.Click += (_, _) => { _selectedDeviceNumber = deviceIndex; SaveConfig(); };
-                micMenu.Items.Add(item);
+                micMenu.Items.Add(MakeItem(cap.ProductName, () =>
+                {
+                    _selectedDeviceNumber = deviceIndex; SaveConfig();
+                }, isChecked: i == _selectedDeviceNumber));
             }
-            menu.Items.Add(micMenu);
+            return micMenu;
+        }
 
-            var soundItem = new MenuItem { Header = _isSoundEnabled ? "🔊 Sound: ON" : "🔇 Sound: OFF" };
-            soundItem.Click += (_, _) => { _isSoundEnabled = !_isSoundEnabled; SaveConfig(); };
-            menu.Items.Add(soundItem);
+        private MenuItem BuildSoundToggle()
+            => MakeItem(_isSoundEnabled ? "🔊 Sound: ON" : "🔇 Sound: OFF",
+                () => { _isSoundEnabled = !_isSoundEnabled; SaveConfig(); });
 
-            menu.Items.Add(new Separator());
-
+        private MenuItem BuildDelayMenu()
+        {
             var delayMenu = new MenuItem { Header = "⏱ Streaming Delay" };
             foreach (int ms in new[] { 240, 480, 1000, 1500, 2400 })
             {
                 int delayMs = ms;
-                string label = ms switch { 240 => "240ms (fastest)", 480 => "480ms (recommended)", 1000 => "1000ms", 1500 => "1500ms", 2400 => "2400ms (most accurate)", _ => $"{ms}ms" };
-                var delayItem = new MenuItem { Header = label, IsChecked = _targetStreamingDelayMs == ms };
-                delayItem.Click += (_, _) => { _targetStreamingDelayMs = delayMs; SaveConfig(); };
-                delayMenu.Items.Add(delayItem);
+                string label = ms switch
+                {
+                    240  => "240ms (fastest)",
+                    480  => "480ms (recommended)",
+                    1000 => "1000ms",
+                    1500 => "1500ms",
+                    2400 => "2400ms (most accurate)",
+                    _    => $"{ms}ms"
+                };
+                delayMenu.Items.Add(MakeItem(label, () =>
+                {
+                    _targetStreamingDelayMs = delayMs; SaveConfig();
+                }, isChecked: _targetStreamingDelayMs == ms));
             }
-            menu.Items.Add(delayMenu);
+            return delayMenu;
+        }
 
-            menu.Items.Add(new Separator());
-
-            var promptItem = new MenuItem { Header = "📝 System Prompt" };
-            promptItem.Click += (_, _) =>
+        private MenuItem BuildPromptItem()
+            => MakeItem("📝 System Prompt", () =>
             {
                 var pw = new PromptWindow(_systemPrompt);
                 if (pw.ShowDialog() == true) { _systemPrompt = pw.PromptText; SaveConfig(); }
-            };
-            menu.Items.Add(promptItem);
+            });
 
-            var biasItem = new MenuItem { Header = "🎯 Context Bias Terms" };
-            biasItem.Click += (_, _) =>
+        private MenuItem BuildBiasItem()
+            => MakeItem("🎯 Context Bias Terms", () =>
             {
                 var biasWindow = new ContextBiasWindow(_contextBiasTerms);
                 if (biasWindow.ShowDialog() == true)
@@ -2459,38 +1908,28 @@ namespace WhisperInk
                     _contextBiasTerms = biasWindow.BiasTerms;
                     SaveConfig();
                 }
-            };
-            menu.Items.Add(biasItem);
+            });
 
-            var historyItem = new MenuItem { Header = "📋 History" };
-            historyItem.Click += (_, _) => new HistoryWindow().Show();
-            menu.Items.Add(historyItem);
+        private MenuItem BuildHistoryItem()
+            => MakeItem("📋 History", () => new HistoryWindow().Show());
 
-            menu.Items.Add(new Separator());
+        private MenuItem BuildConfigItem()
+            => MakeItem($"📂 Config: {ConfigFile}",
+                () => Process.Start("explorer.exe", $"/select,\"{ConfigFile}\""));
 
-            var configItem = new MenuItem { Header = $"📂 Config: {ConfigFile}" };
-            configItem.Click += (_, _) => Process.Start("explorer.exe", $"/select,\"{ConfigFile}\"");
-            menu.Items.Add(configItem);
-
-            var ppItem = new MenuItem { Header = _postProcessBatch ? "🩺 Med Correction: ON" : "🩺 Med Correction: OFF" };
-            ppItem.Click += (_, _) =>
+        private MenuItem BuildPostProcessToggle()
+            => MakeItem(_postProcessBatch ? "🩺 Med Correction: ON" : "🩺 Med Correction: OFF", () =>
             {
                 _postProcessBatch = !_postProcessBatch;
                 SaveConfig();
                 UpdateStatusLabel();
-            };
-            menu.Items.Add(ppItem);
+            });
 
-            var hideItem = new MenuItem { Header = "⬇ Hide to tray" };
-            hideItem.Click += (_, _) => HideToTray();
-            menu.Items.Add(hideItem);
+        private MenuItem BuildHideItem()
+            => MakeItem("⬇ Hide to tray", HideToTray);
 
-            var exitItem = new MenuItem { Header = "❌ Quit" };
-            exitItem.Click += (_, _) => QuitApplication();
-            menu.Items.Add(exitItem);
-
-            menu.IsOpen = true;
-        }
+        private MenuItem BuildExitItem()
+            => MakeItem("❌ Quit", QuitApplication);
 
         private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
@@ -2564,22 +2003,12 @@ namespace WhisperInk
             // Cloud providers with a missing key → open the provider
             // settings dialog. Local providers → open the model folder
             // so the user can drop files in.
-            bool isLocal = prov.Id is "cohere-onnx"
-                               or "cohere-gguf"
-                               or "cohere-gguf-server"
-                               or "cohere-gguf-cuda-server"
-                               or "cohere-gguf-cuda-server-q8"
-                               or "parakeet-local"
-                               or "cohere-local-q4"
-                               or "cohere-local-q6k"
-                               or "voxtral-local"
-                               or "granite-local";
-
-            if (isLocal)
+            if (prov.IsLocalProvider)
             {
                 try
                 {
-                    string modelFolder = Path.Combine(ConfigFolder, "cohere-gguf");
+                    string sub = string.IsNullOrWhiteSpace(prov.LocalModelFolder) ? "cohere-gguf" : prov.LocalModelFolder;
+                    string modelFolder = Path.Combine(ConfigFolder, sub);
                     if (!Directory.Exists(modelFolder)) Directory.CreateDirectory(modelFolder);
                     Process.Start(new ProcessStartInfo(modelFolder) { UseShellExecute = true });
                 }
@@ -2601,6 +2030,11 @@ namespace WhisperInk
             if (win.ShowDialog() != true) return;
 
             _providers = win.ResultProviders;
+
+            // The user may have edited any provider's URL / key / port / GGUF
+            // path — drop every cached transcriber so the next dictation
+            // re-creates against the new config.
+            _transcribers?.DropAll();
 
             string? desiredActive = win.ResultActiveProviderId;
             if (!string.IsNullOrWhiteSpace(desiredActive) &&

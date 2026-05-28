@@ -61,7 +61,12 @@
         <!-- Provider fields -->
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
             <StackPanel x:Name="FieldsPanel" Margin="0,0,0,10">
-                <Label Content="Display Name"/>
+                <DockPanel Margin="0,0,0,4">
+                    <Label DockPanel.Dock="Left" Content="Display Name"/>
+                    <TextBlock x:Name="TxtTranscriberKind" DockPanel.Dock="Right"
+                               Foreground="#888" FontSize="10" VerticalAlignment="Center"
+                               ToolTip="Determined by TranscriberKind in config.json. Change config.json to switch (e.g. between Http and LocalCrispAsrServer)."/>
+                </DockPanel>
                 <TextBox x:Name="TxtName" Margin="0,0,0,8"/>
 
                 <Label Content="Base URL  (no trailing slash)"/>
@@ -144,9 +149,16 @@
 
                 <Separator Background="#333" Margin="0,4,0,8"/>
 
-                <GroupBox Header="Scribe v2 Keyterms (ElevenLabs only)" Margin="0,0,0,4"
+                <GroupBox x:Name="ScribeGroup"
+                          Header="ElevenLabs Scribe v2" Margin="0,0,0,4"
                           BorderBrush="#444" Foreground="#AAAAAA">
                     <StackPanel Margin="4,4,4,4">
+                        <CheckBox x:Name="ChkTagAudioEvents" Content="Tag audio events ((laughter), (coughing), ...)"
+                                  ToolTip="API default is true. Off = clean clinical dictation."/>
+                        <CheckBox x:Name="ChkNoVerbatim" Content="Strip fillers and false starts (no_verbatim)"
+                                  ToolTip="On = clean output. Off = preserve every &quot;um&quot;/&quot;uh&quot;/restart — better for patient interviews."/>
+
+                        <Label Content="Keyterms" Margin="0,8,0,0"/>
                         <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10" Margin="0,0,0,6">
                             One term per line. Max 1000 terms, &lt;50 chars each, 5 words max.
                             Only sent when ElevenLabs Scribe v2 is the active provider. ~20% cost surcharge.

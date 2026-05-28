@@ -20,18 +20,20 @@
 // longer needs the BatchRecognize endpoint, which is out of scope for v1.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 using Google.Apis.Auth.OAuth2;
 
 namespace WhisperInk
 {
-    public class GoogleChirp3Transcriber : IDisposable
+    public class GoogleChirp3Transcriber : ITranscriber
     {
         private const string Scope = "https://www.googleapis.com/auth/cloud-platform";
         private const double SyncWarnSeconds = 55.0;  // warn before Google's 60s sync cap
@@ -44,15 +46,53 @@ namespace WhisperInk
         private readonly string? _projectId;
         private readonly GoogleCredential? _credential;
         private readonly string? _initError;
+        private readonly ApiProvider? _provider;
+        private readonly Action<string> _log;
 
         /// <summary>True if credentials parsed cleanly and the transcriber is ready to call.</summary>
-        public bool IsReady => _initError == null && _credential != null && !string.IsNullOrEmpty(_projectId);
+        public bool IsCredentialReady => _initError == null && _credential != null && !string.IsNullOrEmpty(_projectId);
 
         /// <summary>Reason the transcriber failed to initialize, if any.</summary>
         public string? LastError => _initError;
 
+        public string DisplayName => _provider?.Name ?? "Google Chirp 3";
+
+        /// <summary>Factory-friendly constructor used by <see cref="TranscriberFactory"/>.</summary>
+        public GoogleChirp3Transcriber(ApiProvider provider, Action<string> log)
+            : this(provider?.ApiKey ?? "", provider?.BaseUrl ?? "", provider?.TranscriptionModel ?? "chirp_3")
+        {
+            _provider = provider;
+            _log = log ?? (_ => { });
+        }
+
+        public bool IsReady(out string? diagnostic)
+        {
+            if (!IsCredentialReady)
+            {
+                diagnostic = _initError ?? "credentials not loaded";
+                return false;
+            }
+            diagnostic = null;
+            return true;
+        }
+
+        public async Task<string?> TranscribeAsync(byte[] wavBytes, IReadOnlyList<string> biasTerms, CancellationToken ct = default)
+        {
+            try
+            {
+                var phraseHints = biasTerms is { Count: > 0 } ? new List<string>(biasTerms) : null;
+                return await TranscribeAsync(wavBytes, _provider?.Language ?? "en", phraseHints).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _log($"GoogleChirp3 transcribe failed: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
+
         public GoogleChirp3Transcriber(string saJsonOrPath, string baseUrl, string model)
         {
+            _log = _ => { };
             _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
             _saJsonOrPath = saJsonOrPath ?? "";
             _baseUrl = (baseUrl ?? "").TrimEnd('/');
@@ -92,7 +132,7 @@ namespace WhisperInk
 
         public async Task<string?> TranscribeAsync(byte[] wavBytes, string languageShortCode, System.Collections.Generic.List<string>? phraseHints)
         {
-            if (!IsReady) throw new InvalidOperationException($"Google Chirp 3 not ready: {_initError}");
+            if (!IsCredentialReady) throw new InvalidOperationException($"Google Chirp 3 not ready: {_initError}");
             if (wavBytes == null || wavBytes.Length == 0) return null;
 
             string bcp47 = MapToBcp47(languageShortCode);

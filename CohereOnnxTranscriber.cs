@@ -25,13 +25,14 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
 namespace WhisperInk
 {
-    public class CohereOnnxTranscriber : IDisposable
+    public class CohereOnnxTranscriber : ITranscriber
     {
         // ── Model constants ─────────────────────────────────────────────
         private const int NumDecoderLayers = 8;
@@ -61,6 +62,8 @@ namespace WhisperInk
         private bool _isLoaded;
         private readonly string _modelDir;
         private readonly bool _useDirectML;
+        private readonly ApiProvider? _provider;
+        private readonly Action<string> _log;
 
         // ── Pre-allocated buffers (reused across decode steps) ──────────
         private float[] _selfKA = new float[KvCacheSize];
@@ -72,12 +75,23 @@ namespace WhisperInk
         /// <summary>True once the model sessions are loaded and ready.</summary>
         public bool IsLoaded => _isLoaded;
 
+        public string DisplayName => _provider?.Name ?? "Cohere Local (ONNX)";
+
         public CohereOnnxTranscriber(string? modelDir = null, bool useDirectML = true)
         {
             _modelDir = modelDir ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 ".WhisperInk", "cohere-onnx");
             _useDirectML = useDirectML;
+            _log = _ => { };
+        }
+
+        /// <summary>Factory-friendly constructor used by <see cref="TranscriberFactory"/>.</summary>
+        public CohereOnnxTranscriber(ApiProvider provider, Action<string> log)
+            : this(modelDir: null, useDirectML: true)
+        {
+            _provider = provider ?? throw new ArgumentNullException(nameof(provider));
+            _log = log ?? (_ => { });
         }
 
         public bool ModelFilesExist()
@@ -85,6 +99,58 @@ namespace WhisperInk
             return File.Exists(Path.Combine(_modelDir, EncoderFilename))
                 && File.Exists(Path.Combine(_modelDir, DecoderFilename))
                 && File.Exists(Path.Combine(_modelDir, TokensFilename));
+        }
+
+        public bool IsReady(out string? diagnostic)
+        {
+            if (!ModelFilesExist())
+            {
+                diagnostic = $"ONNX model files missing in {_modelDir} (need {EncoderFilename}, {DecoderFilename}, {TokensFilename})";
+                return false;
+            }
+            diagnostic = null;
+            return true;
+        }
+
+        public async Task<string?> TranscribeAsync(byte[] wavBytes, IReadOnlyList<string> biasTerms, CancellationToken ct = default)
+        {
+            // ONNX path has no bias-term support; the cstr/cohere-transcribe-onnx-int4
+            // graph doesn't accept prompt tokens, so biasTerms are intentionally ignored.
+            if (wavBytes == null || wavBytes.Length == 0) return null;
+            try
+            {
+                return await TranscribeAsync(wavBytes, _provider?.Language ?? "en").ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _log($"CohereOnnx transcribe failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Transcribe a complete WAV (header + PCM) from memory. Faster than
+        /// the file-path overload because we skip the disk roundtrip.
+        /// </summary>
+        public Task<string?> TranscribeAsync(byte[] wavBytes, string language = "en")
+        {
+            if (!_isLoaded) Load();
+            return Task.Run<string?>(() =>
+            {
+                try
+                {
+                    if (language != "en") _promptIds = BuildPromptTokens(language);
+                    using var ms = new MemoryStream(wavBytes, writable: false);
+                    using var reader = new BinaryReader(ms);
+                    float[] audio = ReadWavFromReader(reader);
+                    return TranscribeAudio(audio);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"CohereOnnx (mem) error: {ex.Message}");
+                    return null;
+                }
+            });
         }
 
         /// <summary>
@@ -164,36 +230,14 @@ namespace WhisperInk
         {
             if (!_isLoaded) Load();
 
-            return await Task.Run(() =>
+            return await Task.Run<string?>(() =>
             {
                 try
                 {
-                    if (language != "en")
-                        _promptIds = BuildPromptTokens(language);
-
-                    float[] audio = ReadWav(wavPath);
-
-                    if (audio.Length <= MaxChunkSamples)
-                    {
-                        return TranscribeChunk(audio);
-                    }
-                    else
-                    {
-                        var results = new List<string>();
-                        int offset = 0;
-                        while (offset < audio.Length)
-                        {
-                            int remaining = audio.Length - offset;
-                            int chunkLen = Math.Min(MaxChunkSamples, remaining);
-                            float[] chunk = new float[chunkLen];
-                            Array.Copy(audio, offset, chunk, 0, chunkLen);
-                            string? chunkText = TranscribeChunk(chunk);
-                            if (!string.IsNullOrWhiteSpace(chunkText))
-                                results.Add(chunkText);
-                            offset += StrideSamples;
-                        }
-                        return string.Join(" ", results);
-                    }
+                    if (language != "en") _promptIds = BuildPromptTokens(language);
+                    using var reader = new BinaryReader(File.OpenRead(wavPath));
+                    float[] audio = ReadWavFromReader(reader);
+                    return TranscribeAudio(audio);
                 }
                 catch (Exception ex)
                 {
@@ -201,6 +245,28 @@ namespace WhisperInk
                     return null;
                 }
             });
+        }
+
+        /// <summary>Shared chunked-decoding core used by both byte[] and
+        /// filepath transcribe paths.</summary>
+        private string? TranscribeAudio(float[] audio)
+        {
+            if (audio.Length <= MaxChunkSamples)
+                return TranscribeChunk(audio);
+
+            var results = new List<string>();
+            int offset = 0;
+            while (offset < audio.Length)
+            {
+                int remaining = audio.Length - offset;
+                int chunkLen = Math.Min(MaxChunkSamples, remaining);
+                float[] chunk = new float[chunkLen];
+                Array.Copy(audio, offset, chunk, 0, chunkLen);
+                string? chunkText = TranscribeChunk(chunk);
+                if (!string.IsNullOrWhiteSpace(chunkText)) results.Add(chunkText);
+                offset += StrideSamples;
+            }
+            return string.Join(" ", results);
         }
 
         /// <summary>
@@ -371,13 +437,11 @@ namespace WhisperInk
         }
 
         /// <summary>
-        /// Reads a 16-bit PCM WAV file and returns mono float32 samples.
-        /// Handles stereo by averaging channels.
+        /// Reads a 16-bit PCM WAV stream and returns mono float32 samples.
+        /// Handles stereo by averaging channels. Caller owns the reader.
         /// </summary>
-        private static float[] ReadWav(string path)
+        private static float[] ReadWavFromReader(BinaryReader reader)
         {
-            using var reader = new BinaryReader(File.OpenRead(path));
-
             reader.ReadBytes(4); // "RIFF"
             reader.ReadInt32();  // file size
             reader.ReadBytes(4); // "WAVE"

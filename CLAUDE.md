@@ -20,7 +20,7 @@ Three directories are involved:
    - `cohere-onnx\` — ONNX weights for `CohereOnnxTranscriber`
    - `cohere-gguf\` — `crispasr.exe` + all its DLLs + any `*.gguf` models for GGUF/Parakeet providers
 
-The `%APPDATA%\.WhisperInk\cohere-gguf\` path is **hardcoded** in `CrispAsrServerTranscriber.cs` and the `CohereGguf*Transcriber.cs` siblings. If that hardcode ever needs to change, it's a single-line `Path.Combine(...ApplicationData..., ".WhisperInk", "cohere-gguf")` in each.
+The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServerTranscriber.cs`. Providers can override this per-entry via `ApiProvider.LocalModelFolder` (e.g. `"cohere-gguf-cuda"` for the CUDA preset) when the user keeps GGUFs in a different subdirectory.
 
 ## Architecture
 
@@ -28,15 +28,15 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` path is **hardcoded** in `CrispAsrServe
 
 | File | Purpose |
 |------|---------|
-| `MainWindow.xaml.cs` | Global keyboard hook, recording state machine, dispatch to every transcriber, context menu UI. ~1800 LOC. |
-| `AppConfig.cs` | `ApiProvider` model + `AppConfig` defaults. Edit `CreateDefaults()` to add new providers. |
+| `MainWindow.xaml.cs` | Global keyboard hook, recording state machine, transcription dispatch (now one factory call), tray context menu. ~2200 LOC. |
+| `AppConfig.cs` | `ApiProvider` model, `TranscriberKind` enum, default provider list. New providers added via `CreateDefaults()` or directly in `config.json`. |
+| `ITranscriber.cs` | Common interface every batch backend implements (`TranscribeAsync(byte[], biasTerms, ct)`). |
+| `TranscriberFactory.cs` | Lazy-caches one `ITranscriber` per provider id. `Drop(id)` to free a single model; `DropAll()` after settings edits. |
+| `HttpTranscriber.cs` | OpenAI-compatible multipart POST. Covers Mistral batch, OpenAI Whisper, Cohere v2 cloud, ElevenLabs Scribe v2 (auth/keyterms/tag_audio_events/no_verbatim quirks gated on provider fields), Qwen3-ASR, and any user-added cloud provider. |
+| `CrispAsrServerTranscriber.cs` | Generic adapter for `crispasr.exe --server`. Reads port / model glob / backend hint / GPU backend / model folder from the `ApiProvider`. One class for Parakeet, Cohere, Voxtral, Granite, Canary, …  |
 | `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe INT4/INT8 (encoder-decoder, 30s chunking, 5s overlap). |
-| `CohereGgufTranscriber.cs` | One-shot `crispasr.exe` subprocess per recording. Cohere-only. |
-| `CohereGgufServerTranscriber.cs` | Persistent `crispasr.exe --server` on CPU. Cohere-only, predates the unified server path. |
-| `CohereGgufCudaServerTranscriber.cs` | Same but CUDA. Cohere-only. |
-| `CohereGgufCudaQ8ServerTranscriber.cs` | CUDA Q8 variant with `cohere_terms` context biasing. |
-| `CrispAsrServerTranscriber.cs` | **Generic** server adapter. Auto-detects backend from GGUF metadata, so one class serves Parakeet/Canary/Voxtral/Qwen3 without per-model subclasses. New models should use this, not a new Cohere-style wrapper. |
-| `ProviderSettingsWindow.xaml(.cs)` | GUI for URLs, keys, auth header, model field, bias mode, Scribe keyterms. |
+| `GoogleChirp3Transcriber.cs` | Google Cloud STT v2 with OAuth + base64 JSON body and `adaptation.phraseSets` biasing. |
+| `ProviderSettingsWindow.xaml(.cs)` | GUI for URLs, keys, auth header, model field, bias mode, Scribe keyterms. ElevenLabs-only fields hide for other providers. |
 | `ContextBiasWindow.xaml(.cs)` | Global context-bias term list. |
 | `PromptWindow.xaml(.cs)` | System-prompt editor for Ctrl+Alt AI mode. |
 | `HistoryService.cs`, `HistoryWindow.xaml(.cs)` | Local transcript log + viewer. |
@@ -56,43 +56,51 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` path is **hardcoded** in `CrispAsrServe
 
 ### Provider system
 
-`ApiProvider` captures every knob:
+`ApiProvider` captures every knob; the cloud-vs-local split lives in `TranscriberKind`:
 
-- `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`)
-- `TranscriptionModel`, `ChatModel`, `PostProcessModel`
-- `SupportsRealtime`, `SupportsTranscription`
-- `TranscriptionTemperature` (nullable)
-- `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array)
-- `ScribeKeytermsRaw` — newline-delimited keyterms for ElevenLabs Scribe v2 (repeated `keyterms` multipart fields, capped at 1000 terms / <50 chars / ≤5 words each)
+- **Shared HTTP/cloud knobs**: `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`), `TranscriptionModel`, `ChatModel`, `PostProcessModel`, `SupportsRealtime`, `SupportsTranscription`, `TranscriptionTemperature` (nullable)
+- **Bias**: `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array)
+- **ElevenLabs-only**: `ScribeKeytermsRaw` (newline-delimited, capped at 1000 terms / <50 chars / ≤5 words each), `TagAudioEvents`, `NoVerbatim`
+- **TranscriberKind**: `Http` | `LocalOnnx` | `LocalCrispAsrServer` | `GoogleChirp3` — picks the `ITranscriber` implementation
+- **LocalCrispAsrServer-only**: `LocalServerPort`, `LocalModelGlob` (e.g. `"parakeet-*.gguf"`), `LocalBackendHint` (e.g. `"cohere"` when auto-detect doesn't cover the GGUF), `LocalGpuBackend` (blank → fall back to global `CrispGpuBackend`), `LocalModelFolder` (blank → `cohere-gguf`)
 
 Default providers (`AppConfig.CreateDefaults()`):
 
-| Id | Name | Transport | Notes |
-|----|------|-----------|-------|
-| `mistral` | Mistral | HTTPS + WS | Voxtral, realtime + batch |
-| `openai` | OpenAI | HTTPS | Whisper-1, `whisper_prompt` bias |
-| `elevenlabs` | ElevenLabs Scribe | HTTPS | `xi-api-key` auth, `model_id` field, keyterms |
-| `cohere-api` | Cohere Transcribe API | HTTPS | Cohere v2, temp 0.1, `cohere_terms` |
-| `local` | Local Server | HTTP | `localhost:8100`, `whisper_prompt` |
-| `cohere-onnx` | Cohere Local (ONNX) | in-process | Bypasses HTTP; `CohereOnnxTranscriber` |
-| `cohere-gguf` | Cohere Local (CrispASR GGUF) | subprocess | llama.cpp CLI, one-shot per call |
-| `cohere-gguf-server` | Cohere Local (CrispASR server) | HTTP 8766 | Persistent CPU server |
-| `cohere-gguf-cuda-server` | Cohere Local (CrispASR CUDA) | HTTP | Persistent CUDA server |
-| `cohere-gguf-cuda-server-q8` | Cohere Local (CrispASR CUDA Q8) | HTTP | CUDA Q8 + `cohere_terms` |
-| `qwen3-asr` | Qwen3-ASR Local | HTTP 8102 | OpenAI-compatible |
-| `parakeet-local` | Parakeet Local (CrispASR) | HTTP 8103 | Auto-spawned via `CrispAsrServerTranscriber` |
-| `cohere-local-q4` | Cohere Local Q4 (CrispASR) | HTTP 8104 | Auto-spawned, Q4_K GGUF, explicit `--backend cohere` |
-| `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | HTTP 8105 | Auto-spawned, Q6_K GGUF, explicit `--backend cohere`, near-F16 accuracy |
+| Id | Name | TranscriberKind | Notes |
+|----|------|-----------------|-------|
+| `mistral` | Mistral | `Http` + realtime WS | Voxtral, realtime + batch |
+| `openai` | OpenAI | `Http` | Whisper-1, `whisper_prompt` bias |
+| `elevenlabs` | ElevenLabs Scribe | `Http` | `xi-api-key` auth, `model_id` field, keyterms |
+| `cohere-api` | Cohere Transcribe API | `Http` | Cohere v2, temp 0.1, `cohere_terms` |
+| `cohere-onnx` | Cohere Local (ONNX) | `LocalOnnx` | In-process; `CohereOnnxTranscriber` |
+| `cohere-gguf-server` | Cohere Local (CrispASR, CPU) | `LocalCrispAsrServer` | Port 8766, `--backend cohere`, `cpu` |
+| `cohere-gguf-cuda-server` | Cohere Local (CrispASR, CUDA) | `LocalCrispAsrServer` | Port 8767, `--backend cohere`, `cuda` |
+| `cohere-gguf-cuda-server-q8` | Cohere Local (CrispASR, CUDA Q8) | `LocalCrispAsrServer` | Port 8768, Q8 GGUF |
+| `qwen3-asr` | Qwen3-ASR Local | `Http` | Port 8102, user-managed external server |
+| `parakeet-local` | Parakeet Local (CrispASR) | `LocalCrispAsrServer` | Port 8103, auto-detect backend |
+| `cohere-local-q4` | Cohere Local Q4 (CrispASR) | `LocalCrispAsrServer` | Port 8104, Q4_K GGUF, `--backend cohere` |
+| `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | `LocalCrispAsrServer` | Port 8105, Q6_K GGUF, near-F16 accuracy |
+| `voxtral-local` | Voxtral Local (CrispASR) | `LocalCrispAsrServer` | Port 8106, `--backend voxtral`, prompt bias |
+| `granite-local` | Granite Speech 4.1 Local (CrispASR) | `LocalCrispAsrServer` | Port 8107, `--backend granite`, prompt bias |
+| `google-chirp3` | Google Chirp 3 | `GoogleChirp3` | OAuth + JSON body, native `phraseSets` biasing |
+
+### Dispatch pipeline (`TranscriberFactory` + `ITranscriber`)
+
+`MainWindow.xaml.cs:TranscribeAudioAsync` is a single factory lookup — no per-provider branching:
+
+```csharp
+var transcriber = _transcribers.GetOrCreate(provider);
+if (!transcriber.IsReady(out var diag)) { Log(diag); return null; }
+return await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms);
+```
+
+The factory caches one `ITranscriber` per provider id. Switching providers calls `Drop(oldId)` so we don't keep ~2 GB of resident model. Saving the settings dialog calls `DropAll()` because any field on any provider may have been edited.
 
 ### CrispAsrServerTranscriber (the generic one)
 
-The clean path for any future GGUF model. Construct with a model glob (`"parakeet-*.gguf"`, `"canary-*.gguf"`, etc.) and a port; first `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np`, waits up to 45s for `/health`, and posts subsequent audio to `/v1/audio/transcriptions`. Server keeps model resident; process tree killed on `Dispose()`.
+The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X] [--gpu-backend Y]`, waits up to 45s for `/health`, and posts subsequent audio to `/v1/audio/transcriptions`. Server keeps model resident; process tree killed on `Dispose()`.
 
-An optional `backendHint` parameter appends `--backend <hint>` to the spawn args. Cohere GGUFs need `backendHint: "cohere"` because they don't expose backend metadata for auto-detect. Parakeet and the other newer backends auto-detect correctly and leave it null.
-
-`MainWindow.xaml.cs` owns one field per auto-spawned model (`_parakeetServer`, `_cohereQ4Server`). Disposal chains are handled in the main window's `OnClosed`.
-
-The `CohereGguf*Transcriber` classes predate this unified class and should be considered legacy — new models should add a provider entry and reuse `CrispAsrServerTranscriber` rather than subclassing.
+The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, and `CohereGgufCudaQ8ServerTranscriber.cs` files have been deleted — the same providers now use this generic class via config-only entries.
 
 ### Local ONNX inference (CohereOnnxTranscriber)
 
@@ -155,13 +163,28 @@ Deploy copies **every** `*.dll` from `build\bin\Release\`, not just `ggml*`. The
 
 ## Adding a new GGUF model
 
-1. Download the GGUF into `%APPDATA%\.WhisperInk\cohere-gguf\`.
-2. Add an `ApiProvider` entry in `AppConfig.CreateDefaults()` with a unique `Id` (e.g., `"canary-local"`).
-3. In `MainWindow.xaml.cs`, add a field `private CrispAsrServerTranscriber? _canaryServer;`, an `IsCanaryLocalProvider` helper, and a dispatch block in the transcription path that constructs `new CrispAsrServerTranscriber(modelGlob: "canary-*.gguf", port: <pick_a_port>, displayName: "Canary")`.
-4. Add disposal to `OnClosed`.
-5. If you want user-configurable port/model selection, add it to `ProviderSettingsWindow`.
+Config-only — no recompile required.
 
-No C++ work needed — CrispASR auto-detects the backend from GGUF metadata.
+1. Download the GGUF into `%APPDATA%\.WhisperInk\cohere-gguf\` (or a sibling folder if you set `LocalModelFolder`).
+2. Add a provider entry to `%APPDATA%\.WhisperInk\config.json`:
+   ```json
+   {
+     "Id": "canary-local",
+     "Name": "Canary Local (CrispASR)",
+     "BaseUrl": "http://localhost:8108",
+     "TranscriberKind": "LocalCrispAsrServer",
+     "LocalServerPort": 8108,
+     "LocalModelGlob": "canary-*.gguf",
+     "ContextBiasMode": "none",
+     "Language": "en"
+   }
+   ```
+   Set `LocalBackendHint` if the GGUF doesn't auto-detect (Cohere needs `"cohere"`, Voxtral `"voxtral"`, Granite `"granite"`).
+3. Restart WhisperInk. The provider appears in the tray menu under 🔌 Provider, and `CrispAsrServerTranscriber` lazy-spawns the server on first dictation.
+
+For a permanent default (shipped to every install), add the same entry to `AppConfig.CreateDefaults()` so new users get it on first run.
+
+No C++ work needed — CrispASR auto-detects most backends from GGUF metadata.
 
 ## Common gotchas
 

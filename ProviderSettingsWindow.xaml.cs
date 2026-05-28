@@ -83,7 +83,18 @@ namespace WhisperInk
                 CmbContextBiasMode.SelectedIndex = 0;
 
             TxtScribeKeyterms.Text = _current.ScribeKeytermsRaw;
+            ChkTagAudioEvents.IsChecked = _current.TagAudioEvents;
+            ChkNoVerbatim.IsChecked     = _current.NoVerbatim;
             UpdateKeytermsCount();
+
+            TxtTranscriberKind.Text = $"Type: {_current.TranscriberKind}";
+            // ElevenLabs Scribe v2 fields only matter when the provider uses
+            // the xi-api-key auth scheme. Hide the whole group for everyone
+            // else so the dialog doesn't suggest editable knobs that won't
+            // do anything.
+            ScribeGroup.Visibility = _current.UsesCustomAuthHeader
+                ? Visibility.Visible
+                : Visibility.Collapsed;
         }
 
         private void CommitCurrentFields()
@@ -116,6 +127,8 @@ namespace WhisperInk
             _current.ContextBiasMode = (CmbContextBiasMode.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "none";
 
             _current.ScribeKeytermsRaw = TxtScribeKeyterms.Text;
+            _current.TagAudioEvents    = ChkTagAudioEvents.IsChecked == true;
+            _current.NoVerbatim        = ChkNoVerbatim.IsChecked == true;
         }
 
         private void TxtScribeKeyterms_TextChanged(object sender, TextChangedEventArgs e) =>
@@ -223,7 +236,15 @@ namespace WhisperInk
             ContextBiasMode = src.ContextBiasMode,
             ScribeKeytermsRaw = src.ScribeKeytermsRaw,
             TagAudioEvents = src.TagAudioEvents,
-            NoVerbatim = src.NoVerbatim
+            NoVerbatim = src.NoVerbatim,
+            // New schema fields (factory dispatch). Forgetting these here
+            // makes the dialog silently reset them every time it's opened.
+            TranscriberKind  = src.TranscriberKind,
+            LocalServerPort  = src.LocalServerPort,
+            LocalModelGlob   = src.LocalModelGlob,
+            LocalBackendHint = src.LocalBackendHint,
+            LocalGpuBackend  = src.LocalGpuBackend,
+            LocalModelFolder = src.LocalModelFolder,
         };
     }
 }

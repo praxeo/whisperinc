@@ -3,6 +3,21 @@ using System.Collections.Generic;
 
 namespace WhisperInk
 {
+    /// <summary>
+    /// Which ITranscriber implementation handles batch transcription for a
+    /// provider. Determines which factory branch instantiates it and which
+    /// fields on ApiProvider are meaningful. New providers added via
+    /// config.json must set this; legacy configs without the field fall
+    /// through to <see cref="Http"/>.
+    /// </summary>
+    public enum TranscriberKind
+    {
+        Http,                 // OpenAI-compatible multipart POST (Mistral batch, OpenAI, Cohere cloud, ElevenLabs, …)
+        LocalOnnx,            // In-process ONNX inference (CohereOnnxTranscriber)
+        LocalCrispAsrServer,  // Auto-spawned crispasr.exe --server (all GGUF backends)
+        GoogleChirp3,         // Google Cloud STT v2 with OAuth + JSON body
+    }
+
     public class ApiProvider
     {
         public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
@@ -93,6 +108,40 @@ namespace WhisperInk
         // Scribe v2 only. Only sent for xi-api-key auth (ElevenLabs).
         public bool NoVerbatim { get; set; } = true;
 
+        // ── Transcriber dispatch ─────────────────────────────────────────
+        // Decides which ITranscriber implementation the factory instantiates
+        // for this provider. Cloud/HTTP providers leave this at Http; local
+        // GGUF servers set LocalCrispAsrServer plus the Local* fields below.
+        public TranscriberKind TranscriberKind { get; set; } = TranscriberKind.Http;
+
+        // ── LocalCrispAsrServer fields ──────────────────────────────────
+        // All ignored unless TranscriberKind == LocalCrispAsrServer.
+
+        // Port the auto-spawned crispasr.exe binds to. Null → derived from BaseUrl.
+        // New models should use 81xx to avoid colliding with the legacy 8766–8768
+        // band and other localhost services.
+        public int? LocalServerPort { get; set; } = null;
+
+        // Filename glob CrispASR matches against LocalModelFolder.
+        // e.g. "parakeet-*.gguf", "cohere-transcribe-q4_k.gguf". A literal
+        // filename (no wildcard) is matched as-is.
+        public string LocalModelGlob { get; set; } = "";
+
+        // Optional --backend hint for crispasr.exe. Needed when GGUF metadata
+        // doesn't carry enough info for auto-detect: Cohere → "cohere",
+        // Voxtral → "voxtral", Granite → "granite". Parakeet/Canary auto-detect;
+        // leave blank.
+        public string LocalBackendHint { get; set; } = "";
+
+        // Per-provider GPU backend override ("auto" | "cuda" | "vulkan" | "metal" | "cpu").
+        // Blank → fall back to AppConfig.CrispGpuBackend (the global setting).
+        // Useful for pinning a preset to "cpu" even when the global default is "auto".
+        public string LocalGpuBackend { get; set; } = "";
+
+        // Folder under %APPDATA%\.WhisperInk\ holding the GGUF + crispasr.exe.
+        // Blank → "cohere-gguf" (the unified location all newer presets share).
+        public string LocalModelFolder { get; set; } = "";
+
         public List<string> GetValidatedKeyterms(out List<string> warnings)
         {
             warnings = new List<string>();
@@ -135,6 +184,11 @@ namespace WhisperInk
         /// <summary>True when auth should use a custom header instead of Authorization: Bearer.</summary>
         public bool UsesCustomAuthHeader => !string.IsNullOrWhiteSpace(AuthHeaderName);
 
+        /// <summary>True when the provider runs locally (no cloud HTTP roundtrip).</summary>
+        public bool IsLocalProvider =>
+            TranscriberKind == TranscriberKind.LocalOnnx ||
+            TranscriberKind == TranscriberKind.LocalCrispAsrServer;
+
         public static List<ApiProvider> CreateDefaults() => new()
         {
             new ApiProvider
@@ -149,7 +203,8 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.Http,
             },
             new ApiProvider
             {
@@ -163,7 +218,8 @@ namespace WhisperInk
                 SupportsTranscription = true,
                 TranscriptionTemperature = 0.0,
                 ContextBiasMode = "whisper_prompt",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.Http,
             },
             new ApiProvider
             {
@@ -181,10 +237,11 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",
                 Language = "en",
+                TranscriberKind = TranscriberKind.Http,
                 // Clinical-dictation defaults: suppress (laughter)/(coughing)
                 // tags and strip um/uh fillers from output.
                 TagAudioEvents = false,
-                NoVerbatim = true
+                NoVerbatim = true,
             },
             new ApiProvider
             {
@@ -201,22 +258,8 @@ namespace WhisperInk
                 // Temperature 0.1 → focused/deterministic output, good for medical dictation.
                 TranscriptionTemperature = 0.1,
                 ContextBiasMode = "cohere_terms",
-                Language = "en"
-            },
-            new ApiProvider
-            {
-                Id = "local",
-                Name = "Local Server",
-                BaseUrl = "http://localhost:8100",
-                TranscriptionModel = "",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
-                SupportsTranscription = true,
-                TranscriptionTemperature = null,
-                // Whisper-based local servers accept the OpenAI `prompt` field for vocabulary seeding.
-                ContextBiasMode = "whisper_prompt",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.Http,
             },
             new ApiProvider
             {
@@ -231,185 +274,165 @@ namespace WhisperInk
                 TranscriptionTemperature = null,
                 // Local ONNX inference — no HTTP multipart, so bias/temp fields are irrelevant here.
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalOnnx,
+            },
+            // ─── Local CrispASR-based providers (unified server path) ──────
+            // All of these spawn `crispasr.exe --server` lazily on first
+            // dictation via CrispAsrServerTranscriber. Port + model glob +
+            // optional backend hint differ; everything else is identical.
+            //
+            // Cohere GGUF (legacy ports 8766–8768 preserved so users with
+            // existing config.json files don't see surprises). New presets
+            // use the 81xx band.
+            new ApiProvider
+            {
+                Id = "cohere-gguf-server",
+                Name = "Cohere Local (CrispASR server, CPU)",
+                BaseUrl = "http://localhost:8766",
+                TranscriptionModel = "cohere",
+                SupportsTranscription = true,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8766,
+                LocalModelGlob = "cohere-transcribe-*.gguf",
+                LocalBackendHint = "cohere",
+                LocalGpuBackend = "cpu",
             },
             new ApiProvider
-	    {
-    	  	Id = "cohere-gguf",
-    		Name = "Cohere Local (CrispASR GGUF)",
-    		BaseUrl = "local://cohere-gguf",
-    		TranscriptionModel = "",
-   		ChatModel = "",
-    		PostProcessModel = "",
-    		SupportsRealtime = false,
-    		SupportsTranscription = true,
-    		TranscriptionTemperature = null,
-    		// Local CrispASR subprocess — no HTTP multipart, so bias/temp fields are irrelevant 			here.
-    		ContextBiasMode = "none",
-    		Language = "en"
-	    },
-	    new ApiProvider
-	    {
-    		Id = "cohere-gguf-server",
-    		Name = "Cohere Local (CrispASR server)",
-   		 BaseUrl = "local://cohere-gguf-server",
-   		 TranscriptionModel = "",
-    		ChatModel = "",
-    		PostProcessModel = "",
-    		SupportsRealtime = false,
-    		SupportsTranscription = true,
-    		TranscriptionTemperature = null,
-    		ContextBiasMode = "none",
-    		Language = "en"
-	    },
-	    new ApiProvider
-	    {
-    		Id = "cohere-gguf-cuda-server",
-    		Name = "Cohere Local (CrispASR CUDA)",
-    		BaseUrl = "local://cohere-gguf-cuda-server",
-    		TranscriptionModel = "",
-    		ChatModel = "",
-    		PostProcessModel = "",
-    		SupportsRealtime = false,
-    		SupportsTranscription = true,
-    		TranscriptionTemperature = null,
-    		ContextBiasMode = "none",
-    		Language = "en"
-	    },
-	    new ApiProvider
-	    {
-    		Id = "cohere-gguf-cuda-server-q8",
-    		Name = "Cohere Local (CrispASR CUDA Q8)",
-    		BaseUrl = "local://cohere-gguf-cuda-server-q8",
-    		TranscriptionModel = "",
-    		ChatModel = "",
-    		PostProcessModel = "",
-    		SupportsRealtime = false,
-    		SupportsTranscription = true,
-    		TranscriptionTemperature = null,
-    		ContextBiasMode = "cohere_terms",
-    		Language = "en"
-	    },
-	    new ApiProvider
+            {
+                Id = "cohere-gguf-cuda-server",
+                Name = "Cohere Local (CrispASR server, CUDA)",
+                BaseUrl = "http://localhost:8767",
+                TranscriptionModel = "cohere",
+                SupportsTranscription = true,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8767,
+                LocalModelGlob = "cohere-transcribe-*.gguf",
+                LocalBackendHint = "cohere",
+                LocalGpuBackend = "cuda",
+            },
+            new ApiProvider
+            {
+                Id = "cohere-gguf-cuda-server-q8",
+                Name = "Cohere Local (CrispASR server, CUDA Q8)",
+                BaseUrl = "http://localhost:8768",
+                TranscriptionModel = "cohere",
+                SupportsTranscription = true,
+                ContextBiasMode = "cohere_terms",
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8768,
+                LocalModelGlob = "cohere-transcribe-q8_0.gguf",
+                LocalBackendHint = "cohere",
+                LocalGpuBackend = "cuda",
+            },
+            new ApiProvider
             {
                 Id = "qwen3-asr",
                 Name = "Qwen3-ASR Local",
                 BaseUrl = "http://localhost:8102",
                 TranscriptionModel = "",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 // Qwen3-ASR accepts language via form field; no context bias support.
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                // User-managed external server — talks the OpenAI multipart
+                // protocol so the generic HTTP path handles it.
+                TranscriberKind = TranscriberKind.Http,
             },
             new ApiProvider
             {
-                // CrispASR --server speaks the OpenAI /v1/audio/transcriptions protocol,
-                // so no dedicated transcriber class is needed — the generic HTTP path
-                // handles it the same way it handles qwen3-asr.
-                // User workflow: run `crispasr.exe --server -m parakeet.gguf --port 8103`
-                // externally, then activate this provider.
+                // User-managed external CrispASR server (run by hand:
+                // `crispasr.exe --server -m parakeet.gguf --port 8103`).
+                // Talks OpenAI multipart — Http branch covers it.
                 Id = "parakeet-local",
-                Name = "Parakeet Local (CrispASR)",
+                Name = "Parakeet Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8103",
                 TranscriptionEndpoint = "http://localhost:8103/v1/audio/transcriptions",
                 TranscriptionModel = "parakeet",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8103,
+                LocalModelGlob = "parakeet-*.gguf",
+                // No backend hint — CrispASR auto-detects Parakeet.
             },
             new ApiProvider
             {
-                // Cohere Transcribe Q4_K CPU — auto-spawned CrispASR server.
-                // Mirrors the Parakeet preset but uses port 8104 and the
-                // cohere-transcribe-q4_k.gguf file. The dispatch in
-                // MainWindow.xaml.cs passes backendHint: "cohere" because
-                // Cohere GGUFs may not expose the backend marker that
-                // CrispASR's auto-detect relies on.
+                // Cohere Transcribe Q4_K — auto-spawned CrispASR server on
+                // port 8104. Cohere GGUFs don't expose the backend marker
+                // CrispASR auto-detect needs, so the explicit hint is required.
                 Id = "cohere-local-q4",
-                Name = "Cohere Local Q4 (CrispASR)",
+                Name = "Cohere Local Q4 (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8104",
                 TranscriptionEndpoint = "http://localhost:8104/v1/audio/transcriptions",
                 TranscriptionModel = "cohere",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8104,
+                LocalModelGlob = "cohere-transcribe-q4_k.gguf",
+                LocalBackendHint = "cohere",
             },
             new ApiProvider
             {
-                // Cohere Transcribe Q6_K CPU — auto-spawned CrispASR server.
-                // Same pattern as Q4 but points at port 8105 and the
-                // cohere-transcribe-q6_k.gguf file. Q6_K is K-quant mixed
-                // precision, noticeably closer to F16 accuracy than Q4_K
+                // Cohere Transcribe Q6_K — auto-spawned CrispASR server on
+                // port 8105. Q6_K is mixed-precision K-quant, near-F16 accuracy
                 // at essentially the same RTFx (~1.05× on 8 CPU threads).
-                // Accuracy-first pick; use Q4 only if disk footprint matters.
                 Id = "cohere-local-q6k",
-                Name = "Cohere Local Q6_K (CrispASR)",
+                Name = "Cohere Local Q6_K (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8105",
                 TranscriptionEndpoint = "http://localhost:8105/v1/audio/transcriptions",
                 TranscriptionModel = "cohere",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8105,
+                LocalModelGlob = "cohere-transcribe-q6_k.gguf",
+                LocalBackendHint = "cohere",
             },
             new ApiProvider
             {
-                // Mistral Voxtral-Mini-3B local via CrispASR server (batch mode).
-                // Voxtral is a speech-LLM: Whisper encoder + Mistral 3B LLM with
-                // audio-token injection, which means free-form prompt conditioning
-                // is native to the architecture — context bias terms flow via the
-                // OpenAI "prompt" field (whisper_prompt mode).
-                // Needs explicit --backend voxtral; auto-detect does not cover it.
-                // Place the GGUF in %APPDATA%\.WhisperInk\cohere-gguf\ —
-                // e.g. voxtral-mini-3b-2507-q4_k.gguf from cstr/voxtral-mini-3b-2507-GGUF.
+                // Mistral Voxtral-Mini-3B speech-LLM. Free-form prompt
+                // conditioning is native to the architecture — context bias
+                // terms ride the OpenAI "prompt" field.
                 Id = "voxtral-local",
-                Name = "Voxtral Local (CrispASR)",
+                Name = "Voxtral Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8106",
                 TranscriptionEndpoint = "http://localhost:8106/v1/audio/transcriptions",
                 TranscriptionModel = "voxtral",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
                 ContextBiasMode = "whisper_prompt",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8106,
+                LocalModelGlob = "voxtral-mini-3b*.gguf",
+                LocalBackendHint = "voxtral",
             },
             new ApiProvider
             {
-                // IBM Granite Speech 4.1 2B local via CrispASR server.
-                // Granite Speech is a speech-LLM (Granite 3B LLM + audio encoder
-                // + projector). Like Voxtral, prompt-style conditioning is native;
-                // ContextBiasMode = whisper_prompt sends bias terms via the OpenAI
-                // `prompt` field. Backend hint matches granite_speech.dll.
-                // Place granite-speech-*.gguf in %APPDATA%\.WhisperInk\cohere-gguf\.
+                // IBM Granite Speech 4.1 2B speech-LLM. Same shape as Voxtral:
+                // explicit backend hint + prompt-style context bias.
                 Id = "granite-local",
-                Name = "Granite Speech 4.1 Local (CrispASR)",
+                Name = "Granite Speech 4.1 Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8107",
                 TranscriptionEndpoint = "http://localhost:8107/v1/audio/transcriptions",
                 TranscriptionModel = "granite",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
                 ContextBiasMode = "whisper_prompt",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8107,
+                LocalModelGlob = "granite-speech-*.gguf",
+                LocalBackendHint = "granite",
             },
             new ApiProvider
             {
@@ -432,14 +455,30 @@ namespace WhisperInk
                 Name = "Google Chirp 3",
                 BaseUrl = "https://us-speech.googleapis.com",
                 TranscriptionModel = "chirp_3",
-                ChatModel = "",
-                PostProcessModel = "",
-                SupportsRealtime = false,
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
                 ContextBiasMode = "none",
-                Language = "en"
+                Language = "en",
+                TranscriberKind = TranscriberKind.GoogleChirp3,
             }
+        };
+
+        /// <summary>
+        /// Fallback that infers <see cref="TranscriberKind"/> from the legacy
+        /// provider id when loading an older config.json that predates the
+        /// explicit field. Unknown ids default to <see cref="TranscriberKind.Http"/>,
+        /// which is also correct for user-added cloud providers.
+        /// </summary>
+        public static TranscriberKind InferKindFromLegacyId(string id) => id switch
+        {
+            "cohere-onnx"                                                  => TranscriberKind.LocalOnnx,
+            "cohere-gguf"                                                  => TranscriberKind.LocalCrispAsrServer,
+            "cohere-gguf-server"                                           => TranscriberKind.LocalCrispAsrServer,
+            "cohere-gguf-cuda-server"                                      => TranscriberKind.LocalCrispAsrServer,
+            "cohere-gguf-cuda-server-q8"                                   => TranscriberKind.LocalCrispAsrServer,
+            "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k"
+                or "voxtral-local" or "granite-local"                      => TranscriberKind.LocalCrispAsrServer,
+            "google-chirp3"                                                => TranscriberKind.GoogleChirp3,
+            _                                                              => TranscriberKind.Http,
         };
     }
 
@@ -478,10 +517,9 @@ namespace WhisperInk
 
         // ── Local GPU backend for CrispASR-based providers ──────────────
         // Controls the --gpu-backend flag passed to crispasr.exe when spawning a
-        // local server for the Cohere Local Q4 / Q6_K / Parakeet providers.
+        // local server. Per-provider LocalGpuBackend overrides this; blank
+        // there falls through to the global default below.
         // Valid values (case-insensitive): "auto", "vulkan", "cuda", "metal", "cpu".
-        // Default "auto" lets crispasr pick the best compiled backend.
-        // Set "cpu" to disable GPU entirely (uses -ng flag), or "vulkan" to force Vulkan.
         // On the 5825U APU, Vulkan and CPU are within ~10% of each other on Q4_K server mode.
         public string CrispGpuBackend { get; set; } = "auto";
 

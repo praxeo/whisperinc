@@ -18,6 +18,7 @@ namespace WhisperInk
         public static ObservableCollection<HistoryItem> Items { get; private set; } = new();
 
         private static readonly string _historyPath;
+        private static readonly string _logPath;
 
         static HistoryService()
         {
@@ -25,6 +26,7 @@ namespace WhisperInk
             string configDirectory = Path.Combine(appDataPath, ".WhisperInk");
             if (!Directory.Exists(configDirectory)) Directory.CreateDirectory(configDirectory);
             _historyPath = Path.Combine(configDirectory, "history.json");
+            _logPath     = Path.Combine(configDirectory, "debug.log");
 
             Load();
         }
@@ -60,18 +62,20 @@ namespace WhisperInk
         {
             try
             {
-                if (File.Exists(_historyPath))
-                {
-                    string json = File.ReadAllText(_historyPath);
-                    var list = JsonSerializer.Deserialize<List<HistoryItem>>(json);
-                    if (list != null)
-                    {
-                        list.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
-                        foreach (var i in list) Items.Add(i);
-                    }
-                }
+                if (!File.Exists(_historyPath)) return;
+                string json = File.ReadAllText(_historyPath);
+                var list = JsonSerializer.Deserialize<List<HistoryItem>>(json);
+                if (list == null) return;
+                list.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
+                foreach (var i in list) Items.Add(i);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // Surface load failures so a corrupted history.json doesn't
+                // silently wipe the log on next save. The previous content
+                // stays on disk until Add() triggers a save that overwrites it.
+                LogError($"HistoryService.Load failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         private static void Save()
@@ -81,7 +85,15 @@ namespace WhisperInk
                 string json = JsonSerializer.Serialize(Items, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(_historyPath, json);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                LogError($"HistoryService.Save failed: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private static void LogError(string msg)
+        {
+            try { File.AppendAllText(_logPath, $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n"); } catch { }
         }
     }
 }
