@@ -674,11 +674,30 @@ namespace WhisperInk
                                 p.NoVerbatim = nv.GetBoolean();
 
                             // ── New schema fields (added when factory dispatch landed) ──
-                            if (pEl.TryGetProperty("TranscriberKind", out var tk)
-                                && Enum.TryParse<TranscriberKind>(tk.GetString(), ignoreCase: true, out var parsedKind))
-                                p.TranscriberKind = parsedKind;
+                            // Tolerate both encodings. Newer configs store the
+                            // enum as a string ("LocalCrispAsrServer"); configs
+                            // written before SaveConfig used a string converter
+                            // store it as a bare number. Calling GetString() on a
+                            // numeric token throws InvalidOperationException —
+                            // which used to abort the ENTIRE load (the catch is
+                            // outside this loop), silently resetting every
+                            // provider to defaults and wiping saved API keys and
+                            // the active-provider choice on each launch.
+                            if (pEl.TryGetProperty("TranscriberKind", out var tk))
+                            {
+                                if (tk.ValueKind == JsonValueKind.String &&
+                                    Enum.TryParse<TranscriberKind>(tk.GetString(), ignoreCase: true, out var parsedKind))
+                                    p.TranscriberKind = parsedKind;
+                                else if (tk.ValueKind == JsonValueKind.Number &&
+                                         Enum.IsDefined(typeof(TranscriberKind), tk.GetInt32()))
+                                    p.TranscriberKind = (TranscriberKind)tk.GetInt32();
+                                else
+                                    p.TranscriberKind = ApiProvider.InferKindFromLegacyId(p.Id);
+                            }
                             else
+                            {
                                 p.TranscriberKind = ApiProvider.InferKindFromLegacyId(p.Id);
+                            }
 
                             if (pEl.TryGetProperty("LocalServerPort", out var lsp) && lsp.ValueKind == JsonValueKind.Number)
                                 p.LocalServerPort = lsp.GetInt32();
@@ -791,7 +810,14 @@ namespace WhisperInk
                     HasSeenFirstRun = _hasSeenFirstRun,
                     CrispGpuBackend = _crispGpuBackend
                 };
-                File.WriteAllText(ConfigFile, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
+                // Serialize the TranscriberKind enum as a string so config.json
+                // both stays human-readable AND round-trips through LoadConfig
+                // (which reads the field as a string). Without this converter
+                // System.Text.Json writes enums as bare numbers, which the loader
+                // then choked on — wiping providers, keys, and the active id.
+                var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+                jsonOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+                File.WriteAllText(ConfigFile, JsonSerializer.Serialize(config, jsonOptions));
             }
             catch (Exception ex) { Log($"Config save error: {ex.Message}"); }
         }
@@ -1130,17 +1156,22 @@ namespace WhisperInk
                     PlayUiSound(SoundType.Success);
                 }
 
-                ReleaseAllModifierKeys();
-
-                _isStopping = false;
-                ResetUi();
-                UpdateStatusLabel();
                 Log("[diag] StopRealtimeStreaming: exit");
             }
             catch (Exception ex)
             {
                 Log($"[diag] StopRealtimeStreaming: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 throw;
+            }
+            finally
+            {
+                // Always run cleanup — see StopBatchDictation. Clearing
+                // _isStopping here too prevents a thrown stop from wedging the
+                // state machine so that the next Ctrl+Space could never start.
+                ReleaseAllModifierKeys();
+                _isStopping = false;
+                ResetUi();
+                UpdateStatusLabel();
             }
         }
 
@@ -1292,15 +1323,24 @@ namespace WhisperInk
                     await Task.Delay(1500);
                 }
 
-                ReleaseAllModifierKeys();
-                ResetUi();
-                UpdateStatusLabel();
                 Log("[diag] StopBatchDictation: exit");
             }
             catch (Exception ex)
             {
                 Log($"[diag] StopBatchDictation: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 throw;
+            }
+            finally
+            {
+                // Release on EVERY exit path. A thrown transcription/paste (e.g.
+                // the 15s HTTP timeout, or a network error) used to skip this,
+                // stranding Ctrl "down" — the keyboard hook swallows the user's
+                // physical key-up, so this synthetic release is the only thing
+                // that tells the OS the key came back up. A stuck Ctrl turns the
+                // next keystroke into Ctrl+<key> (e.g. Ctrl+O pops an Open dialog).
+                ReleaseAllModifierKeys();
+                ResetUi();
+                UpdateStatusLabel();
             }
         }
 
@@ -1401,15 +1441,19 @@ namespace WhisperInk
                 }
                 else { PlayUiSound(SoundType.Error); lblStatus.Content = "Transcribe error"; }
 
-                ReleaseAllModifierKeys();
-                ResetUi();
-                UpdateStatusLabel();
                 Log("[diag] StopBatchRecording: exit");
             }
             catch (Exception ex)
             {
                 Log($"[diag] StopBatchRecording: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 throw;
+            }
+            finally
+            {
+                // Always release — see StopBatchDictation.
+                ReleaseAllModifierKeys();
+                ResetUi();
+                UpdateStatusLabel();
             }
         }
 
