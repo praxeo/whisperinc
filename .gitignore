@@ -41,3 +41,7 @@ Desktop.ini
 *.g.cs
 *.g.i.cs
 *.baml
+
+# Local AI-tooling state (session worktrees, MCP configs with secrets)
+.claude/
+.roo/
