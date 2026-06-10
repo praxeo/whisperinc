@@ -23,143 +23,48 @@ namespace WhisperInk
     public partial class MainWindow : Window
     {
         // ── Win32 imports ──────────────────────────────────────────────
-        [DllImport("user32.dll")]
-        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc callback, IntPtr hInstance, uint threadId);
-
-        [DllImport("user32.dll")]
-        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("kernel32.dll")]
-        private static extern IntPtr GetModuleHandle(string lpModuleName);
-
-        [DllImport("user32.dll")]
-        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-        [DllImport("user32.dll")]
-        private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
+        // The keyboard hook lives in KeyboardHookService and all synthetic
+        // input in TextInjector; the window itself only steers focus.
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetFocus();
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
-
-        private const uint WM_CHAR = 0x0102;
-        private const uint GW_CHILD = 5;
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-
-        [DllImport("user32.dll")]
-        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentThreadId();
-
-        // ── SendInput structures ───────────────────────────────────────
-        [StructLayout(LayoutKind.Sequential)]
-        public struct INPUT
-        {
-            public uint type;
-            public INPUTUNION u;
-        }
-
-        [StructLayout(LayoutKind.Explicit)]
-        public struct INPUTUNION
-        {
-            [FieldOffset(0)] public KEYBDINPUT ki;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct KEYBDINPUT
-        {
-            public ushort wVk;
-            public ushort wScan;
-            public uint dwFlags;
-            public uint time;
-            public IntPtr dwExtraInfo;
-        }
-
-        private const uint INPUT_KEYBOARD = 1;
-        private const uint KEYEVENTF_UNICODE = 0x0004;
-        private const uint KEYEVENTF_KEYUP = 0x0002;
-
-        private const int WH_KEYBOARD_LL = 13;
-        private const int WM_KEYDOWN = 0x0100;
-        private const int WM_KEYUP = 0x0101;
-        private const int WM_SYSKEYDOWN = 0x0104;
-        private const int WM_SYSKEYUP = 0x0105;
-        private const int VK_LCONTROL = 0xA2;
-        private const int VK_RCONTROL = 0xA3;
-        private const int VK_LWIN = 0x5B;
-        private const int VK_RWIN = 0x5C;
-        private const int VK_LMENU = 0xA4;
-        private const int VK_RMENU = 0xA5;
-        private const int VK_CONTROL = 0x11;
-        private const int VK_SPACE = 0x20;
-        private const int VK_RETURN = 0x0D;
-
-        private const byte KEYEVENTF_EXTENDEDKEY = 0x01;
-        private const byte KEYEVENTF_KEYUP_BYTE = 0x02;
-
-        private const int SYNTHETIC_MARKER_VALUE = 0x5AFE;
-        private static readonly UIntPtr SYNTHETIC_MARKER = (UIntPtr)SYNTHETIC_MARKER_VALUE;
-        private static readonly IntPtr SYNTHETIC_MARKER_PTR = new IntPtr(SYNTHETIC_MARKER_VALUE);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct KBDLLHOOKSTRUCT
-        {
-            public int vkCode;
-            public int scanCode;
-            public int flags;
-            public int time;
-            public IntPtr dwExtraInfo;
-        }
-
-        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
         // ── API configuration (derived from active provider) ────────
         private const string RealtimeModel = "voxtral-mini-transcribe-realtime-2602";
         private const string RealtimeWsUrl = "ws://localhost:8765/v1/realtime";
 
-        private string _audioApiUrl = "";
-        private string _audioModel = "";
-        private string _chatApiUrl = "";
-        private string _chatModel = "";
-        private string _postProcessModel = "";
-        private string _activeApiKey = "";
-        private bool _activeSupportsRealtime = false;
-        private bool _activeSupportsTranscription = true;
-        private string _activeAuthHeaderName = "";
-        private string _activeModelFieldName = "model";
+        // Active-provider state is computed, never cached: a provider
+        // switch mid-flight can therefore never leave stale values behind.
+        private string ActiveApiKey => GetActiveProvider()?.ApiKey ?? "";
+        private bool ActiveSupportsRealtime => GetActiveProvider()?.SupportsRealtime == true;
+        private string ChatApiUrl => $"{(GetActiveProvider()?.BaseUrl ?? "").TrimEnd('/')}/v1/chat/completions";
+        private string ChatModel => GetActiveProvider()?.ChatModel ?? "";
+        private string PostProcessModelName
+        {
+            get
+            {
+                var p = GetActiveProvider();
+                if (p == null) return "";
+                return string.IsNullOrWhiteSpace(p.PostProcessModel) ? p.ChatModel : p.PostProcessModel;
+            }
+        }
 
         private static readonly string ConfigFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk");
         private static readonly string ConfigFile = Path.Combine(ConfigFolder, "config.json");
 
         // ── State ──────────────────────────────────────────────────────
-        private IntPtr _hookId = IntPtr.Zero;
-        private LowLevelKeyboardProc _hookCallback;
-        private bool _isRecording;
-        private bool _ctrlPressed;
-        private bool _winPressed;
-        private bool _altPressed;
-        private bool _spacePressed;
-        private bool _suppressingKeys;
+        private KeyboardHookService? _hook;
+        private readonly TextInjector _injector = new(Log);
 
-        private string _mistralApiKey = "";
+        // Recording lifecycle: 0 = Idle, 1 = Recording, 2 = Stopping. The
+        // hook thread reads it while the UI thread transitions it, so all
+        // transitions go through Interlocked.CompareExchange — a double
+        // Ctrl+Space can never double-start, a double release never
+        // double-stops, and a thrown stop can't wedge the state machine.
+        private int _recState;
+        private bool IsRecording => Volatile.Read(ref _recState) == 1;
+        private bool IsStopping  => Volatile.Read(ref _recState) == 2;
+
         private bool _isSoundEnabled = true;
         private string _systemPrompt = new AppConfig().SystemPrompt;
         private int _selectedDeviceNumber;
@@ -188,14 +93,6 @@ namespace WhisperInk
         private string _crispGpuBackend = "auto";
 
         private IntPtr _targetWindow = IntPtr.Zero;
-
-        // Saved clipboard contents from before the most recent paste, restored
-        // asynchronously after SimulateCtrlV() so dictation doesn't clobber what
-        // the user had copied. If a new paste arrives during the restore window,
-        // we cancel and reuse the pending data — that way rapid-fire dictation
-        // still ends with the *original* clipboard, not the previous transcript.
-        private IDataObject? _pendingRestoreData;
-        private CancellationTokenSource? _pendingRestoreCts;
 
         // Bounded timeout so a stalled SendAsync surfaces as TaskCanceledException
         // (caught + logged by the global handler) instead of pretending to work.
@@ -230,8 +127,6 @@ namespace WhisperInk
         private DispatcherTimer? _proxyHeartbeat;
         private bool _proxyHealthy = true;
 
-        private enum RecordingMode { Dictation, AnalyzeContext }
-        private RecordingMode _currentMode = RecordingMode.Dictation;
         private enum SoundType { Start, Stop, Success, Error }
 
         private ClientWebSocket? _realtimeWs;
@@ -239,7 +134,6 @@ namespace WhisperInk
         private Task? _receiveTask;
         private string _accumulatedTranscript = "";
         private bool _leadingSpaceSent;
-        private bool _isStopping;
         private readonly SemaphoreSlim _wsSendLock = new(1, 1);
         private Process? _proxyProcess;
 
@@ -248,6 +142,16 @@ namespace WhisperInk
         private static void Log(string msg)
         {
             try { File.AppendAllText(LogFile, $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n"); } catch { }
+        }
+
+        /// <summary>Fire-and-forget for the async command methods: faults
+        /// land in debug.log instead of vanishing (async void) or tearing
+        /// down the process.</summary>
+        private static void RunSafe(Func<Task> op, string name)
+        {
+            _ = op().ContinueWith(
+                t => Log($"[unhandled] {name}: {t.Exception?.GetBaseException().Message}"),
+                TaskContinuationOptions.OnlyOnFaulted);
         }
 
         /// <summary>
@@ -287,7 +191,6 @@ namespace WhisperInk
         public MainWindow()
         {
             InitializeComponent();
-            _hookCallback = HookCallback;
             Loaded  += MainWindow_Loaded;
             Closing += MainWindow_Closing;
         }
@@ -303,7 +206,7 @@ namespace WhisperInk
                 return;
             }
 
-            if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId);
+            try { _hook?.Dispose(); } catch { }
             try { _proxyHeartbeat?.Stop(); } catch { }
             try { _proxyProcess?.Kill(); } catch (Exception ex) { Log($"Proxy kill on close failed: {ex.Message}"); }
             try { _transcribers?.Dispose(); } catch { }
@@ -318,9 +221,28 @@ namespace WhisperInk
             Left = screen.Width - Width - 10;
             Top = screen.Height - Height - 10;
 
-            using var curProcess = Process.GetCurrentProcess();
-            using var curModule = curProcess.MainModule!;
-            _hookId = SetWindowsHookEx(WH_KEYBOARD_LL, _hookCallback, GetModuleHandle(curModule.ModuleName!), 0);
+            // All hotkey decisions live in the service; these callbacks fire
+            // on the hook thread and immediately marshal to the UI thread.
+            _hook = new KeyboardHookService(
+                isRecording: () => IsRecording,
+                onDictationStart: target =>
+                {
+                    _targetWindow = target;
+                    if (IsRealtimeMode)
+                        Dispatcher.BeginInvoke(() => RunSafe(StartRealtimeStreamingAsync, "StartRealtimeStreaming"));
+                    else
+                        Dispatcher.BeginInvoke(() => StartBatchDictation());
+                },
+                onDictationStop: () =>
+                {
+                    if (IsRealtimeMode)
+                        Dispatcher.BeginInvoke(() => RunSafe(StopRealtimeStreamingAsync, "StopRealtimeStreaming"));
+                    else
+                        Dispatcher.BeginInvoke(() => RunSafe(StopBatchDictationAsync, "StopBatchDictation"));
+                },
+                onAnalyzeStart: () => Dispatcher.BeginInvoke(() => StartBatchRecording()),
+                onAnalyzeStop: () => Dispatcher.BeginInvoke(() => RunSafe(StopBatchRecordingAsync, "StopBatchRecording")));
+            _hook.Install();
 
             _animationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
             _animationTimer.Tick += (_, _) => UpdateHistogram();
@@ -332,7 +254,7 @@ namespace WhisperInk
             // without needing to drop and recreate every CrispASR server.
             _transcribers = new TranscriberFactory(_httpClient, () => _crispGpuBackend, Log);
 
-            if (!string.IsNullOrWhiteSpace(_proxyPath) && _activeSupportsRealtime)
+            if (!string.IsNullOrWhiteSpace(_proxyPath) && ActiveSupportsRealtime)
             {
                 Log($"Starting proxy: {_proxyPath}");
                 try
@@ -344,7 +266,7 @@ namespace WhisperInk
                         _proxyProcess.StartInfo = new ProcessStartInfo
                         {
                             FileName = "py",
-                            Arguments = $"\"{_proxyPath}\" --api-key {_activeApiKey}",
+                            Arguments = $"\"{_proxyPath}\" --api-key {ActiveApiKey}",
                             CreateNoWindow = true,
                             UseShellExecute = false,
                             RedirectStandardError = true
@@ -355,7 +277,7 @@ namespace WhisperInk
                         _proxyProcess.StartInfo = new ProcessStartInfo
                         {
                             FileName = _proxyPath,
-                            Arguments = $"--api-key {_activeApiKey}",
+                            Arguments = $"--api-key {ActiveApiKey}",
                             CreateNoWindow = true,
                             UseShellExecute = false,
                             RedirectStandardError = true
@@ -402,7 +324,7 @@ namespace WhisperInk
             // proxy. For cloud/local providers without realtime support,
             // we treat the proxy as healthy regardless (it may not even be
             // running) so the status label doesn't show false warnings.
-            bool needsProxy = _activeSupportsRealtime
+            bool needsProxy = ActiveSupportsRealtime
                               && IsRealtimeMode
                               && !string.IsNullOrWhiteSpace(_proxyPath);
             if (!needsProxy)
@@ -440,20 +362,7 @@ namespace WhisperInk
                 provider = _providers[0];
             }
 
-            string baseUrl = provider.BaseUrl.TrimEnd('/');
-            _audioApiUrl = provider.ResolvedTranscriptionUrl;
-            _chatApiUrl = $"{baseUrl}/v1/chat/completions";
-            _audioModel = provider.TranscriptionModel;
-            _chatModel = provider.ChatModel;
-            _postProcessModel = string.IsNullOrWhiteSpace(provider.PostProcessModel)
-                ? provider.ChatModel : provider.PostProcessModel;
-            _activeApiKey = provider.ApiKey;
-            _activeSupportsRealtime = provider.SupportsRealtime;
-            _activeSupportsTranscription = provider.SupportsTranscription;
-            _activeAuthHeaderName = provider.AuthHeaderName ?? "";
-            _activeModelFieldName = provider.ResolvedModelField;
-
-            Log($"Active provider: {provider.Name} → STT={_audioApiUrl}  (RT={_activeSupportsRealtime}, auth={(_activeAuthHeaderName == "" ? "Bearer" : _activeAuthHeaderName)}, modelField={_activeModelFieldName})");
+            Log($"Active provider: {provider.Name} → STT={provider.ResolvedTranscriptionUrl}  (RT={provider.SupportsRealtime}, auth={(string.IsNullOrEmpty(provider.AuthHeaderName) ? "Bearer" : provider.AuthHeaderName)}, modelField={provider.ResolvedModelField})");
         }
 
         private void SwitchProvider(string providerId)
@@ -461,7 +370,7 @@ namespace WhisperInk
             ApplyProviderSwitch(providerId);
             SaveConfig();
 
-            if (IsRealtimeMode && !_activeSupportsRealtime)
+            if (IsRealtimeMode && !ActiveSupportsRealtime)
             {
                 _dictationMode = "Batch";
                 SaveConfig();
@@ -476,8 +385,8 @@ namespace WhisperInk
         /// Core of every active-provider transition — from tray menu, context
         /// menu, or dialog close. Logs the change, flips the id, disposes any
         /// local CrispASR server owned by the previous provider (so we don't
-        /// leak ~2 GB of resident model per switch), and re-derives the
-        /// cached per-provider state (_audioApiUrl, _activeApiKey, …).
+        /// leak ~2 GB of resident model per switch). Per-provider state
+        /// (ActiveApiKey, ChatApiUrl, …) is computed, so nothing to re-derive.
         /// Does not persist by itself — the caller owns SaveConfig().
         /// </summary>
         private void ApplyProviderSwitch(string newId)
@@ -578,7 +487,7 @@ namespace WhisperInk
             var provider = GetActiveProvider();
             string provTag = provider?.Name ?? "?";
             string modeTag = IsRealtimeMode ? "RT" : "Batch";
-            string proxyTag = (_activeSupportsRealtime && IsRealtimeMode && !_proxyHealthy)
+            string proxyTag = (ActiveSupportsRealtime && IsRealtimeMode && !_proxyHealthy)
                 ? "  ⚠ proxy down"
                 : "";
             lblStatus.Content = $"{provTag} ({modeTag}){proxyTag}";
@@ -619,7 +528,10 @@ namespace WhisperInk
                     var json = File.ReadAllText(ConfigFile);
                     using var doc = JsonDocument.Parse(json);
                     var root = doc.RootElement;
-                    if (root.TryGetProperty("MistralApiKey", out var key)) _mistralApiKey = key.GetString() ?? "";
+                    // Legacy single-key config (pre provider-system) — only
+                    // read so the migration below can seed the mistral provider.
+                    string legacyMistralKey = "";
+                    if (root.TryGetProperty("MistralApiKey", out var key)) legacyMistralKey = key.GetString() ?? "";
                     if (root.TryGetProperty("IsSoundEnabled", out var snd)) _isSoundEnabled = snd.GetBoolean();
                     if (root.TryGetProperty("SystemPrompt", out var sp)) _systemPrompt = sp.GetString() ?? _systemPrompt;
                     if (root.TryGetProperty("SelectedDevice", out var dev)) _selectedDeviceNumber = dev.GetInt32();
@@ -733,10 +645,10 @@ namespace WhisperInk
                     {
                         _providers = ApiProvider.CreateDefaults();
                         _activeProviderId = "mistral";
-                        if (!string.IsNullOrWhiteSpace(_mistralApiKey))
+                        if (!string.IsNullOrWhiteSpace(legacyMistralKey))
                         {
                             var mistral = _providers.FirstOrDefault(p => p.Id == "mistral");
-                            if (mistral != null) mistral.ApiKey = _mistralApiKey;
+                            if (mistral != null) mistral.ApiKey = legacyMistralKey;
                         }
                         Log("Migrated legacy config → provider system");
                     }
@@ -790,8 +702,10 @@ namespace WhisperInk
             {
                 if (!Directory.Exists(ConfigFolder)) Directory.CreateDirectory(ConfigFolder);
 
+                // MistralApiKey persists only for downgrade compatibility; the
+                // provider entry is the source of truth.
                 var mistralProvider = _providers.FirstOrDefault(p => p.Id == "mistral");
-                string legacyKey = mistralProvider?.ApiKey ?? _mistralApiKey;
+                string legacyKey = mistralProvider?.ApiKey ?? "";
 
                 var config = new
                 {
@@ -824,112 +738,31 @@ namespace WhisperInk
             catch (Exception ex) { Log($"Config save error: {ex.Message}"); }
         }
 
-        // ── Keyboard Hook ──────────────────────────────────────────────
-        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            if (nCode >= 0)
-            {
-                var hookData = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-                int vkCode = hookData.vkCode;
-                bool isDown = (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN);
-                bool isUp = (wParam == (IntPtr)WM_KEYUP || wParam == (IntPtr)WM_SYSKEYUP);
-                bool isSynthetic = (hookData.dwExtraInfo == new IntPtr(SYNTHETIC_MARKER_VALUE));
-
-                if (_suppressingKeys && !isSynthetic)
-                {
-                    if (vkCode == VK_LCONTROL || vkCode == VK_RCONTROL || vkCode == VK_SPACE)
-                    {
-                        if (vkCode == VK_SPACE) _spacePressed = isDown;
-                        else _ctrlPressed = isDown;
-
-                        if (isUp && _isRecording && _currentMode == RecordingMode.Dictation)
-                        {
-                            if (!_ctrlPressed || !_spacePressed)
-                            {
-                                if (IsRealtimeMode)
-                                    Dispatcher.BeginInvoke(() => StopRealtimeStreaming());
-                                else
-                                    Dispatcher.BeginInvoke(() => StopBatchDictation());
-                            }
-                        }
-                        if (!_ctrlPressed && !_spacePressed)
-                            _suppressingKeys = false;
-
-                        return (IntPtr)1;
-                    }
-                }
-
-                if (vkCode == VK_LCONTROL || vkCode == VK_RCONTROL)
-                {
-                    if (!isSynthetic) _ctrlPressed = isDown;
-                    if (isUp && _isRecording && _currentMode == RecordingMode.AnalyzeContext)
-                    {
-                        if (!_ctrlPressed || !_altPressed)
-                            Dispatcher.BeginInvoke(() => StopBatchRecording());
-                    }
-                }
-                else if (vkCode == VK_SPACE)
-                {
-                    if (!isSynthetic) _spacePressed = isDown;
-                    if (isDown && !isSynthetic && _ctrlPressed && !_isRecording && !_suppressingKeys)
-                    {
-                        _targetWindow = GetForegroundWindow();
-                        _currentMode = RecordingMode.Dictation;
-                        _suppressingKeys = true;
-
-                        if (IsRealtimeMode)
-                            Dispatcher.BeginInvoke(() => StartRealtimeStreaming());
-                        else
-                            Dispatcher.BeginInvoke(() => StartBatchDictation());
-
-                        return (IntPtr)1;
-                    }
-                }
-                else if (vkCode == VK_LWIN || vkCode == VK_RWIN)
-                {
-                    _winPressed = isDown;
-                }
-                else if (vkCode == VK_LMENU || vkCode == VK_RMENU)
-                {
-                    _altPressed = isDown;
-                    if (isDown && _ctrlPressed && !_isRecording)
-                    {
-                        _currentMode = RecordingMode.AnalyzeContext;
-                        Dispatcher.BeginInvoke(() => StartBatchRecording());
-                    }
-                    if (isUp && _isRecording && _currentMode == RecordingMode.AnalyzeContext)
-                    {
-                        if (!_ctrlPressed || !_altPressed)
-                            Dispatcher.BeginInvoke(() => StopBatchRecording());
-                    }
-                }
-            }
-            return CallNextHookEx(_hookId, nCode, wParam, lParam);
-        }
+        // Keyboard hook + hotkey logic: KeyboardHookService (wired in
+        // MainWindow_Loaded). Synthetic typing/paste/release: TextInjector.
 
         // ════════════════════════════════════════════════════════════════
         // MISTRAL REALTIME STREAMING MODE
         // ════════════════════════════════════════════════════════════════
 
-        private async void StartRealtimeStreaming()
+        private async Task StartRealtimeStreamingAsync()
         {
-            if (_isRecording) return;
-            if (string.IsNullOrEmpty(_activeApiKey))
+            if (string.IsNullOrEmpty(ActiveApiKey))
             {
                 lblStatus.Content = "No API key!";
                 return;
             }
-            if (!_activeSupportsRealtime)
+            if (!ActiveSupportsRealtime)
             {
                 lblStatus.Content = "Provider: no RT!";
                 return;
             }
 
-            _isRecording = true;
+            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
             _accumulatedTranscript = "";
             _leadingSpaceSent = false;
-            _suppressingKeys = true;
-            ReleaseAllModifierKeys();
+            _hook?.BeginSuppression();
+            _injector.ReleaseAllModifierKeys();
 
             MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(100, 255, 100));
             lblStatus.Content = "🎙 LIVE";
@@ -942,7 +775,7 @@ namespace WhisperInk
             try
             {
                 _realtimeWs = new ClientWebSocket();
-                _realtimeWs.Options.SetRequestHeader("Authorization", $"Bearer {_activeApiKey}");
+                _realtimeWs.Options.SetRequestHeader("Authorization", $"Bearer {ActiveApiKey}");
                 Log($"Connecting to Mistral Realtime {RealtimeWsUrl}...");
 
                 using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -997,24 +830,21 @@ namespace WhisperInk
             }
         }
 
-        private async void OnAudioDataAvailable(object? sender, WaveInEventArgs e)
+        private void OnAudioDataAvailable(object? sender, WaveInEventArgs e)
         {
             var cts = _realtimeCts;
-            if (!_isRecording || _realtimeWs?.State != WebSocketState.Open || cts == null || cts.IsCancellationRequested)
+            if (!IsRecording || _realtimeWs?.State != WebSocketState.Open || cts == null || cts.IsCancellationRequested)
                 return;
 
-            try
+            // NAudio reuses e.Buffer across callbacks — encode synchronously
+            // in the handler; only the send is deferred.
+            string base64Audio = Convert.ToBase64String(e.Buffer, 0, e.BytesRecorded);
+            var msg = JsonSerializer.Serialize(new
             {
-                string base64Audio = Convert.ToBase64String(e.Buffer, 0, e.BytesRecorded);
-                var msg = JsonSerializer.Serialize(new
-                {
-                    type = "input_audio_buffer.append",
-                    audio = base64Audio
-                });
-                await SendTextMessageSafe(msg, cts.Token);
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex) { Log($"[diag] OnAudioDataAvailable: ERROR {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}"); }
+                type = "input_audio_buffer.append",
+                audio = base64Audio
+            });
+            RunSafe(() => SendTextMessageSafe(msg, cts.Token), "audio-chunk");
         }
 
         private async Task ReceiveTranscriptionLoop(ClientWebSocket ws, CancellationToken ct)
@@ -1035,7 +865,7 @@ namespace WhisperInk
 
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
-                            if (_isStopping || result.CloseStatus == WebSocketCloseStatus.NormalClosure) return;
+                            if (IsStopping || result.CloseStatus == WebSocketCloseStatus.NormalClosure) return;
                             var desc = result.CloseStatusDescription ?? result.CloseStatus?.ToString() ?? "unknown";
                             Dispatcher.Invoke(() => ForceCleanupRealtime($"WS closed: {desc}"));
                             return;
@@ -1066,7 +896,7 @@ namespace WhisperInk
                 switch (eventType)
                 {
                     case "transcription.text.delta":
-                        if (!_isRecording) break;
+                        if (!IsRecording) break;
                         if (root.TryGetProperty("text", out var textEl))
                         {
                             string delta = textEl.GetString() ?? "";
@@ -1082,10 +912,10 @@ namespace WhisperInk
                                         SetForegroundWindow(_targetWindow);
                                     if (!_leadingSpaceSent)
                                     {
-                                        TypeTextViaInput(" ");
+                                        _injector.TypeTextTo(_targetWindow, " ");
                                         _leadingSpaceSent = true;
                                     }
-                                    TypeTextViaInput(delta);
+                                    _injector.TypeTextTo(_targetWindow, delta);
                                 });
                             }
                         }
@@ -1109,10 +939,9 @@ namespace WhisperInk
             catch (Exception ex) { Log($"Parse error: {ex.Message}"); }
         }
 
-        private async void StopRealtimeStreaming()
+        private async Task StopRealtimeStreamingAsync()
         {
-            if (!_isRecording || _isStopping) return;
-            _isStopping = true;
+            if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
             Log("[diag] StopRealtimeStreaming: enter");
 
             try
@@ -1133,8 +962,6 @@ namespace WhisperInk
                     }
                 }
                 catch (Exception ex) { Log($"Realtime commit send failed: {ex.Message}"); }
-
-                _isRecording = false;
 
                 if (_realtimeWs != null && _realtimeWs.State == WebSocketState.Open)
                 {
@@ -1167,11 +994,11 @@ namespace WhisperInk
             }
             finally
             {
-                // Always run cleanup — see StopBatchDictation. Clearing
-                // _isStopping here too prevents a thrown stop from wedging the
+                // Always run cleanup — see StopBatchDictation. Resetting
+                // _recState here too prevents a thrown stop from wedging the
                 // state machine so that the next Ctrl+Space could never start.
-                ReleaseAllModifierKeys();
-                _isStopping = false;
+                _injector.ReleaseAllModifierKeys();
+                Volatile.Write(ref _recState, 0);
                 ResetUi();
                 UpdateStatusLabel();
             }
@@ -1181,9 +1008,8 @@ namespace WhisperInk
         {
             Log($"ForceCleanupRealtime: {statusMessage}");
 
-            if (!_isRecording && _realtimeWs == null && !_isStopping) return;
-            _isRecording = false;
-            _isStopping = false;
+            if (Volatile.Read(ref _recState) == 0 && _realtimeWs == null) return;
+            Volatile.Write(ref _recState, 0);
 
             try { _waveIn?.StopRecording(); _waveIn?.Dispose(); } catch { }
             _waveIn = null;
@@ -1191,7 +1017,7 @@ namespace WhisperInk
             try { _realtimeCts?.Cancel(); _realtimeWs?.Dispose(); } catch { }
             _realtimeWs = null;
 
-            ReleaseAllModifierKeys();
+            _injector.ReleaseAllModifierKeys();
             ResetUi();
             lblStatus.Content = statusMessage;
             lblStatus.Opacity = 1;
@@ -1205,17 +1031,16 @@ namespace WhisperInk
 
         private void StartBatchDictation()
         {
-            if (_isRecording) return;
-            if (string.IsNullOrEmpty(_activeApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
+            if (string.IsNullOrEmpty(ActiveApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
             {
                 lblStatus.Content = "No API key!";
                 return;
             }
 
-            _isRecording = true;
-            _suppressingKeys = true;
+            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
+            _hook?.BeginSuppression();
             _lastWavBytes = null;
-            ReleaseAllModifierKeys();
+            _injector.ReleaseAllModifierKeys();
 
             MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 100, 100));
             lblStatus.Content = "🎙 REC";
@@ -1252,10 +1077,9 @@ namespace WhisperInk
             try { _memWavWriter?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
         }
 
-        private async void StopBatchDictation()
+        private async Task StopBatchDictationAsync()
         {
-            if (!_isRecording) return;
-            _isRecording = false;
+            if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
             Log("[diag] StopBatchDictation: enter");
 
             try
@@ -1308,7 +1132,7 @@ namespace WhisperInk
                     if (_targetWindow != IntPtr.Zero)
                         SetForegroundWindow(_targetWindow);
                     Log("[diag] StopBatchDictation: pre-paste");
-                    PasteTextToActiveWindow(text);
+                    _injector.PasteTextToActiveWindow(text);
                     tPaste = swBatch.ElapsedMilliseconds;
                     Log("[diag] StopBatchDictation: post-paste, pre-history");
                     HistoryService.Add(text);
@@ -1340,7 +1164,8 @@ namespace WhisperInk
                 // physical key-up, so this synthetic release is the only thing
                 // that tells the OS the key came back up. A stuck Ctrl turns the
                 // next keystroke into Ctrl+<key> (e.g. Ctrl+O pops an Open dialog).
-                ReleaseAllModifierKeys();
+                _injector.ReleaseAllModifierKeys();
+                Volatile.Write(ref _recState, 0);
                 ResetUi();
                 UpdateStatusLabel();
             }
@@ -1350,15 +1175,15 @@ namespace WhisperInk
         // BATCH RECORDING MODE (Ctrl+Alt = AnalyzeContext)
         // ════════════════════════════════════════════════════════════════
 
-        public void StartBatchRecording()
+        private void StartBatchRecording()
         {
-            if (string.IsNullOrEmpty(_activeApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
+            if (string.IsNullOrEmpty(ActiveApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
             {
                 lblStatus.Content = "No API key!";
                 return;
             }
 
-            _isRecording = true;
+            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
             _lastWavBytes = null;
 
             try { Clipboard.Clear(); } catch { }
@@ -1388,10 +1213,9 @@ namespace WhisperInk
             PlayUiSound(SoundType.Start);
         }
 
-        private async void StopBatchRecording()
+        private async Task StopBatchRecordingAsync()
         {
-            if (!_isRecording) return;
-            _isRecording = false;
+            if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
             Log("[diag] StopBatchRecording: enter");
 
             try
@@ -1420,7 +1244,7 @@ namespace WhisperInk
                 lblStatus.Content = "Processing...";
                 lblStatus.Opacity = 1;
 
-                string selectedText = GetSelectedText();
+                string selectedText = _injector.GetSelectedText();
                 Log("[diag] StopBatchRecording: pre-transcribe");
                 string? transcribedVoice = await TranscribeAudioAsync(_currentFileName);
                 Log($"[diag] StopBatchRecording: post-transcribe, len={transcribedVoice?.Length ?? -1}");
@@ -1433,7 +1257,7 @@ namespace WhisperInk
                     if (!string.IsNullOrEmpty(aiResponse))
                     {
                         Log("[diag] StopBatchRecording: pre-paste");
-                        PasteTextToActiveWindow(aiResponse);
+                        _injector.PasteTextToActiveWindow(aiResponse);
                         Log("[diag] StopBatchRecording: post-paste, pre-history");
                         HistoryService.Add(aiResponse);
                         Log("[diag] StopBatchRecording: post-history");
@@ -1453,13 +1277,14 @@ namespace WhisperInk
             finally
             {
                 // Always release — see StopBatchDictation.
-                ReleaseAllModifierKeys();
+                _injector.ReleaseAllModifierKeys();
+                Volatile.Write(ref _recState, 0);
                 ResetUi();
                 UpdateStatusLabel();
             }
         }
 
-        // â”€â”€ Transcription dispatch â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        // ── Transcription dispatch ──────────────────────────────────────
         //
         // Single entry point for every batch transcription. The factory hands
         // back the right ITranscriber for the active provider (cloud HTTP,
@@ -1521,16 +1346,16 @@ namespace WhisperInk
 
                 var payload = new
                 {
-                    model = _chatModel,
+                    model = ChatModel,
                     messages = new[] {
                         new { role = "system", content = _systemPrompt },
                         new { role = "user", content = userContent }
                     }
                 };
 
-                using var request = new HttpRequestMessage(HttpMethod.Post, _chatApiUrl);
-                if (!string.IsNullOrEmpty(_activeApiKey))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _activeApiKey);
+                using var request = new HttpRequestMessage(HttpMethod.Post, ChatApiUrl);
+                if (!string.IsNullOrEmpty(ActiveApiKey))
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ActiveApiKey);
                 request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
                 var response = await _httpClient.SendAsync(request);
@@ -1553,14 +1378,14 @@ namespace WhisperInk
                 };
                 var payload = new
                 {
-                    model = _postProcessModel,
+                    model = PostProcessModelName,
                     messages,
                     temperature = 0.0
                 };
 
-                using var request = new HttpRequestMessage(HttpMethod.Post, _chatApiUrl);
-                if (!string.IsNullOrEmpty(_activeApiKey))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _activeApiKey);
+                using var request = new HttpRequestMessage(HttpMethod.Post, ChatApiUrl);
+                if (!string.IsNullOrEmpty(ActiveApiKey))
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ActiveApiKey);
                 request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
 
                 var response = await _httpClient.SendAsync(request);
@@ -1606,138 +1431,9 @@ namespace WhisperInk
             }
         }
 
-        // ── Text input helpers ──────────────────────────────────────────
-
-        private void TypeTextViaInput(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return;
-            if (_targetWindow == IntPtr.Zero) return;
-
-            foreach (char c in text)
-            {
-                PostMessage(_targetWindow, WM_CHAR, (IntPtr)c, IntPtr.Zero);
-            }
-        }
-
-        private string GetSelectedText()
-        {
-            try
-            {
-                keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-                keybd_event(0x43, 0, 0, UIntPtr.Zero);
-                keybd_event(0x43, 0, KEYEVENTF_KEYUP_BYTE, UIntPtr.Zero);
-                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP_BYTE, UIntPtr.Zero);
-
-                Thread.Sleep(100);
-                string text = "";
-                var staThread = new Thread(() => { try { text = Clipboard.GetText(); } catch { } });
-                staThread.SetApartmentState(ApartmentState.STA);
-                staThread.Start();
-                staThread.Join();
-                return text;
-            }
-            catch (Exception ex)
-            {
-                Log($"GetSelectedText failed: {ex.Message}");
-                return "";
-            }
-        }
-
-        private void PasteTextToActiveWindow(string text)
-        {
-            text = " " + text;
-            Log($"[diag] Paste: enter, len={text.Length}");
-
-            // If a previous paste's restore is still pending, its saved data IS the
-            // real prior clipboard (the current clipboard holds the previous transcript).
-            // Reuse it so chained dictations still restore the user's original copy.
-            IDataObject? savedClipboard = _pendingRestoreData;
-            try { _pendingRestoreCts?.Cancel(); } catch { }
-            _pendingRestoreCts = null;
-            _pendingRestoreData = null;
-
-            Exception? clipEx = null;
-            var staThread = new Thread(() =>
-            {
-                if (savedClipboard == null)
-                {
-                    try { savedClipboard = CloneClipboardData(); } catch { }
-                }
-                try { Clipboard.SetText(text); }
-                catch (Exception ex) { clipEx = ex; }
-            });
-            staThread.SetApartmentState(ApartmentState.STA);
-            staThread.Start();
-            Log("[diag] Paste: STA started, joining");
-            staThread.Join();
-            Log(clipEx == null
-                ? "[diag] Paste: STA joined OK, calling SimulateCtrlV"
-                : $"[diag] Paste: STA joined with SetText error {clipEx.GetType().Name}: {clipEx.Message}");
-            SimulateCtrlV();
-
-            if (clipEx == null && savedClipboard != null)
-            {
-                var cts = new CancellationTokenSource();
-                _pendingRestoreCts = cts;
-                _pendingRestoreData = savedClipboard;
-                _ = RestoreClipboardAfterDelay(savedClipboard, cts);
-            }
-            Log("[diag] Paste: exit");
-        }
-
-        // Snapshot every format on the clipboard into a new DataObject. Skips
-        // formats that throw on read (delayed-render, COM-marshalled handles)
-        // so a single bad format doesn't lose the rest. Must run on STA thread.
-        private static IDataObject? CloneClipboardData()
-        {
-            var src = Clipboard.GetDataObject();
-            if (src == null) return null;
-            var clone = new DataObject();
-            bool any = false;
-            foreach (var fmt in src.GetFormats(autoConvert: false))
-            {
-                try
-                {
-                    var data = src.GetData(fmt, autoConvert: false);
-                    if (data != null) { clone.SetData(fmt, data); any = true; }
-                }
-                catch { }
-            }
-            return any ? clone : null;
-        }
-
-        // Wait long enough for the target app to consume the simulated Ctrl+V,
-        // then restore the saved clipboard. Cancellable so a fresh paste can
-        // pre-empt this one without racing on Clipboard.SetDataObject.
-        private async Task RestoreClipboardAfterDelay(IDataObject data, CancellationTokenSource cts)
-        {
-            try { await Task.Delay(250, cts.Token); }
-            catch (OperationCanceledException) { return; }
-
-            var t = new Thread(() =>
-            {
-                try { Clipboard.SetDataObject(data, copy: true); }
-                catch (Exception ex) { Log($"Clipboard restore failed: {ex.Message}"); }
-            });
-            t.SetApartmentState(ApartmentState.STA);
-            t.Start();
-            t.Join();
-
-            if (ReferenceEquals(_pendingRestoreCts, cts))
-            {
-                _pendingRestoreCts = null;
-                _pendingRestoreData = null;
-                Log("[diag] Paste: clipboard restored");
-            }
-        }
-
-        private void SimulateCtrlV()
-        {
-            keybd_event(VK_CONTROL, 0, 0, UIntPtr.Zero);
-            keybd_event(0x56, 0, 0, UIntPtr.Zero);
-            keybd_event(0x56, 0, KEYEVENTF_KEYUP_BYTE, UIntPtr.Zero);
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP_BYTE, UIntPtr.Zero);
-        }
+        // ── Text input ──────────────────────────────────────────────────
+        // Typing, paste-with-clipboard-restore, selection grab, and modifier
+        // release all live in TextInjector (_injector).
 
         private async Task SendTextMessageSafe(string message, CancellationToken ct)
         {
@@ -1749,19 +1445,9 @@ namespace WhisperInk
                 var bytes = Encoding.UTF8.GetBytes(message);
                 await _realtimeWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
             }
+            catch (OperationCanceledException) { } // normal during stop
             catch (Exception ex) { Log($"WS send failed: {ex.Message}"); }
             finally { _wsSendLock.Release(); }
-        }
-
-        private void ReleaseAllModifierKeys()
-        {
-            keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
-            keybd_event(0xA0, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
-            keybd_event(0xA1, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
-            keybd_event((byte)VK_LMENU, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
-            keybd_event((byte)VK_RMENU, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
-            keybd_event((byte)VK_LWIN, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
-            keybd_event((byte)VK_RWIN, 0, KEYEVENTF_KEYUP_BYTE, SYNTHETIC_MARKER);
         }
 
         private void ResetUi()
@@ -1780,7 +1466,7 @@ namespace WhisperInk
             {
                 if (child is Border bar)
                 {
-                    double target = _isRecording ? _rng.Next(4, 22) : 2;
+                    double target = IsRecording ? _rng.Next(4, 22) : 2;
                     bar.Height = bar.Height + (target - bar.Height) * 0.4;
                 }
             }
@@ -1957,7 +1643,7 @@ namespace WhisperInk
                     IsChecked = IsRealtimeMode,
                     Action = () =>
                     {
-                        if (!_activeSupportsRealtime)
+                        if (!ActiveSupportsRealtime)
                         {
                             MessageBox.Show("Current provider does not support Mistral Realtime.\nSwitch to Mistral or use Batch mode.",
                                 "Realtime Unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
