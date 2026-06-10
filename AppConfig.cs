@@ -419,6 +419,25 @@ namespace WhisperInk
             },
             new ApiProvider
             {
+                // Mistral Voxtral-Mini-4B-Realtime. Upstream CrispASR treats
+                // the 4B realtime checkpoint as a DIFFERENT backend than the
+                // 3B ("voxtral4b" vs "voxtral") — hence a separate preset
+                // rather than widening the 3B glob.
+                Id = "voxtral4b-local",
+                Name = "Voxtral 4B Realtime Local (CrispASR, auto-spawn)",
+                BaseUrl = "http://localhost:8108",
+                TranscriptionEndpoint = "http://localhost:8108/v1/audio/transcriptions",
+                TranscriptionModel = "voxtral4b",
+                SupportsTranscription = true,
+                ContextBiasMode = "whisper_prompt",
+                Language = "en",
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8108,
+                LocalModelGlob = "voxtral-mini-4b*.gguf",
+                LocalBackendHint = "voxtral4b",
+            },
+            new ApiProvider
+            {
                 // IBM Granite Speech 4.1 2B speech-LLM. Same shape as Voxtral:
                 // explicit backend hint + prompt-style context bias.
                 Id = "granite-local",
@@ -476,7 +495,7 @@ namespace WhisperInk
             "cohere-gguf-cuda-server"                                      => TranscriberKind.LocalCrispAsrServer,
             "cohere-gguf-cuda-server-q8"                                   => TranscriberKind.LocalCrispAsrServer,
             "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k"
-                or "voxtral-local" or "granite-local"                      => TranscriberKind.LocalCrispAsrServer,
+                or "voxtral-local" or "voxtral4b-local" or "granite-local" => TranscriberKind.LocalCrispAsrServer,
             "google-chirp3"                                                => TranscriberKind.GoogleChirp3,
             _                                                              => TranscriberKind.Http,
         };

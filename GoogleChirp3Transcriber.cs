@@ -142,7 +142,7 @@ namespace WhisperInk
             // can see it in debug.log before the error fires.
             double durSec = TryGetWavDurationSeconds(wavBytes);
             if (durSec > SyncWarnSeconds)
-                Console.Error.WriteLine($"[GoogleChirp3] WARNING: audio is {durSec:F1}s; sync recognize caps at ~60s and may 400.");
+                _log($"GoogleChirp3 WARNING: audio is {durSec:F1}s; sync recognize caps at ~60s and may 400.");
 
             // Build JSON body
             var configNode = new JsonObject
@@ -193,7 +193,7 @@ namespace WhisperInk
 
             if (!response.IsSuccessStatusCode)
             {
-                Console.Error.WriteLine($"[GoogleChirp3] HTTP {(int)response.StatusCode}: {responseString[..Math.Min(500, responseString.Length)]}");
+                _log($"GoogleChirp3 HTTP {(int)response.StatusCode}: {responseString[..Math.Min(500, responseString.Length)]}");
                 return null;
             }
 

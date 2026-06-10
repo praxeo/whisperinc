@@ -147,7 +147,7 @@ namespace WhisperInk
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"CohereOnnx (mem) error: {ex.Message}");
+                    _log($"CohereOnnx (mem) error: {ex.Message}");
                     return null;
                 }
             });
@@ -241,7 +241,7 @@ namespace WhisperInk
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"CohereOnnx error: {ex.Message}");
+                    _log($"CohereOnnx error: {ex.Message}");
                     return null;
                 }
             });

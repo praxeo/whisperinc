@@ -305,7 +305,7 @@ namespace WhisperInk
 
             if (_hookId != IntPtr.Zero) UnhookWindowsHookEx(_hookId);
             try { _proxyHeartbeat?.Stop(); } catch { }
-            try { _proxyProcess?.Kill(); } catch { }
+            try { _proxyProcess?.Kill(); } catch (Exception ex) { Log($"Proxy kill on close failed: {ex.Message}"); }
             try { _transcribers?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
@@ -1130,7 +1130,7 @@ namespace WhisperInk
                         await Task.Delay(500);
                     }
                 }
-                catch { }
+                catch (Exception ex) { Log($"Realtime commit send failed: {ex.Message}"); }
 
                 _isRecording = false;
 
@@ -1634,7 +1634,11 @@ namespace WhisperInk
                 staThread.Join();
                 return text;
             }
-            catch { return ""; }
+            catch (Exception ex)
+            {
+                Log($"GetSelectedText failed: {ex.Message}");
+                return "";
+            }
         }
 
         private void PasteTextToActiveWindow(string text)
@@ -1710,7 +1714,8 @@ namespace WhisperInk
 
             var t = new Thread(() =>
             {
-                try { Clipboard.SetDataObject(data, copy: true); } catch { }
+                try { Clipboard.SetDataObject(data, copy: true); }
+                catch (Exception ex) { Log($"Clipboard restore failed: {ex.Message}"); }
             });
             t.SetApartmentState(ApartmentState.STA);
             t.Start();
@@ -1742,7 +1747,7 @@ namespace WhisperInk
                 var bytes = Encoding.UTF8.GetBytes(message);
                 await _realtimeWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
             }
-            catch { }
+            catch (Exception ex) { Log($"WS send failed: {ex.Message}"); }
             finally { _wsSendLock.Release(); }
         }
 

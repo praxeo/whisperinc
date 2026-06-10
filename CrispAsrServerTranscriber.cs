@@ -67,6 +67,10 @@ namespace WhisperInk
             _exePath = Path.Combine(_modelFolder, ExeName);
             _modelPath = ResolveModel(_modelFolder, provider.LocalModelGlob);
             _port = ResolvePort(provider);
+            // Capped at 8 deliberately: ggml ASR inference scales with
+            // physical cores + memory bandwidth, not SMT threads, and on
+            // GPU backends -t only covers small CPU-side stages. More
+            // threads oversubscribe 8-core laptops for no desktop gain.
             _threads = Math.Min(8, Environment.ProcessorCount);
             _backendHint = string.IsNullOrWhiteSpace(provider.LocalBackendHint) ? null : provider.LocalBackendHint;
             _inferenceUrl = $"http://{ServerHost}:{_port}/v1/audio/transcriptions";
