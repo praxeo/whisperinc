@@ -20,7 +20,7 @@ using NAudio.Wave;
 
 namespace WhisperInk
 {
-    public partial class MainWindow : Window, TrayIconHost
+    public partial class MainWindow : Window
     {
         // ── Win32 imports ──────────────────────────────────────────────
         [DllImport("user32.dll")]
@@ -1832,100 +1832,172 @@ namespace WhisperInk
             });
         }
 
-        // ── Tray context menu ──────────────────────────────────────────
-        // Sequenced top-level builder: every submenu lives in its own
-        // helper so each piece reads as a unit. Read top-to-bottom; the
-        // order here is the order the user sees.
+        // ── Shared app menu ────────────────────────────────────────────
+        // ONE canonical MenuNode tree drives both surfaces: the floating
+        // bar's WPF context menu (right-click, rendered here) and the tray
+        // icon's WinForms menu (rendered by TrayIconManager). Rebuilt on
+        // every open so check states are always current. Build order is
+        // display order.
 
         private void Window_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
         {
-            var menu = new ContextMenu();
-            menu.Items.Add(BuildProviderMenu());
-            menu.Items.Add(new Separator());
-            menu.Items.Add(BuildModeMenu());
-            menu.Items.Add(new Separator());
-            menu.Items.Add(BuildMicMenu());
-            menu.Items.Add(BuildSoundToggle());
-            menu.Items.Add(new Separator());
-            menu.Items.Add(BuildDelayMenu());
-            menu.Items.Add(new Separator());
-            menu.Items.Add(BuildPromptItem());
-            menu.Items.Add(BuildBiasItem());
-            menu.Items.Add(BuildHistoryItem());
-            menu.Items.Add(new Separator());
-            menu.Items.Add(BuildConfigItem());
-            menu.Items.Add(BuildPostProcessToggle());
-            menu.Items.Add(BuildHideItem());
-            menu.Items.Add(BuildExitItem());
+            var menu = WpfMenuRenderer.Build(BuildAppMenu());
             menu.IsOpen = true;
         }
 
-        private static MenuItem MakeItem(string header, Action onClick, bool isChecked = false)
+        private IReadOnlyList<MenuNode> BuildAppMenu() => new List<MenuNode>
         {
-            var item = new MenuItem { Header = header, IsChecked = isChecked };
-            item.Click += (_, _) => onClick();
-            return item;
-        }
+            // Tray-only header: the floating bar already shows status inline.
+            new MenuNode
+            {
+                Header = $"{_lastHealth.Dot}  Active provider: {ActiveProviderName}",
+                IsEnabled = false,
+                ToolTip = string.IsNullOrWhiteSpace(_lastHealth.Summary) ? null : _lastHealth.Summary,
+                Surface = MenuSurface.TrayOnly,
+            },
+            new MenuNode { Header = "Show Window", Action = ShowMainWindow, Surface = MenuSurface.TrayOnly },
+            MenuNode.Separator(MenuSurface.TrayOnly),
 
-        private MenuItem BuildProviderMenu()
+            BuildProviderMenu(),
+            MenuNode.Separator(),
+            BuildModeMenu(),
+            MenuNode.Separator(),
+            BuildMicMenu(),
+            new MenuNode
+            {
+                Header = _isSoundEnabled ? "🔊 Sound: ON" : "🔇 Sound: OFF",
+                Action = () => { _isSoundEnabled = !_isSoundEnabled; SaveConfig(); },
+            },
+            MenuNode.Separator(),
+            BuildDelayMenu(),
+            MenuNode.Separator(),
+            new MenuNode
+            {
+                Header = "📝 System Prompt",
+                Action = () =>
+                {
+                    var pw = new PromptWindow(_systemPrompt);
+                    if (pw.ShowDialog() == true) { _systemPrompt = pw.PromptText; SaveConfig(); }
+                },
+            },
+            new MenuNode
+            {
+                Header = "🎯 Context Bias Terms",
+                Action = () =>
+                {
+                    var biasWindow = new ContextBiasWindow(_contextBiasTerms);
+                    if (biasWindow.ShowDialog() == true)
+                    {
+                        _contextBiasTerms = biasWindow.BiasTerms;
+                        SaveConfig();
+                    }
+                },
+            },
+            new MenuNode { Header = "📋 History", Action = () => new HistoryWindow().Show() },
+            MenuNode.Separator(),
+            new MenuNode
+            {
+                Header = _postProcessBatch ? "🩺 Med Correction: ON" : "🩺 Med Correction: OFF",
+                Action = () => { _postProcessBatch = !_postProcessBatch; SaveConfig(); UpdateStatusLabel(); },
+            },
+            BuildGpuBackendMenu(),
+            MenuNode.Separator(),
+            new MenuNode { Header = "📂 Open config folder", ToolTip = ConfigFile, Action = () => OpenExplorerSelect(ConfigFile) },
+            new MenuNode { Header = "Open debug log", Action = () => OpenPath(LogFile) },
+            new MenuNode { Header = "Open model folder", Action = () => OpenFolder(Path.Combine(ConfigFolder, "cohere-gguf")) },
+            new MenuNode { Header = "Copy support bundle", Action = CopySupportBundle },
+            new MenuNode { Header = "Diagnose active provider", Action = DiagnoseActiveProvider },
+            MenuNode.Separator(),
+            new MenuNode { Header = "About…", Action = ShowAboutDialog },
+            new MenuNode { Header = "View README", Action = () => OpenUrl(AboutWindow.ReadmeUrl) },
+            MenuNode.Separator(),
+            new MenuNode
+            {
+                Header = "Quit on close",
+                IsChecked = _quitOnClose,
+                Action = () => SetQuitOnClose(!_quitOnClose),
+            },
+            new MenuNode
+            {
+                Header = "Launch at Windows start",
+                IsChecked = _launchAtStartup,
+                Action = () => SetLaunchAtStartup(!_launchAtStartup),
+            },
+            MenuNode.Separator(),
+            new MenuNode { Header = "⬇ Hide to tray", Action = HideToTray, Surface = MenuSurface.BarOnly },
+            new MenuNode { Header = "❌ Quit", Action = QuitApplication },
+        };
+
+        private MenuNode BuildProviderMenu()
         {
-            var providerMenu = new MenuItem { Header = $"🔌 Provider: {GetActiveProvider()?.Name ?? "?"}" };
+            var children = new List<MenuNode>();
             foreach (var provider in _providers)
             {
-                string pid = provider.Id;
-                providerMenu.Items.Add(MakeItem(provider.Name, () => SwitchProvider(pid), isChecked: pid == _activeProviderId));
-            }
-            providerMenu.Items.Add(new Separator());
-            providerMenu.Items.Add(MakeItem("⚙ Configure Providers...", OpenProviderSettingsDialog));
-            return providerMenu;
-        }
-
-        private MenuItem BuildModeMenu()
-        {
-            var modeMenu = new MenuItem { Header = $"⚡ Mode: {_dictationMode}" };
-            modeMenu.Items.Add(MakeItem("Realtime (live typing)", () =>
-            {
-                if (!_activeSupportsRealtime)
+                string pid = provider.Id; // capture for the closure
+                children.Add(new MenuNode
                 {
-                    MessageBox.Show("Current provider does not support Mistral Realtime.\nSwitch to Mistral or use Batch mode.",
-                        "Realtime Unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
-                _dictationMode = "Realtime"; SaveConfig(); UpdateStatusLabel();
-            }, isChecked: IsRealtimeMode));
-
-            modeMenu.Items.Add(MakeItem("Batch (record → paste)", () =>
-            {
-                _dictationMode = "Batch"; SaveConfig(); UpdateStatusLabel();
-            }, isChecked: !IsRealtimeMode));
-            return modeMenu;
+                    Header = provider.Name,
+                    IsChecked = pid == _activeProviderId,
+                    Action = () => SwitchProvider(pid),
+                });
+            }
+            children.Add(MenuNode.Separator());
+            children.Add(new MenuNode { Header = "⚙ Configure Providers...", Action = OpenProviderSettingsDialog });
+            return new MenuNode { Header = $"🔌 Provider: {GetActiveProvider()?.Name ?? "?"}", Children = children };
         }
 
-        private MenuItem BuildMicMenu()
+        private MenuNode BuildModeMenu() => new()
         {
-            var micMenu = new MenuItem { Header = "🎙 Microphone" };
+            Header = $"⚡ Mode: {_dictationMode}",
+            Children = new List<MenuNode>
+            {
+                new MenuNode
+                {
+                    Header = "Realtime (live typing)",
+                    IsChecked = IsRealtimeMode,
+                    Action = () =>
+                    {
+                        if (!_activeSupportsRealtime)
+                        {
+                            MessageBox.Show("Current provider does not support Mistral Realtime.\nSwitch to Mistral or use Batch mode.",
+                                "Realtime Unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
+                            return;
+                        }
+                        _dictationMode = "Realtime"; SaveConfig(); UpdateStatusLabel();
+                    },
+                },
+                new MenuNode
+                {
+                    Header = "Batch (record → paste)",
+                    IsChecked = !IsRealtimeMode,
+                    Action = () => { _dictationMode = "Batch"; SaveConfig(); UpdateStatusLabel(); },
+                },
+            },
+        };
+
+        private MenuNode BuildMicMenu()
+        {
+            var children = new List<MenuNode>();
             for (int i = 0; i < WaveIn.DeviceCount; i++)
             {
                 int deviceIndex = i; // capture for the closure
                 var cap = WaveIn.GetCapabilities(i);
-                micMenu.Items.Add(MakeItem(cap.ProductName, () =>
+                children.Add(new MenuNode
                 {
-                    _selectedDeviceNumber = deviceIndex; SaveConfig();
-                }, isChecked: i == _selectedDeviceNumber));
+                    Header = cap.ProductName,
+                    IsChecked = i == _selectedDeviceNumber,
+                    Action = () => { _selectedDeviceNumber = deviceIndex; SaveConfig(); },
+                });
             }
-            return micMenu;
+            return new MenuNode { Header = "🎙 Microphone", Children = children };
         }
 
-        private MenuItem BuildSoundToggle()
-            => MakeItem(_isSoundEnabled ? "🔊 Sound: ON" : "🔇 Sound: OFF",
-                () => { _isSoundEnabled = !_isSoundEnabled; SaveConfig(); });
-
-        private MenuItem BuildDelayMenu()
+        private MenuNode BuildDelayMenu()
         {
-            var delayMenu = new MenuItem { Header = "⏱ Streaming Delay" };
+            var children = new List<MenuNode>();
             foreach (int ms in new[] { 240, 480, 1000, 1500, 2400 })
             {
-                int delayMs = ms;
+                int delayMs = ms; // capture for the closure
                 string label = ms switch
                 {
                     240  => "240ms (fastest)",
@@ -1935,52 +2007,85 @@ namespace WhisperInk
                     2400 => "2400ms (most accurate)",
                     _    => $"{ms}ms"
                 };
-                delayMenu.Items.Add(MakeItem(label, () =>
+                children.Add(new MenuNode
                 {
-                    _targetStreamingDelayMs = delayMs; SaveConfig();
-                }, isChecked: _targetStreamingDelayMs == ms));
+                    Header = label,
+                    IsChecked = _targetStreamingDelayMs == ms,
+                    Action = () => { _targetStreamingDelayMs = delayMs; SaveConfig(); },
+                });
             }
-            return delayMenu;
+            return new MenuNode { Header = "⏱ Streaming Delay", Children = children };
         }
 
-        private MenuItem BuildPromptItem()
-            => MakeItem("📝 System Prompt", () =>
+        private MenuNode BuildGpuBackendMenu()
+        {
+            (string label, string value)[] options =
             {
-                var pw = new PromptWindow(_systemPrompt);
-                if (pw.ShowDialog() == true) { _systemPrompt = pw.PromptText; SaveConfig(); }
-            });
-
-        private MenuItem BuildBiasItem()
-            => MakeItem("🎯 Context Bias Terms", () =>
+                ("Auto (recommended)", "auto"),
+                ("Vulkan (GPU)",       "vulkan"),
+                ("CUDA (NVIDIA GPU)",  "cuda"),
+                ("CPU only",           "cpu"),
+            };
+            var children = new List<MenuNode>();
+            foreach (var (label, value) in options)
             {
-                var biasWindow = new ContextBiasWindow(_contextBiasTerms);
-                if (biasWindow.ShowDialog() == true)
+                string capture = value; // capture for the closure
+                children.Add(new MenuNode
                 {
-                    _contextBiasTerms = biasWindow.BiasTerms;
-                    SaveConfig();
-                }
-            });
-
-        private MenuItem BuildHistoryItem()
-            => MakeItem("📋 History", () => new HistoryWindow().Show());
-
-        private MenuItem BuildConfigItem()
-            => MakeItem($"📂 Config: {ConfigFile}",
-                () => Process.Start("explorer.exe", $"/select,\"{ConfigFile}\""));
-
-        private MenuItem BuildPostProcessToggle()
-            => MakeItem(_postProcessBatch ? "🩺 Med Correction: ON" : "🩺 Med Correction: OFF", () =>
+                    Header = label,
+                    IsChecked = string.Equals(_crispGpuBackend, capture, StringComparison.OrdinalIgnoreCase),
+                    Action = () => SetCrispGpuBackend(capture),
+                });
+            }
+            return new MenuNode
             {
-                _postProcessBatch = !_postProcessBatch;
-                SaveConfig();
-                UpdateStatusLabel();
-            });
+                Header = "🖥 Local GPU backend",
+                ToolTip = string.IsNullOrWhiteSpace(CrispGpuProbe.Summary) ? null : CrispGpuProbe.Summary,
+                Children = children,
+            };
+        }
 
-        private MenuItem BuildHideItem()
-            => MakeItem("⬇ Hide to tray", HideToTray);
+        // Shell helpers backing the menu actions (formerly in TrayIcon.cs).
 
-        private MenuItem BuildExitItem()
-            => MakeItem("❌ Quit", QuitApplication);
+        private static void OpenExplorerSelect(string file)
+        {
+            try { Process.Start("explorer.exe", $"/select,\"{file}\""); }
+            catch (Exception ex) { Log($"Open explorer failed: {ex.Message}"); }
+        }
+
+        private static void OpenPath(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+                else
+                    MessageBox.Show($"Not found:\n{path}", "WhisperInk",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "WhisperInk", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        private static void OpenFolder(string path)
+        {
+            try
+            {
+                if (!Directory.Exists(path)) Directory.CreateDirectory(path);
+                Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "WhisperInk", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        private static void OpenUrl(string url)
+        {
+            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
+        }
 
         private void Window_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
@@ -1995,7 +2100,10 @@ namespace WhisperInk
         {
             try
             {
-                _tray = new TrayIconManager(this);
+                _tray = new TrayIconManager(
+                    menuSource: BuildAppMenu,
+                    onActivate: ShowMainWindow,
+                    trayTooltip: () => $"WhisperInk — {_lastHealth.Dot} {ActiveProviderName}");
             }
             catch (Exception ex) { Log($"Tray init failed: {ex.Message}"); }
 
@@ -2023,7 +2131,7 @@ namespace WhisperInk
             Dispatcher.BeginInvoke(() =>
             {
                 UpdateHealthDot();
-                _tray?.NotifyHealth(r);
+                _tray?.RefreshTooltip();
                 // UpdateLocalModelBanner takes priority — missing GGUF is the
                 // actionable failure, and it falls through to UpdateSetupBannerVisibility
                 // when nothing is missing.
@@ -2141,22 +2249,11 @@ namespace WhisperInk
             try { Hide(); } catch { }
         }
 
-        // ── TrayIconHost ────────────────────────────────────────────────
+        // ── Menu-backed actions (shared by tray + bar via BuildAppMenu) ──
 
-        public string ActiveProviderName => GetActiveProvider()?.Name ?? "?";
-        public string DebugLogPath       => LogFile;
-        // Explicit impl — would otherwise collide with the existing private
-        // static field also named ConfigFolder.
-        string TrayIconHost.ConfigFolder => MainWindow.ConfigFolder;
-        string TrayIconHost.ModelFolder  => Path.Combine(MainWindow.ConfigFolder, "cohere-gguf");
-        public HealthReport CurrentHealth => _lastHealth;
-        public bool QuitOnClose          => _quitOnClose;
-        public bool LaunchAtStartup      => _launchAtStartup;
+        private string ActiveProviderName => GetActiveProvider()?.Name ?? "?";
 
-        public string CrispGpuBackend    => _crispGpuBackend;
-        public string DetectedGpuSummary => CrispGpuProbe.Summary;
-
-        public void SetCrispGpuBackend(string value)
+        private void SetCrispGpuBackend(string value)
         {
             Dispatcher.BeginInvoke(() =>
             {
