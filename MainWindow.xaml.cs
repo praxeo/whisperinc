@@ -709,6 +709,8 @@ namespace WhisperInk
                                 p.LocalGpuBackend = lgb.GetString() ?? "";
                             if (pEl.TryGetProperty("LocalModelFolder", out var lmf))
                                 p.LocalModelFolder = lmf.GetString() ?? "";
+                            if (pEl.TryGetProperty("LocalBeamSize", out var lbs) && lbs.ValueKind == JsonValueKind.Number)
+                                p.LocalBeamSize = lbs.GetInt32();
 
                             _providers.Add(p);
                         }

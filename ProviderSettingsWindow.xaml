@@ -175,6 +175,17 @@
                     </StackPanel>
                 </GroupBox>
 
+                <GroupBox x:Name="LocalCrispGroup"
+                          Header="Advanced — Local CrispASR server" Margin="0,0,0,4"
+                          BorderBrush="#444" Foreground="#AAAAAA">
+                    <StackPanel Margin="4,4,4,4">
+                        <Label Content="Beam size (beam_size)"/>
+                        <TextBox x:Name="TxtLocalBeamSize" Margin="0,0,0,4"/>
+                        <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10"
+                                   Text="Blank = server default (greedy). 5 is a good starting point — better accuracy, slower decode. Requires CrispASR v0.7+."/>
+                    </StackPanel>
+                </GroupBox>
+
                 <Separator Background="#333" Margin="0,8,0,8"/>
 
                 <GroupBox Header="Advanced — Local GPU Backend" Margin="0,0,0,4"

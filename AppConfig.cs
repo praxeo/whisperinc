@@ -142,6 +142,12 @@ namespace WhisperInk
         // Blank → "cohere-gguf" (the unified location all newer presets share).
         public string LocalModelFolder { get; set; } = "";
 
+        // Optional beam-search width sent as the "beam_size" form field.
+        // null → server default (greedy). Requires CrispASR v0.7+ (older
+        // servers ignore unknown fields). Beam search is implemented for
+        // Cohere, Parakeet TDT/RNNT, Canary, FunASR and others.
+        public int? LocalBeamSize { get; set; } = null;
+
         public List<string> GetValidatedKeyterms(out List<string> warnings)
         {
             warnings = new List<string>();

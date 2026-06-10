@@ -95,6 +95,13 @@ namespace WhisperInk
             ScribeGroup.Visibility = _current.UsesCustomAuthHeader
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+
+            // Beam size only applies to providers backed by a local
+            // crispasr.exe server — hide it everywhere else.
+            TxtLocalBeamSize.Text = _current.LocalBeamSize?.ToString() ?? "";
+            LocalCrispGroup.Visibility = _current.TranscriberKind == TranscriberKind.LocalCrispAsrServer
+                ? Visibility.Visible
+                : Visibility.Collapsed;
         }
 
         private void CommitCurrentFields()
@@ -129,6 +136,11 @@ namespace WhisperInk
             _current.ScribeKeytermsRaw = TxtScribeKeyterms.Text;
             _current.TagAudioEvents    = ChkTagAudioEvents.IsChecked == true;
             _current.NoVerbatim        = ChkNoVerbatim.IsChecked == true;
+
+            // Beam size: blank or non-positive = null (server default / greedy).
+            _current.LocalBeamSize = int.TryParse(TxtLocalBeamSize.Text, out int beam) && beam > 0
+                ? beam
+                : null;
         }
 
         private void TxtScribeKeyterms_TextChanged(object sender, TextChangedEventArgs e) =>
@@ -245,6 +257,7 @@ namespace WhisperInk
             LocalBackendHint = src.LocalBackendHint,
             LocalGpuBackend  = src.LocalGpuBackend,
             LocalModelFolder = src.LocalModelFolder,
+            LocalBeamSize    = src.LocalBeamSize,
         };
     }
 }
