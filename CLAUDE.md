@@ -13,8 +13,8 @@ A WPF (C#/.NET 8) system-wide dictation tool for Windows. Global hotkeys capture
 
 Three directories are involved:
 
-1. **Source — `Documents\GitHub\whisperinc\`** — this repo (C#/WPF app).
-2. **Source — `Documents\GitHub\CrispASR\`** — sibling clone of the native ASR binary (C++/CMake). Built via `scripts/build-crispasr.ps1`. Can be absent if the user never runs local GGUF providers.
+1. **Source — `OneDrive\Desktop\whisperinc\`** — this repo (C#/WPF app). (On the desktop machine; path may differ per machine — resolve relative to the repo, never hardcode.)
+2. **Source — `OneDrive\Desktop\CrispASR\`** — sibling clone of the native ASR binary (C++/CMake). Optional: since CrispASR v0.7 ships prebuilt Windows binaries, the normal update path is `scripts/update-crispasr.ps1` (see below) and the clone is only needed for source builds. It carries one uncommitted local patch (ggml-blas PkgConfig-optional fix).
 3. **Runtime — `%APPDATA%\.WhisperInk\`** — hardcoded deploy target. Contains:
    - `config.json`, `debug.log`, `history.json` — app state
    - `cohere-onnx\` — ONNX weights for `CohereOnnxTranscriber`
@@ -28,7 +28,11 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 
 | File | Purpose |
 |------|---------|
-| `MainWindow.xaml.cs` | Global keyboard hook, recording state machine, transcription dispatch (now one factory call), tray context menu. ~2200 LOC. |
+| `MainWindow.xaml.cs` | Orchestration: recording state machine (`_recState` tri-state via `Interlocked`), transcription dispatch (one factory call), config load/save, the shared `BuildAppMenu()` tree, realtime WS streaming. ~1750 LOC. |
+| `KeyboardHookService.cs` | Owns the `WH_KEYBOARD_LL` hook: modifier tracking, hotkey suppression, synthetic-event filter (0x5AFE marker), Ctrl+Space / Ctrl+Alt detection. Callbacks fire on the hook thread; MainWindow marshals via Dispatcher + `RunSafe`. |
+| `TextInjector.cs` | Synthetic text delivery: per-char `WM_CHAR` typing (realtime), clipboard paste-with-restore (batch/AI), selection grab via Ctrl+C, `ReleaseAllModifierKeys()`. Owns pending clipboard-restore state. |
+| `MenuModel.cs` | `MenuNode` record + `MenuSurface` (Both/TrayOnly/BarOnly) + WPF renderer. One canonical menu tree drives both the tray menu and the bar right-click menu — they cannot drift. |
+| `TrayIcon.cs` | `TrayIconManager`: notification-area icon + WinForms renderer over the shared `MenuNode` tree (rebuilt on every `Opening`). |
 | `AppConfig.cs` | `ApiProvider` model, `TranscriberKind` enum, default provider list. New providers added via `CreateDefaults()` or directly in `config.json`. |
 | `ITranscriber.cs` | Common interface every batch backend implements (`TranscribeAsync(byte[], biasTerms, ct)`). |
 | `TranscriberFactory.cs` | Lazy-caches one `ITranscriber` per provider id. `Drop(id)` to free a single model; `DropAll()` after settings edits. |
@@ -59,10 +63,10 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 `ApiProvider` captures every knob; the cloud-vs-local split lives in `TranscriberKind`:
 
 - **Shared HTTP/cloud knobs**: `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`), `TranscriptionModel`, `ChatModel`, `PostProcessModel`, `SupportsRealtime`, `SupportsTranscription`, `TranscriptionTemperature` (nullable)
-- **Bias**: `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array)
+- **Bias**: `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array). Independent of the mode, LocalCrispAsrServer providers ALWAYS additionally send bias terms as the CrispASR v0.7+ `hotwords` form field (comma-separated) — real CTC/TDT phrase boost on Parakeet, prompt injection on Voxtral/Qwen3-style decoders; older servers ignore the unknown field.
 - **ElevenLabs-only**: `ScribeKeytermsRaw` (newline-delimited, capped at 1000 terms / <50 chars / ≤5 words each), `TagAudioEvents`, `NoVerbatim`
 - **TranscriberKind**: `Http` | `LocalOnnx` | `LocalCrispAsrServer` | `GoogleChirp3` — picks the `ITranscriber` implementation
-- **LocalCrispAsrServer-only**: `LocalServerPort`, `LocalModelGlob` (e.g. `"parakeet-*.gguf"`), `LocalBackendHint` (e.g. `"cohere"` when auto-detect doesn't cover the GGUF), `LocalGpuBackend` (blank → fall back to global `CrispGpuBackend`), `LocalModelFolder` (blank → `cohere-gguf`)
+- **LocalCrispAsrServer-only**: `LocalServerPort`, `LocalModelGlob` (e.g. `"parakeet-*.gguf"`), `LocalBackendHint` (e.g. `"cohere"` when auto-detect doesn't cover the GGUF), `LocalGpuBackend` (blank → fall back to global `CrispGpuBackend`), `LocalModelFolder` (blank → `cohere-gguf`), `LocalBeamSize` (nullable int → `beam_size` form field; null = greedy; needs CrispASR v0.7+; editable in provider settings)
 
 Default providers (`AppConfig.CreateDefaults()`):
 
@@ -80,7 +84,8 @@ Default providers (`AppConfig.CreateDefaults()`):
 | `parakeet-local` | Parakeet Local (CrispASR) | `LocalCrispAsrServer` | Port 8103, auto-detect backend |
 | `cohere-local-q4` | Cohere Local Q4 (CrispASR) | `LocalCrispAsrServer` | Port 8104, Q4_K GGUF, `--backend cohere` |
 | `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | `LocalCrispAsrServer` | Port 8105, Q6_K GGUF, near-F16 accuracy |
-| `voxtral-local` | Voxtral Local (CrispASR) | `LocalCrispAsrServer` | Port 8106, `--backend voxtral`, prompt bias |
+| `voxtral-local` | Voxtral Local (CrispASR) | `LocalCrispAsrServer` | Port 8106, `--backend voxtral`, prompt bias (3B GGUF) |
+| `voxtral4b-local` | Voxtral 4B Realtime Local (CrispASR) | `LocalCrispAsrServer` | Port 8108, `--backend voxtral4b` — upstream treats the 4B realtime checkpoint as a distinct backend from the 3B |
 | `granite-local` | Granite Speech 4.1 Local (CrispASR) | `LocalCrispAsrServer` | Port 8107, `--backend granite`, prompt bias |
 | `google-chirp3` | Google Chirp 3 | `GoogleChirp3` | OAuth + JSON body, native `phraseSets` biasing |
 
@@ -98,7 +103,7 @@ The factory caches one `ITranscriber` per provider id. Switching providers calls
 
 ### CrispAsrServerTranscriber (the generic one)
 
-The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X] [--gpu-backend Y]`, waits up to 45s for `/health`, and posts subsequent audio to `/v1/audio/transcriptions`. Server keeps model resident; process tree killed on `Dispose()`.
+The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X]` (plus `-ng` when the effective backend is `cpu`, or `--gpu-backend X` when it's a specific GPU; `auto` passes nothing so ggml's `init_best` picks CUDA > Vulkan > CPU per what the binary was built with), waits up to **120s** for `/health` (v0.7 auto-warms the model in server mode, so first health on a CUDA build includes VRAM upload + warmup), and posts subsequent audio to `/v1/audio/transcriptions` with `language`, optional `prompt`, `hotwords` (whenever bias terms exist), and optional `beam_size`. Thread count is capped at `Min(8, ProcessorCount)` deliberately: ggml ASR scales with physical cores/memory bandwidth, not SMT, and `-t` barely matters on GPU backends. Server keeps model resident; process tree killed on `Dispose()`.
 
 The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, and `CohereGgufCudaQ8ServerTranscriber.cs` files have been deleted — the same providers now use this generic class via config-only entries.
 
@@ -114,16 +119,21 @@ The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `Cohere
 
 Optional LLM correction pass (`PostProcessBatch` toggle). Uses `PostProcessModel` with a few-shot prompt that fixes garbled medical terms without over-correcting. Filters out commentary (e.g., "no correction needed").
 
-### Text injection
+### Text injection (`TextInjector.cs`)
 
 - **Realtime**: `PostMessage(WM_CHAR, ch, 0)` per character to the target window handle captured at recording start. Bypasses IME and most focus-stealing issues.
-- **Batch / AI**: `Clipboard.SetText` + synthetic `Ctrl+V`. Leading space prepended to avoid word-fusion.
+- **Batch / AI**: `Clipboard.SetText` + synthetic `Ctrl+V`. Leading space prepended to avoid word-fusion. Prior clipboard contents are cloned and restored ~250ms after the paste; chained dictations reuse the pending saved data so the user's original clipboard survives rapid-fire use.
 
-### Keyboard hook internals
+### Keyboard hook internals (`KeyboardHookService.cs`)
 
-- `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` installed on the UI thread.
-- Synthetic key presses (the paste `Ctrl+V`) tagged with sentinel `0x5AFE` in extra-info so the hook ignores its own injections.
-- `ReleaseAllModifierKeys()` runs after every recording to clear any physical modifier still held when the hook fired — prevents "stuck Ctrl" after long sessions.
+- `SetWindowsHookEx(WH_KEYBOARD_LL, ...)` installed on the UI thread; the hook delegate is held in a field (GC'ing it kills the hook silently).
+- Modifier-release key-ups are tagged with sentinel `0x5AFE` (`TextInjector.SyntheticMarkerValue`) in extra-info so the hook ignores its own injections.
+- `TextInjector.ReleaseAllModifierKeys()` runs after every recording to clear any physical modifier still held when the hook fired — prevents "stuck Ctrl" after long sessions.
+- Recording lifecycle is one tri-state `_recState` (Idle/Recording/Stopping) transitioned via `Interlocked.CompareExchange` — double-start/double-stop are structurally impossible. Async command methods are `async Task`, dispatched through `RunSafe` so faults land in `debug.log`.
+
+### Unified menu (`MenuModel.cs`)
+
+`MainWindow.BuildAppMenu()` builds one `MenuNode` tree; the WPF renderer (bar right-click) and the WinForms renderer in `TrayIconManager` (tray right-click, rebuilt on every `Opening`) both render it, filtered by `MenuSurface` (`TrayOnly`: status header + Show Window; `BarOnly`: Hide to tray). Adding a menu item means adding one node — it appears on both surfaces.
 
 ### Cohere v2 multipart quirk
 
@@ -149,7 +159,25 @@ dotnet publish -c Release -r win-x64 --self-contained true
 
 Helper scripts: `publish.ps1` (self-contained), `publish-framework-dependent.ps1`.
 
-### CrispASR native build
+### Updating CrispASR (preferred: prebuilt releases)
+
+Since v0.7, `CrispStrobe/CrispASR` publishes prebuilt Windows binaries per release: `crispasr-windows-x86_64-{cpu,cuda,vulkan,cpu-legacy}.zip`. The normal update path is:
+
+```powershell
+# CUDA build (default — bundles cublas/cudart 12.x DLLs, ~880 MB deployed)
+scripts\update-crispasr.ps1 -Tag v0.7.1
+
+# Or the Vulkan / CPU variants
+scripts\update-crispasr.ps1 -Tag v0.7.1 -Asset crispasr-windows-x86_64-vulkan.zip
+```
+
+The script downloads the asset via `gh`, stops any running crispasr server (WhisperInk respawns on next dictation), backs up the current `crispasr.exe` + `*.dll` to `cohere-gguf\.old-<stamp>\`, swaps in the new binaries (GGUFs untouched), and smoke-tests `--help` — empty output is the `STATUS_DLL_NOT_FOUND` signature and triggers an automatic restore from the backup. Keep the script **pure ASCII**: PowerShell 5.1 reads BOM-less files as ANSI, and multi-byte punctuation decodes into stray smart-quote bytes that break the parser.
+
+A CUDA build with global backend `auto` lights up NVIDIA GPUs automatically (`init_best`: CUDA > Vulkan > CPU); presets pinned `LocalGpuBackend: "cpu"` still run CPU via `-ng`. v0.7 also brings server-mode hotwords/beam-search fields (wired into `CrispAsrServerTranscriber`), auto-warmup at server start, and a `/load` model-hot-swap endpoint (unused so far). Upstream has no CLAUDE.md — its agent file is a 3-line `AGENTS.md`; the real docs are `README.md`, `docs/` (server.md, cli.md), `PERFORMANCE.md`, `ARCHITECTURE.md`.
+
+Known upstream quirk (v0.7.1, cohere backend): total wall time runs ~3s above the instrumented feature+encoder+decoder stages on both CPU and CUDA (`COHERE_BENCH=1` to reproduce) — dominates short-utterance latency; candidate for an upstream issue.
+
+### CrispASR native build (alternative: from source)
 
 `scripts/build-crispasr.ps1` clones `CrispStrobe/CrispASR` as a sibling of this repo (resolving via `$PSCommandPath` so no hardcoded paths), configures with the VS2022 generator, builds the `whisper-cli` target (which produces `crispasr.exe` via `OUTPUT_NAME`), and deploys the binary + all `*.dll` files to `%APPDATA%\.WhisperInk\cohere-gguf\`.
 
@@ -171,15 +199,15 @@ Config-only — no recompile required.
    {
      "Id": "canary-local",
      "Name": "Canary Local (CrispASR)",
-     "BaseUrl": "http://localhost:8108",
+     "BaseUrl": "http://localhost:8109",
      "TranscriberKind": "LocalCrispAsrServer",
-     "LocalServerPort": 8108,
+     "LocalServerPort": 8109,
      "LocalModelGlob": "canary-*.gguf",
      "ContextBiasMode": "none",
      "Language": "en"
    }
    ```
-   Set `LocalBackendHint` if the GGUF doesn't auto-detect (Cohere needs `"cohere"`, Voxtral `"voxtral"`, Granite `"granite"`).
+   (Ports 8103–8108 are taken by the shipped presets.) Set `LocalBackendHint` if the GGUF doesn't auto-detect (Cohere needs `"cohere"`, Voxtral 3B `"voxtral"`, Voxtral 4B Realtime `"voxtral4b"`, Granite `"granite"`).
 3. Restart WhisperInk. The provider appears in the tray menu under 🔌 Provider, and `CrispAsrServerTranscriber` lazy-spawns the server on first dictation.
 
 For a permanent default (shipped to every install), add the same entry to `AppConfig.CreateDefaults()` so new users get it on first run.
@@ -192,7 +220,7 @@ No C++ work needed — CrispASR auto-detects most backends from GGUF metadata.
 - **`.NET 8 Desktop Runtime`** is required, not just the base runtime. The WPF assemblies live in the Desktop variant.
 - **Mic enumeration is at launch.** Plug in before starting WhisperInk, or restart after plugging in.
 - **Stuck modifier keys** should auto-clear via `ReleaseAllModifierKeys()`. If one persists, tapping the key once releases it — capture `debug.log` around the stuck event.
-- **CrispASR silent failure = missing DLL.** Exit code `-1073741515` means `STATUS_DLL_NOT_FOUND`. Re-run the deploy step to copy all `*.dll` from `build\bin\Release\`.
+- **CrispASR silent failure = missing DLL.** Exit code `-1073741515` means `STATUS_DLL_NOT_FOUND`. Re-run `scripts\update-crispasr.ps1` (it deploys every `*.dll` from the release zip and auto-restores on a failed smoke test), or for source builds re-copy all `*.dll` from `build\bin\Release\`.
 - **Slow CPU inference on laptops = Windows power plan.** The default **Balanced** plan throttles CPU to base clock (e.g., 2.0 GHz on a Ryzen 5825U) even while plugged in, which roughly halves ASR throughput. Create and activate **Ultimate Performance**:
   ```powershell
   powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
@@ -203,4 +231,12 @@ No C++ work needed — CrispASR auto-detects most backends from GGUF metadata.
 
 ## Repo hygiene
 
-`.gitignore` excludes `publish/`, `bin/`, `obj/`, `build.log`. The CrispASR source tree lives in a sibling directory, not a submodule — intentionally, so CrispASR updates are a plain `git pull` in that folder without dragging submodule plumbing into this repo.
+`.gitignore` excludes `publish/`, `bin/`, `obj/`, `build.log`, plus the local AI-tooling state dirs `.claude/` and `.roo/` (the latter holds an MCP config with credentials — never commit it; this repo is public). The CrispASR source tree lives in a sibling directory, not a submodule — intentionally, so CrispASR updates are a plain `git pull` in that folder without dragging submodule plumbing into this repo.
+
+## Future work
+
+- Realtime/batch pipeline state-machine extraction out of MainWindow (the riskiest remaining chunk; deferred deliberately).
+- `-dev N` GPU-index pinning for multi-GPU machines (crispasr supports it; no provider knob yet).
+- `TextInjector.GetSelectedText()` still uses a fixed 100ms sleep before reading the clipboard — replace with a clipboard-listener.
+- The 15s `_httpClient` timeout (post-process/AI calls) is hardcoded.
+- CrispASR `/load` hot-swap could collapse the one-port-per-model preset scheme into a single resident server.
