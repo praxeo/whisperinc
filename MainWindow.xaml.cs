@@ -216,6 +216,11 @@ namespace WhisperInk
 
         private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
+            // Fresh log per session — must happen BEFORE LoadConfig, or the
+            // truncation wipes the very startup diagnostics it should keep
+            // (provider appends, active-provider line, proxy startup).
+            try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n"); } catch { }
+
             Topmost = true;
             var screen = SystemParameters.WorkArea;
             Left = screen.Width - Width - 10;
@@ -298,8 +303,6 @@ namespace WhisperInk
             {
                 Log($"Active provider ({GetActiveProvider()?.Name}) does not support realtime — proxy not started.");
             }
-
-            try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n"); } catch { }
 
             UpdateStatusLabel();
 
