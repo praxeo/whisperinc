@@ -27,6 +27,11 @@ namespace WhisperInk
         private const string ExeName = "crispasr.exe";
         private const string ServerHost = "127.0.0.1";
 
+        // CrispASR v0.7 auto-warms the model in server mode (a dummy
+        // transcribe at init), so first /health success on a CUDA build
+        // includes VRAM upload + warmup — 45s proved too tight.
+        private const int HealthDeadlineSeconds = 120;
+
         private readonly ApiProvider _provider;
         private readonly Func<string> _resolveGlobalGpuBackend;
         private readonly Action<string> _log;
@@ -201,7 +206,7 @@ namespace WhisperInk
                     try { await _serverProc.StandardError.ReadToEndAsync().ConfigureAwait(false); } catch { }
                 });
 
-                var deadline = DateTime.UtcNow.AddSeconds(45);
+                var deadline = DateTime.UtcNow.AddSeconds(HealthDeadlineSeconds);
                 while (DateTime.UtcNow < deadline)
                 {
                     if (ct.IsCancellationRequested) return false;
@@ -223,7 +228,7 @@ namespace WhisperInk
                 }
 
                 KillServer();
-                _log($"CrispAsr({_provider.Id}): /health did not respond within 45s — killed server");
+                _log($"CrispAsr({_provider.Id}): /health did not respond within {HealthDeadlineSeconds}s — killed server");
                 return false;
             }
             finally
