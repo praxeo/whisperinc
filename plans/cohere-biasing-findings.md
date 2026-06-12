@@ -215,6 +215,27 @@ falling to 0/3 is the over-boost garbling cost (e.g. `biliary colic` ->
 Confirms the effect is boost-dependent and real on Parakeet via *both* the launch-time
 and per-request paths. Cohere never changed at any boost on either path.
 
+**Addendum — can the Parakeet bluntness be tuned out? Collateral yes, reliability no.**
+The trie applies a *flat additive* boost to the logit of any token continuing a hotword
+prefix, and the first sub-word token of every listed hotword is boosted on every step
+(`asr_context_bias.h` `apply_bias` walks the root's children unconditionally). So with
+all four terms boosted at 20, `hemato`/`ureter`/`bili` get slammed everywhere — that
+self-inflicted the control garbling in Pass B. Narrowing the list fixes that:
+
+| Clip (beam 1) | base | `hematochezia`-only @16 | `hematochezia`-only @18 | all-4 @18 |
+|---|---|---|---|---|
+| `hematochezia_1` | hematoche**s**ia | hematoche**s**ia | hemato**hemsia** (mangled) | hemato**hemsia** |
+| `hematochezia_2` | hematoche**s**ia | hemato­che**z**ia (correct) | recthemato … hematochezia | bloodure perurecthemato … |
+| `biliary_colic` (control) | biliary colic | **biliary colic (clean)** | **biliary colic (clean)** | withbiliarycolic.ureteralureter |
+
+So: (1) **collateral on other words is tunable** — narrow the list and/or use the
+per-term `word^N` boost suffix (the trie parses it; passes through the server `hotwords`
+field), and unlisted words stay clean. (2) **The target term is per-utterance
+unreliable** — `hematochezia_2` flips at boost 16 while `hematochezia_1` only mangles to
+`hematohemsia`; a flat additive boost cannot calibrate to per-instance acoustic margin,
+and CrispASR exposes no gated/beam-rescored fusion. Net: Parakeet hotwords can be made
+*non-destructive*, but not *dependable* for a must-catch term.
+
 ---
 
 ## Deliverable 4 — Decision
@@ -243,11 +264,14 @@ and per-request paths. Cohere never changed at any boost on either path.
    also do genuine vocabulary steering. Note the **cloud** Cohere v2 API supports
    keyterms even though the **local** Cohere GGUF backend does not.
 
-Locally, **Parakeet** is the only backend that honors hotwords at all, but the empirical
-pass shows it is not a usable fix for hard OOV terms: the boost needed to flip
-`hematochezia` (~18-20) garbles surrounding words and breaks controls (2/3 -> 0/3), and
-CrispASR only exposes a single global boost (no per-term boost in the server form). So
-"just bias Parakeet" is not a clean route either.
+Locally, **Parakeet** is the only backend that honors hotwords, but it still can't
+*guarantee* a hard OOV term. Collateral is tunable — narrowing the list to the target
+term and/or per-term `word^N` boosts (the trie parses the suffix; it rides the server
+`hotwords` field) keeps other words clean (`biliary colic` stays perfect). But the target
+is **per-utterance unreliable**: `hematochezia_2` flips at boost 16 while `hematochezia_1`
+only mangles to `hematohemsia`. A flat additive logit boost can't calibrate to
+per-instance acoustic margin, and CrispASR exposes no gated/beam-rescored fusion. So
+"just bias Parakeet" is non-destructive at best, not dependable.
 
 **Explicitly rejected:** any LLM post-processing/correction pass (rewrites dictation;
 rejected this sprint and in prior user feedback).
