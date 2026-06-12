@@ -13,10 +13,19 @@ build `4b27392f`, deployed 2026-06-12). Source read from the sibling clone
 **No. The Cohere Transcribe (GGUF AED) backend under CrispASR does not honor
 contextual biasing.** The `hotwords` request field is parsed by the server and
 copied into the per-request params, but the Cohere backend never reads it — there
-is no code path from `hotwords` to Cohere's decoder. This is settled at the source
-level (below); the empirical A/B (Deliverables 2-3) is a **confirmation** step and
-is the only part blocked, pending real voice recordings (see
-`_scratch\biasing\RECORD_THESE.md`).
+is no code path from `hotwords` to Cohere's decoder.
+
+**Confirmed both ways (2026-06-12).** Source: the Cohere backend never reads
+`params.hotwords` (below). Empirical: with real recordings in the user's voice, at
+`hotwords_boost 20` — a boost that rewrote **6/6** of Parakeet's transcripts (the
+positive control) — Cohere stayed **token-for-token identical** off-vs-on across
+both beams (0/6 changed). The field is dropped regardless of boost.
+
+Secondary practical finding: even **Parakeet's** biasing (the only local backend
+that honors hotwords) is a blunt instrument here. The default boost (2.0, what
+WhisperInk currently sends) moved nothing; the boost needed to flip `hematochezia`
+(~18-20) garbles neighboring words and dropped controls from 2/3 to 0/3. So local
+hotwords is not a clean fix for hard medical OOV terms on *any* backend.
 
 Recommended routes for the known OOV failure set (e.g. `hematochezia`) — neither
 involves an LLM rewrite pass (explicitly rejected this sprint and in prior
@@ -141,40 +150,70 @@ per-cell `*.stderr.log`, and a paste-ready `summary.md` under
 case-insensitive); spurious-injection (any *other* lexicon term appearing); and for
 Cohere, per-clip normalized text equality off-vs-on at each beam (the no-op signal).
 
-**Status: authored, not yet run — blocked on recordings.** No `*.wav` exist anywhere in
-the repo and `_scratch\biasing\clips\` is empty. Per guardrail the harness STOPs and
-prints the manifest rather than substituting TTS.
+**Status: authored + run (2026-06-12).** Ran twice on the user's 6 real clips
+(2x `hematochezia` + `ureterolithiasis` / `biliary colic` / `ureteral colic` + neutral),
+48 kHz stereo PCM: once at the default boost (2.0) and once at boost 20. Results below.
 
 ---
 
-## Deliverable 3 — Controls (pending the run)
+## Deliverable 3 — Controls (done)
 
 1. **Positive control — Parakeet TDT.** Same harness, `parakeet-tdt-0.6b-v3-q4_k.gguf`,
-   `--backend parakeet`. Parakeet genuinely builds the phrase-boost trie
-   (`parakeet.cpp:209,2367`), so a target-hit lift and/or changed text when hotwords are
-   on proves the harness exercises real biasing — isolating "Cohere unsupported" from
-   "flag/harness broken."
-2. **Behavior/log diff.** Each cell's stderr is scanned for any `hotword` line. Caveat:
-   `parakeet_set_hotwords()` has **no** "hotwords loaded: N" printf in the source, so an
-   explicit load-count line may not exist; the **token-for-token diff** (Cohere identical
-   off vs on) is therefore the primary evidence, the log scan secondary.
-3. **Beam × hotwords matrix.** `{beam 1, beam 5} × {off, on}` is run for **both**
-   backends — shallow fusion has the most room to act when beam search is exploring, so
-   both are reported.
+   `--backend parakeet`. **Established.** At `hotwords_boost 20` the Parakeet server
+   path changed **6/6** clips (both beams) and produced the correct `hematochezia`
+   spelling — so the harness demonstrably exercises real biasing. At the same boost
+   Cohere changed 0/6. This isolates "Cohere unsupported" from "flag/harness broken."
+   (Independently reproduced via launch-time CLI `--hotwords` — see boost sweep below.)
+2. **Behavior/log diff.** Per-cell stderr scanned for any `hotword` line: **none** in any
+   cell (as predicted — `parakeet_set_hotwords()` has no load-count printf). So the
+   **token-for-token diff** is the evidence: Cohere identical off-vs-on at every boost;
+   Parakeet rewrites its output when biasing is applied at a non-trivial boost.
+3. **Beam × hotwords matrix.** `{beam 1, beam 5} × {off, on}` run for both backends at two
+   boosts (2.0 default, 20). Cohere is invariant across the entire matrix; Parakeet only
+   moves at the high boost. Tables below.
 
 ### Empirical A/B results
 
-> PENDING. Record the clips in `_scratch\biasing\RECORD_THESE.md`, run
-> `_scratch\biasing\_hotwords_ab.ps1`, then paste the generated `summary.md` table here.
-> Expected per source analysis: Cohere `Text changed off->on` = 0/N at both beams;
-> Parakeet shows a non-zero target-hit lift and/or changed text.
+Two passes on the user's 6 real clips, GPU backend `auto` (CUDA, 3x RTX 3090/3080), beam
+set at launch *and* per request.
+
+**Pass A — `hotwords_boost 2.0` (server default; what WhisperInk currently sends):**
 
 | Backend | Beam | Target hit off | Target hit on | Control hit off | Control hit on | Text changed off->on | Spurious inj (on) |
 |---|---|---|---|---|---|---|---|
-| cohere | 1 | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| cohere | 5 | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| parakeet | 1 | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
-| parakeet | 5 | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ | _pending_ |
+| cohere   | 1 | 0/2 | 0/2 | 2/3 | 2/3 | **0/6** | 0 |
+| cohere   | 5 | 0/2 | 0/2 | 2/3 | 2/3 | **0/6** | 0 |
+| parakeet | 1 | 0/2 | 0/2 | 2/3 | 2/3 | **0/6** | 0 |
+| parakeet | 5 | 0/2 | 0/2 | 2/3 | 2/3 | **0/6** | 0 |
+
+At the default boost *nothing* moves — not even Parakeet. This pass alone cannot
+distinguish "no-op" from "too weak," which is why pass B raises the boost.
+
+**Pass B — `hotwords_boost 20`:**
+
+| Backend | Beam | Target hit off | Target hit on | Control hit off | Control hit on | Text changed off->on | Spurious inj (on) |
+|---|---|---|---|---|---|---|---|
+| cohere   | 1 | 0/2 | 0/2 | 2/3 | 2/3 | **0/6** | 0 |
+| cohere   | 5 | 0/2 | 0/2 | 2/3 | 2/3 | **0/6** | 0 |
+| parakeet | 1 | 0/2 | 0/2* | 2/3 | 0/3 | **6/6** | 0 |
+| parakeet | 5 | 0/2 | 0/2* | 2/3 | 0/3 | **6/6** | 0 |
+
+\* **Scorer artifact, not a Parakeet failure.** Over-boost fuses the word as
+`withhematochezia`, which the strict word-boundary matcher counts as a miss; the raw
+transcripts plainly contain `hematochezia` (`rows.csv`). The decisive contrast is
+**Text changed: Parakeet 6/6 vs Cohere 0/6** at the identical boost. Parakeet's controls
+falling to 0/3 is the over-boost garbling cost (e.g. `biliary colic` ->
+`withbiliarycolicure.ureteralureter`).
+
+**Independent CLI boost sweep (Parakeet, launch-time `--hotwords`, beam 5):**
+
+| Clip | boost 2 | boost 10 | boost 20 | boost 25 |
+|---|---|---|---|---|
+| `hematochezia_1` | hematoche**s**ia | hematoche**s**ia | hemato­che**z**ia (correct) | hematochezia (correct) + heavy garble |
+| `ureterolithiasis` | "ureter with ISIS" | "**uureteral** with ISIS" | — | full garble (ureteral×N) |
+
+Confirms the effect is boost-dependent and real on Parakeet via *both* the launch-time
+and per-request paths. Cohere never changed at any boost on either path.
 
 ---
 
@@ -188,9 +227,11 @@ prints the manifest rather than substituting TTS.
   prompt-injection consumers are voxtral/qwen3; PLAN #98 explicitly classifies Cohere as
   "NO — no upstream support, no architectural hook." Code that never reads the field
   cannot be influenced by it.
-- **Evidence (empirical, pending):** token-for-token Cohere off-vs-on identity at beam 1
-  and beam 5, alongside a demonstrable Parakeet effect, will confirm it. Harness ready;
-  blocked only on voice clips.
+- **Evidence (empirical, confirmed 2026-06-12):** token-for-token Cohere off-vs-on
+  identity at beam 1 and beam 5 at both boost 2.0 and boost 20 (0/6 changed), while the
+  Parakeet positive control changed 6/6 and produced the correct `hematochezia` at boost
+  20 — proving the harness delivers hotwords and isolating Cohere as the unsupported
+  backend, not a broken flag/harness.
 
 **Because the answer is No, the acceptable routes for the must-catch OOV set are:**
 
@@ -199,8 +240,14 @@ prints the manifest rather than substituting TTS.
    a model, not an LLM pass; fully predictable, no rewriting of correct dictation.
 2. **Route must-catch terms to real keyterm biasing** — ElevenLabs Scribe v2
    (`ScribeKeytermsRaw`) is the strongest; Google Chirp 3, Soniox, and Cohere v2 cloud
-   also do genuine vocabulary steering. Locally, only **Parakeet** offers real phrase
-   boost via CrispASR.
+   also do genuine vocabulary steering. Note the **cloud** Cohere v2 API supports
+   keyterms even though the **local** Cohere GGUF backend does not.
+
+Locally, **Parakeet** is the only backend that honors hotwords at all, but the empirical
+pass shows it is not a usable fix for hard OOV terms: the boost needed to flip
+`hematochezia` (~18-20) garbles surrounding words and breaks controls (2/3 -> 0/3), and
+CrispASR only exposes a single global boost (no per-term boost in the server form). So
+"just bias Parakeet" is not a clean route either.
 
 **Explicitly rejected:** any LLM post-processing/correction pass (rewrites dictation;
 rejected this sprint and in prior user feedback).
