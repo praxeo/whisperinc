@@ -45,3 +45,8 @@ Desktop.ini
 # Local AI-tooling state (session worktrees, MCP configs with secrets)
 .claude/
 .roo/
+
+# Investigation scratch: keep scripts/manifests/docs, never commit voice
+# recordings or per-run outputs (public repo).
+_scratch/**/*.wav
+_scratch/**/results/
