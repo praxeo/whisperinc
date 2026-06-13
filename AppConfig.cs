@@ -69,18 +69,36 @@ namespace WhisperInk
         // Send as a multipart form field BEFORE the file part.
         public double? TranscriptionTemperature { get; set; } = null;
 
-        // ── Context biasing mode ─────────────────────────────────────────
-        // Controls how _contextBiasTerms are sent to the transcription endpoint:
+        // ── Context biasing ───────────────────────────────────────────────
+        // The single shared AppConfig.ContextBiasTerms list is routed to each
+        // provider's NATIVE vocabulary-steering field, chosen by BiasMechanism
+        // (baked per provider in CreateDefaults — never user-set). The user
+        // enters terms once; each provider sends them the way it actually supports.
         //
-        //   "none"          — don't send any bias field (Mistral, ElevenLabs)
-        //   "whisper_prompt"— join terms as a comma-delimited string sent as "prompt"
-        //                     (OpenAI Whisper, Groq, DeepInfra, local Whisper-based servers)
-        //   "cohere_terms"  — send terms as a JSON array in "context_bias_terms"
-        //                     (Cohere v2 cloud API only; NOT used for local ONNX)
+        //   "none"                 — provider has no biasing field
+        //   "whisper_prompt"       — labeled glossary in the "prompt" form field
+        //                            (OpenAI Whisper, local prompt-conditioned servers)
+        //   "mistral_context_bias" — comma-joined string in the "context_bias" field
+        //                            (Mistral Voxtral batch; <=100 terms)
+        //   "elevenlabs_keyterms"  — repeated "keyterms" form fields (ElevenLabs Scribe v2)
+        //   "hotwords"             — comma-joined "hotwords" form field (CrispASR local)
+        //   "phrase_sets"          — Google Chirp 3 inline phraseSets (handled natively)
+        //   "context_terms"        — Soniox context.terms (handled natively)
         //
-        // "whisper_prompt" seeds the Whisper decoder vocabulary so it expects those words.
-        // "cohere_terms" instructs Cohere's model to treat those strings as high-priority.
+        // Blank → derived from the legacy ContextBiasMode via ResolvedBiasMechanism.
+        public string BiasMechanism { get; set; } = "";
+
+        // Legacy field, kept only so older config.json files still deserialize and
+        // so user-added providers without an explicit BiasMechanism still route
+        // sensibly. No longer user-editable. Values: "none" | "whisper_prompt" |
+        // "cohere_terms" (the last now maps to "none" — Cohere v2 has no bias field).
         public string ContextBiasMode { get; set; } = "none";
+
+        // Per-term hotword boost for the CrispASR Parakeet trie (CTC/TDT/RNNT).
+        // null → server default (2.0, effectively inert); ~10 nudges rare terms
+        // without heavy collateral. Only meaningful on a Parakeet backend; ignored
+        // by Cohere/Voxtral/Granite GGUF backends (their hotwords are accepted but no-op).
+        public double? HotwordsBoost { get; set; } = null;
 
         // ── ElevenLabs Scribe v2 keyterms ────────────────────────────────
         // Raw newline-delimited vocabulary hints. Only sent when this provider
@@ -153,11 +171,17 @@ namespace WhisperInk
         // the persistent server (load once, FireRedPunc per segment).
         public string LocalPuncModel { get; set; } = "";
 
-        public List<string> GetValidatedKeyterms(out List<string> warnings)
+        /// <summary>Validate an arbitrary term list against the ElevenLabs Scribe v2
+        /// keyterm rules (≤1000 terms, &lt;50 chars, ≤5 words, no chars that break the
+        /// multipart field / keyterm parser). Used for both the shared Context Bias
+        /// list and any provider-only ScribeKeytermsRaw extras.</summary>
+        public static List<string> ValidateKeyterms(IEnumerable<string> rawTerms, out List<string> warnings)
         {
             warnings = new List<string>();
-            var terms = (ScribeKeytermsRaw ?? "")
-                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            // Chars that break the multipart field encoding or ElevenLabs' keyterm parser.
+            char[] forbidden = { '`', '<', '>', '{', '}', '[', ']', '\\' };
+
+            var terms = rawTerms
                 .Select(t => t.Trim())
                 .Where(t => t.Length > 0)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -169,6 +193,8 @@ namespace WhisperInk
                 if (t.Length >= 50)   { warnings.Add($"Dropped (>=50 chars): {t}"); continue; }
                 if (t.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length > 5)
                                       { warnings.Add($"Dropped (>5 words): {t}"); continue; }
+                if (t.IndexOfAny(forbidden) >= 0)
+                                      { warnings.Add($"Dropped (illegal char): {t}"); continue; }
                 valid.Add(t);
             }
 
@@ -194,6 +220,21 @@ namespace WhisperInk
 
         /// <summary>True when auth should use a custom header instead of Authorization: Bearer.</summary>
         public bool UsesCustomAuthHeader => !string.IsNullOrWhiteSpace(AuthHeaderName);
+
+        /// <summary>The effective biasing mechanism for this provider: the baked
+        /// <see cref="BiasMechanism"/> when set, otherwise derived from the legacy
+        /// <see cref="ContextBiasMode"/> so older configs and user-added providers
+        /// still route sensibly. Cohere's old "cohere_terms" maps to "none" — Cohere
+        /// Transcribe v2 has no biasing field, so it was always a silent no-op.</summary>
+        public string ResolvedBiasMechanism
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(BiasMechanism) && BiasMechanism != "auto")
+                    return BiasMechanism;
+                return ContextBiasMode == "whisper_prompt" ? "whisper_prompt" : "none";
+            }
+        }
 
         /// <summary>True when the provider runs locally (no cloud HTTP roundtrip).</summary>
         public bool IsLocalProvider =>
@@ -222,6 +263,7 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "mistral",
+                BiasMechanism = "mistral_context_bias",
                 Name = "Mistral",
                 BaseUrl = "https://api.mistral.ai",
                 TranscriptionModel = "voxtral-mini-latest",
@@ -234,6 +276,7 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "openai",
+                BiasMechanism = "whisper_prompt",
                 Name = "OpenAI",
                 BaseUrl = "https://api.openai.com",
                 TranscriptionModel = "whisper-1",
@@ -246,6 +289,7 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "elevenlabs",
+                BiasMechanism = "elevenlabs_keyterms",
                 Name = "ElevenLabs Scribe",
                 BaseUrl = "https://api.elevenlabs.io",
                 TranscriptionEndpoint = "https://api.elevenlabs.io/v1/speech-to-text",
@@ -265,6 +309,9 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "cohere-api",
+                // Cohere Transcribe v2 has NO vocabulary-biasing field — terms
+                // are silently dropped server-side. Don't pretend otherwise.
+                BiasMechanism = "none",
                 Name = "Cohere Transcribe API",
                 BaseUrl = "https://api.cohere.com",
                 TranscriptionEndpoint = "https://api.cohere.com/v2/audio/transcriptions",
@@ -280,6 +327,7 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "cohere-onnx",
+                BiasMechanism = "none",
                 Name = "Cohere Local (ONNX)",
                 BaseUrl = "local://cohere-onnx",
                 TranscriptionModel = "",
@@ -301,6 +349,8 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "cohere-gguf-server",
+                // hotwords accepted but a no-op on the CrispASR cohere backend.
+                BiasMechanism = "hotwords",
                 Name = "Cohere Local (CrispASR server, CPU)",
                 BaseUrl = "http://localhost:8766",
                 TranscriptionModel = "cohere",
@@ -322,12 +372,15 @@ namespace WhisperInk
             new ApiProvider
             {
                 Id = "qwen3-asr",
+                BiasMechanism = "whisper_prompt",
                 Name = "Qwen3-ASR Local",
                 BaseUrl = "http://localhost:8102",
                 TranscriptionModel = "",
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
-                // Qwen3-ASR accepts language via form field; no context bias support.
+                // Best-effort biasing: bias terms ride the OpenAI "prompt" field as a
+                // labeled glossary (honored by local prompt-aware shims). Real DashScope
+                // Qwen3-ASR biases via a chat system message, not the multipart path.
                 ContextBiasMode = "none",
                 Language = "en",
                 // User-managed external server — talks the OpenAI multipart
@@ -343,6 +396,8 @@ namespace WhisperInk
                 // returns "rnnt" before "tdt", so it would silently hijack this
                 // preset). CrispASR auto-detects Parakeet — no backend hint.
                 Id = "parakeet-local",
+                BiasMechanism = "hotwords",
+                HotwordsBoost = 10,
                 Name = "Parakeet Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8103",
                 TranscriptionEndpoint = "http://localhost:8103/v1/audio/transcriptions",
@@ -364,6 +419,8 @@ namespace WhisperInk
                 // like TDT's, so per-machine config.json pins LocalBeamSize=1 for a
                 // greedy sub-second decode (null here = server-default beam-5).
                 Id = "parakeet-rnnt-local",
+                BiasMechanism = "hotwords",
+                HotwordsBoost = 10,
                 Name = "Parakeet RNNT 1.1b Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8109",
                 TranscriptionEndpoint = "http://localhost:8109/v1/audio/transcriptions",
@@ -386,6 +443,8 @@ namespace WhisperInk
                 // Cohere GGUFs don't expose the backend marker CrispASR
                 // auto-detect needs, so the explicit hint is required.
                 Id = "cohere-local-q6k",
+                // hotwords accepted but a no-op on the CrispASR cohere backend.
+                BiasMechanism = "hotwords",
                 Name = "Cohere Local Q6_K (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8105",
                 TranscriptionEndpoint = "http://localhost:8105/v1/audio/transcriptions",
@@ -400,10 +459,12 @@ namespace WhisperInk
             },
             new ApiProvider
             {
-                // Mistral Voxtral-Mini-3B speech-LLM. Free-form prompt
-                // conditioning is native to the architecture — context bias
-                // terms ride the OpenAI "prompt" field.
+                // Mistral Voxtral-Mini-3B speech-LLM. Bias terms ride the CrispASR
+                // "hotwords" field, which the server splices into the decoder prompt
+                // ("The following words may appear: ..."). The OpenAI "prompt" field
+                // is NOT read by this backend.
                 Id = "voxtral-local",
+                BiasMechanism = "hotwords",
                 Name = "Voxtral Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8106",
                 TranscriptionEndpoint = "http://localhost:8106/v1/audio/transcriptions",
@@ -421,8 +482,10 @@ namespace WhisperInk
                 // Mistral Voxtral-Mini-4B-Realtime. Upstream CrispASR treats
                 // the 4B realtime checkpoint as a DIFFERENT backend than the
                 // 3B ("voxtral4b" vs "voxtral") — hence a separate preset
-                // rather than widening the 3B glob.
+                // rather than widening the 3B glob. This backend has no hotword/
+                // prompt splice, so biasing is accepted but a no-op.
                 Id = "voxtral4b-local",
+                BiasMechanism = "hotwords",
                 Name = "Voxtral 4B Realtime Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8108",
                 TranscriptionEndpoint = "http://localhost:8108/v1/audio/transcriptions",
@@ -437,9 +500,11 @@ namespace WhisperInk
             },
             new ApiProvider
             {
-                // IBM Granite Speech 4.1 2B speech-LLM. Same shape as Voxtral:
-                // explicit backend hint + prompt-style context bias.
+                // IBM Granite Speech 4.1 2B speech-LLM. Sent the "hotwords" field
+                // like the others, but the granite backend has no biasing splice —
+                // accepted and ignored (no-op).
                 Id = "granite-local",
+                BiasMechanism = "hotwords",
                 Name = "Granite Speech 4.1 Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8107",
                 TranscriptionEndpoint = "http://localhost:8107/v1/audio/transcriptions",
@@ -470,6 +535,7 @@ namespace WhisperInk
                 // unconditionally maps the global ContextBiasTerms into
                 // adaptation.phraseSets[].phrases[] on every request.
                 Id = "google-chirp3",
+                BiasMechanism = "phrase_sets",
                 Name = "Google Chirp 3",
                 BaseUrl = "https://us-speech.googleapis.com",
                 TranscriptionModel = "chirp_3",
@@ -494,6 +560,7 @@ namespace WhisperInk
                 // ContextBiasTerms into the v4 `context.terms` field directly
                 // (real vocabulary steering), same pattern as Google Chirp 3.
                 Id = "soniox",
+                BiasMechanism = "context_terms",
                 Name = "Soniox",
                 BaseUrl = "https://api.soniox.com",
                 TranscriptionModel = "stt-async-v5",
@@ -532,11 +599,10 @@ namespace WhisperInk
         public bool IsSoundEnabled { get; set; } = true;
         public int SelectedDevice { get; set; } = 0;
 
-        // Context biasing terms for batch transcription (up to 100 words/phrases).
-        // Delivery method is controlled per-provider via ApiProvider.ContextBiasMode:
-        //   "whisper_prompt"  → joined as comma-delimited string in the "prompt" field
-        //   "cohere_terms"    → sent as JSON array in "context_bias_terms" field
-        //   "none"            → not sent
+        // Context biasing terms — the single shared vocabulary list. Each provider
+        // routes these to its own native field via ApiProvider.BiasMechanism /
+        // ResolvedBiasMechanism (prompt / context_bias / keyterms / hotwords /
+        // phrase sets / context terms); see the BiasMechanism doc on ApiProvider.
         public List<string> ContextBiasTerms { get; set; } = new();
 
         // ── API Provider configuration ──────────────────────────────────

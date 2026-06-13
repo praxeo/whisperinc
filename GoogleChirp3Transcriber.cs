@@ -158,6 +158,11 @@ namespace WhisperInk
                 foreach (var p in phraseHints)
                 {
                     if (string.IsNullOrWhiteSpace(p)) continue;
+                    if (phrases.Count >= 1000)   // Chirp 3 caps model adaptation at 1000 phrases
+                    {
+                        _log($"[chirp3] bias list truncated to 1000 phrases (had {phraseHints.Count})");
+                        break;
+                    }
                     phrases.Add(new JsonObject { ["value"] = p });
                 }
                 if (phrases.Count > 0)

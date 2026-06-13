@@ -71,13 +71,10 @@ namespace WhisperInk
             else
                 CmbLanguage.SelectedIndex = 0;
 
-            // Set context bias mode dropdown
-            var biasItem = CmbContextBiasMode.Items.Cast<ComboBoxItem>()
-                .FirstOrDefault(item => item.Tag?.ToString() == _current.ContextBiasMode);
-            if (biasItem != null)
-                CmbContextBiasMode.SelectedItem = biasItem;
-            else
-                CmbContextBiasMode.SelectedIndex = 0;
+            // Biasing is routed automatically per provider from the single global
+            // Context Bias list — show the mechanism read-only instead of letting
+            // the user pick a (usually wrong) mode.
+            BiasInfoLabel.Text = DescribeBias(_current);
 
             TxtScribeKeyterms.Text = _current.ScribeKeytermsRaw;
             ChkTagAudioEvents.IsChecked = _current.TagAudioEvents;
@@ -93,9 +90,10 @@ namespace WhisperInk
                 ? Visibility.Visible
                 : Visibility.Collapsed;
 
-            // Beam size only applies to providers backed by a local
-            // crispasr.exe server — hide it everywhere else.
+            // Beam size + hotword boost only apply to providers backed by a local
+            // crispasr.exe server — hide the group everywhere else.
             TxtLocalBeamSize.Text = _current.LocalBeamSize?.ToString() ?? "";
+            TxtHotwordsBoost.Text = _current.HotwordsBoost?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "";
             LocalCrispGroup.Visibility = _current.TranscriberKind == TranscriberKind.LocalCrispAsrServer
                 ? Visibility.Visible
                 : Visibility.Collapsed;
@@ -122,11 +120,6 @@ namespace WhisperInk
             // Get language from dropdown
             _current.Language = (CmbLanguage.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Tag?.ToString() ?? "en";
 
-            // Get context bias mode from dropdown. ComboBox has no SelectedValuePath set,
-            // so SelectedValue returns the entire ComboBoxItem; read its Tag explicitly to
-            // get the canonical value ("none" / "whisper_prompt" / "cohere_terms").
-            _current.ContextBiasMode = (CmbContextBiasMode.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "none";
-
             _current.ScribeKeytermsRaw = TxtScribeKeyterms.Text;
             _current.TagAudioEvents    = ChkTagAudioEvents.IsChecked == true;
             _current.NoVerbatim        = ChkNoVerbatim.IsChecked == true;
@@ -135,7 +128,27 @@ namespace WhisperInk
             _current.LocalBeamSize = int.TryParse(TxtLocalBeamSize.Text, out int beam) && beam > 0
                 ? beam
                 : null;
+
+            // Hotword boost: blank or non-positive = null (server default 2.0).
+            _current.HotwordsBoost = double.TryParse(TxtHotwordsBoost.Text,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double boost) && boost > 0
+                ? boost
+                : null;
         }
+
+        /// <summary>One-line, read-only description of how this provider routes the
+        /// shared Context Bias list — shown in place of the old manual mode dropdown.</summary>
+        private static string DescribeBias(ApiProvider p) => p.ResolvedBiasMechanism switch
+        {
+            "mistral_context_bias" => "Domain vocabulary → Mistral context_bias (batch; ≤100 terms).",
+            "whisper_prompt"       => "Domain vocabulary → prompt glossary.",
+            "elevenlabs_keyterms"  => "Domain vocabulary → ElevenLabs keyterms (from the global Context Bias list).",
+            "hotwords"             => "Domain vocabulary → CrispASR hotwords (real on Parakeet/Voxtral; ignored by Cohere/Granite/Voxtral-4B).",
+            "phrase_sets"          => "Domain vocabulary → Google phrase sets (native).",
+            "context_terms"        => "Domain vocabulary → Soniox context terms (native).",
+            _                      => "No native biasing — context-bias terms have no effect for this provider.",
+        };
 
         private void TxtScribeKeyterms_TextChanged(object sender, TextChangedEventArgs e) =>
             UpdateKeytermsCount();
@@ -250,6 +263,8 @@ namespace WhisperInk
             LocalModelFolder = src.LocalModelFolder,
             LocalBeamSize    = src.LocalBeamSize,
             LocalPuncModel   = src.LocalPuncModel,
+            BiasMechanism    = src.BiasMechanism,
+            HotwordsBoost    = src.HotwordsBoost,
         };
     }
 }

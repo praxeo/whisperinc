@@ -32,8 +32,8 @@ namespace WhisperInk
         /// <summary>
         /// Transcribe a single utterance. <paramref name="wavBytes"/> is a
         /// complete WAV file in memory (header + PCM). <paramref name="biasTerms"/>
-        /// is the global <c>ContextBiasTerms</c> list — each transcriber
-        /// decides whether/how to use it based on its own <c>ContextBiasMode</c>.
+        /// is the global <c>ContextBiasTerms</c> list — each transcriber routes it
+        /// to its provider's native field per <c>ApiProvider.ResolvedBiasMechanism</c>.
         /// Returns the transcript on success, or null on any failure (failure
         /// is logged via the action passed at construction).
         /// </summary>

@@ -102,20 +102,13 @@ namespace WhisperInk
             if (_disposed) return null;
             if (wavBytes == null || wavBytes.Length == 0) return null;
 
-            // CrispASR v0.7+ accepts a "hotwords" form field (comma-separated)
-            // for real contextual biasing: CTC/TDT phrase-boost on Parakeet,
-            // prompt injection on Voxtral/Qwen3-style LLM decoders. We send it
-            // whenever bias terms exist — older servers ignore unknown fields.
-            // The OpenAI "prompt" field is additionally sent when the provider
-            // is configured for whisper_prompt-style conditioning.
-            string? hotwords = null;
-            string? prompt = null;
-            if (biasTerms is { Count: > 0 })
-            {
-                hotwords = string.Join(",", biasTerms);
-                if (_provider.ContextBiasMode == "whisper_prompt")
-                    prompt = string.Join(", ", biasTerms);
-            }
+            // CrispASR v0.7+ accepts a "hotwords" form field (comma-separated) for
+            // real contextual biasing: a CTC/TDT/RNNT phrase-boost trie on Parakeet,
+            // prompt injection on Voxtral/Qwen3-style LLM decoders, accepted-but-no-op
+            // on Cohere/Granite/Voxtral-4B. Sent whenever bias terms exist — older
+            // servers ignore unknown fields. The OpenAI "prompt" field is NOT sent:
+            // no CrispASR backend reads it (verified against the backend sources).
+            string? hotwords = biasTerms is { Count: > 0 } ? string.Join(",", biasTerms) : null;
 
             try
             {
@@ -123,7 +116,7 @@ namespace WhisperInk
                     return null;
 
                 var fileContent = new ByteArrayContent(wavBytes);
-                return await PostMultipartAsync(fileContent, _provider.Language ?? "en", prompt, hotwords, ct).ConfigureAwait(false);
+                return await PostMultipartAsync(fileContent, _provider.Language ?? "en", hotwords, ct).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -133,7 +126,7 @@ namespace WhisperInk
             }
         }
 
-        private async Task<string?> PostMultipartAsync(HttpContent fileContent, string language, string? prompt, string? hotwords, CancellationToken ct)
+        private async Task<string?> PostMultipartAsync(HttpContent fileContent, string language, string? hotwords, CancellationToken ct)
         {
             using (fileContent)
             {
@@ -143,10 +136,17 @@ namespace WhisperInk
                 using var content = new MultipartFormDataContent();
                 if (!string.IsNullOrWhiteSpace(language))
                     content.Add(new StringContent(language), "language");
-                if (!string.IsNullOrWhiteSpace(prompt))
-                    content.Add(new StringContent(prompt), "prompt");
                 if (!string.IsNullOrWhiteSpace(hotwords))
+                {
                     content.Add(new StringContent(hotwords), "hotwords");
+                    // Per-term boost strength for the Parakeet trie. The server
+                    // default (2.0) is effectively inert; Parakeet presets set ~10.
+                    // Ignored by the LLM / cohere backends.
+                    if (_provider.HotwordsBoost is double boost && boost > 0)
+                        content.Add(
+                            new StringContent(boost.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                            "hotwords_boost");
+                }
                 if (_provider.LocalBeamSize is int beam and > 0)
                     content.Add(new StringContent(beam.ToString()), "beam_size");
                 content.Add(new StringContent("json"), "response_format");

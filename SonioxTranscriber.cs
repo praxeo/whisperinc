@@ -20,10 +20,10 @@
 //
 // Auth is Authorization: Bearer <ApiProvider.ApiKey>.
 //
-// Context biasing: Soniox v4 takes a `context` object whose `terms` array is
-// real vocabulary steering. WhisperInk's global ContextBiasTerms map straight
-// onto context.terms here, so the provider's ContextBiasMode is irrelevant —
-// same approach as GoogleChirp3Transcriber.
+// Context biasing: Soniox's `context` object (StructuredContext) carries a
+// `terms` array for real vocabulary steering. WhisperInk's global
+// ContextBiasTerms map straight onto context.terms here, so the provider's
+// BiasMechanism is informational only — same approach as GoogleChirp3Transcriber.
 //
 // Soniox transcript tokens carry their own leading spacing, so concatenating
 // tokens[].text rebuilds the sentence without inserting our own separators.
@@ -162,12 +162,20 @@ namespace WhisperInk
             if (!string.IsNullOrWhiteSpace(lang) && !string.Equals(lang, "auto", StringComparison.OrdinalIgnoreCase))
                 bodyNode["language_hints"] = new JsonArray(lang);
 
-            // Vocabulary steering via the v4 context.terms array.
+            // Vocabulary steering via the context.terms array (StructuredContext).
             if (biasTerms is { Count: > 0 })
             {
                 var terms = new JsonArray();
                 foreach (var t in biasTerms)
-                    if (!string.IsNullOrWhiteSpace(t)) terms.Add(t);
+                {
+                    if (string.IsNullOrWhiteSpace(t)) continue;
+                    if (terms.Count >= 100)   // keep the context well under Soniox's budget
+                    {
+                        _log($"[soniox] context.terms truncated to 100 (had {biasTerms.Count})");
+                        break;
+                    }
+                    terms.Add(t);
+                }
                 if (terms.Count > 0)
                 {
                     bodyNode["context"] = new JsonObject { ["terms"] = terms };

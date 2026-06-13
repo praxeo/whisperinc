@@ -21,7 +21,8 @@ namespace WhisperInk
     ///   - Auth header (Bearer vs. xi-api-key)
     ///   - Model field name ("model" vs. "model_id")
     ///   - Multipart field ordering (Cohere v2 needs strings BEFORE file)
-    ///   - Bias terms ("prompt" vs. "context_bias_terms")
+    ///   - Context biasing routed to each provider's native field (prompt /
+    ///     context_bias / keyterms) per ApiProvider.ResolvedBiasMechanism
     ///   - ElevenLabs Scribe keyterms + tag_audio_events + no_verbatim
     /// </summary>
     public sealed class HttpTranscriber : ITranscriber
@@ -91,32 +92,51 @@ namespace WhisperInk
                         "temperature");
                 }
 
-                if (biasTerms != null && biasTerms.Count > 0)
+                // ── Context biasing: route the shared bias-terms list to this
+                // provider's NATIVE field. ResolvedBiasMechanism is baked per
+                // provider (the user never picks it). ────────────────────────
+                switch (_provider.ResolvedBiasMechanism)
                 {
-                    switch (_provider.ContextBiasMode)
-                    {
-                        case "cohere_terms":
-                            content.Add(new StringContent(JsonSerializer.Serialize(biasTerms)), "context_bias_terms");
-                            break;
-                        case "whisper_prompt":
-                            content.Add(new StringContent(string.Join(", ", biasTerms)), "prompt");
-                            break;
-                    }
-                }
+                    case "mistral_context_bias" when biasTerms is { Count: > 0 }:
+                        // Mistral Voxtral batch: comma-joined, NO space, <=100 terms.
+                        // (The API schema also lists array<string>; the documented
+                        // examples use this comma string form, so prefer it.)
+                        content.Add(new StringContent(string.Join(",", biasTerms.Take(100))), "context_bias");
+                        break;
 
-                // ElevenLabs Scribe v2 — keyterms (repeated form fields,
-                // FastAPI List[str] convention). The xi-api-key auth guard
-                // doubles as "is this ElevenLabs."
-                if (_provider.UsesCustomAuthHeader && !string.IsNullOrWhiteSpace(_provider.ScribeKeytermsRaw))
-                {
-                    var keyterms = _provider.GetValidatedKeyterms(out var ktWarnings);
-                    foreach (var w in ktWarnings) _log($"[keyterms] {w}");
-                    if (keyterms.Count > 0)
+                    case "whisper_prompt" when biasTerms is { Count: > 0 }:
+                        // OpenAI Whisper / local prompt-conditioned servers. A labeled
+                        // glossary primes rare vocabulary better than a bare list (and
+                        // avoids the Qwen3 "list-dictation" regression).
+                        content.Add(new StringContent("Glossary: " + string.Join(", ", biasTerms) + "."), "prompt");
+                        break;
+
+                    case "elevenlabs_keyterms":
                     {
-                        _log($"[keyterms] sending {keyterms.Count} terms");
-                        foreach (var term in keyterms)
-                            content.Add(new StringContent(term), "keyterms");
+                        // ElevenLabs Scribe v2 keyterms (repeated form fields, FastAPI
+                        // List[str]). Sourced from the SHARED Context Bias list — the one
+                        // place the user enters vocabulary — merged with any provider-only
+                        // extras still in ScribeKeytermsRaw.
+                        var merged = new List<string>();
+                        if (biasTerms != null) merged.AddRange(biasTerms);
+                        if (!string.IsNullOrWhiteSpace(_provider.ScribeKeytermsRaw))
+                            merged.AddRange(_provider.ScribeKeytermsRaw
+                                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
+                        if (merged.Count > 0)
+                        {
+                            var keyterms = ApiProvider.ValidateKeyterms(merged, out var ktWarnings);
+                            foreach (var w in ktWarnings) _log($"[keyterms] {w}");
+                            if (keyterms.Count > 0)
+                            {
+                                _log($"[keyterms] sending {keyterms.Count} terms");
+                                foreach (var term in keyterms)
+                                    content.Add(new StringContent(term), "keyterms");
+                            }
+                        }
+                        break;
                     }
+
+                    // "none" (incl. Cohere v2 — no native biasing field exists) sends nothing.
                 }
 
                 // ElevenLabs Scribe v2 — tag_audio_events / no_verbatim.

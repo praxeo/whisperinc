@@ -33,8 +33,12 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         
-        <TextBlock Grid.Row="0" Text="Context Bias Terms (one per line):" 
-                   FontWeight="Bold" FontSize="12" Foreground="#AAAAAA" Margin="0,0,0,10"/>
+        <StackPanel Grid.Row="0" Margin="0,0,0,10">
+            <TextBlock Text="Context Bias Terms (one per line):"
+                       FontWeight="Bold" FontSize="12" Foreground="#AAAAAA"/>
+            <TextBlock Text="Entered once here and sent to every provider that supports biasing, each via its native mechanism (prompt / keyterms / hotwords / phrase sets)."
+                       Foreground="#777" FontSize="10" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
         
         <TextBox Grid.Row="1" x:Name="TxtBiasTerms"
                  AcceptsReturn="True" TextWrapping="Wrap" 

@@ -43,7 +43,7 @@ Uninstall with `.\scripts\uninstall.ps1`. It removes shortcuts and the auto-star
 - **Global hotkey dictation** — `Ctrl+Space` to record and transcribe into any foreground app.
 - **Multi-provider** — cloud (Mistral, OpenAI, ElevenLabs, Cohere) and local (ONNX, GGUF llama.cpp subprocess/server, Qwen3-ASR HTTP). Per-provider auth header, endpoint, model, temperature, and context-bias configuration.
 - **Batch dictation** — record → POST to the active provider → paste via clipboard; works with every provider.
-- **Context biasing** — per-provider vocabulary hints (`whisper_prompt` for OpenAI-compatible, `cohere_terms` for Cohere v2, `keyterms` for ElevenLabs Scribe v2).
+- **Context biasing** — one shared term list, routed to each provider's native mechanism automatically (prompt glossary for OpenAI, `context_bias` for Mistral, `keyterms` for ElevenLabs, `hotwords` for local CrispASR/Parakeet, phrase sets for Google, context terms for Soniox).
 - **History log** — every transcription recorded locally, viewable from the tray.
 
 ---
@@ -107,7 +107,7 @@ WhisperInk ships with several defaults populated. For the easiest path, pick one
 | **Mistral** | https://console.mistral.ai | Voxtral transcription. |
 | **OpenAI** | https://platform.openai.com/api-keys | Whisper-1. Rock-solid; supports `whisper_prompt` vocabulary biasing. |
 | **ElevenLabs Scribe v2** | https://elevenlabs.io | Custom `xi-api-key` header; supports keyterms list (~20% cost surcharge). |
-| **Cohere Transcribe** | https://dashboard.cohere.com | Cohere v2 endpoint with `context_bias_terms` JSON array; temp 0.1 default. |
+| **Cohere Transcribe** | https://dashboard.cohere.com | Cohere v2 endpoint; temp 0.1 default. No native vocabulary biasing. |
 
 Then:
 
@@ -366,8 +366,8 @@ Expects an OpenAI-compatible transcription endpoint at `http://localhost:8102`. 
 | `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe (encoder-decoder, 30s chunks, 5s overlap, greedy decoding). |
 | `CohereGguf*Transcriber.cs` | Four variants for llama.cpp-based Cohere deployments (subprocess / HTTP CPU / HTTP CUDA / HTTP CUDA Q8). |
 | `CrispAsrServerTranscriber.cs` | Generic adapter for the `crispasr.exe --server` mode — model-agnostic, auto-detects backend from GGUF metadata. Used by the Parakeet provider; the path new models should adopt. |
-| `ProviderSettingsWindow.xaml(.cs)` | GUI for editing providers — URLs, keys, auth header, model field, bias mode, Scribe v2 keyterms. |
-| `ContextBiasWindow.xaml(.cs)` | Global context-bias term list (used with `whisper_prompt` / `cohere_terms` modes). |
+| `ProviderSettingsWindow.xaml(.cs)` | GUI for editing providers — URLs, keys, auth header, model field, a read-only biasing-mechanism line, and Parakeet hotword-boost / Scribe v2 extra keyterms. |
+| `ContextBiasWindow.xaml(.cs)` | Global context-bias term list — the single source routed to each provider's native biasing field. |
 | `HistoryService.cs`, `HistoryWindow.xaml(.cs)` | Local transcript log + viewer. |
 
 ### Provider system
@@ -380,11 +380,14 @@ Expects an OpenAI-compatible transcription endpoint at `http://localhost:8102`. 
 - `TranscriptionModel`.
 - `SupportsTranscription`.
 - `TranscriptionTemperature` — nullable; sent as multipart form field when set.
-- `ContextBiasMode`:
-  - `"none"` — no bias field.
-  - `"whisper_prompt"` — comma-joined string in `prompt` (OpenAI, Groq, DeepInfra, local Whisper servers).
-  - `"cohere_terms"` — JSON array in `context_bias_terms` (Cohere v2 cloud).
-- `ScribeKeytermsRaw` — newline-delimited per-provider keyterms; sent as repeated `keyterms` multipart fields when the provider uses `xi-api-key` auth (ElevenLabs Scribe v2). Validated on send: ≤1000 terms, <50 chars, ≤5 words each.
+- `BiasMechanism` (baked per provider; never user-set) routes the single shared bias list to that provider's native field:
+  - `"whisper_prompt"` — labeled glossary in `prompt` (OpenAI, local prompt-aware servers).
+  - `"mistral_context_bias"` — comma-joined string in `context_bias` (Mistral Voxtral batch, ≤100).
+  - `"elevenlabs_keyterms"` — repeated `keyterms` fields (ElevenLabs Scribe v2), sourced from the shared list.
+  - `"hotwords"` — comma-joined `hotwords` for local CrispASR servers (`HotwordsBoost` tunes the Parakeet trie; no-op on Cohere/Granite/Voxtral-4B).
+  - `"phrase_sets"` / `"context_terms"` — Google / Soniox, handled natively in their transcribers.
+  - `"none"` — provider has no biasing field (e.g. Cohere Transcribe v2).
+- `ScribeKeytermsRaw` — optional ElevenLabs-only extra keyterms, merged with the shared list and validated together (≤1000 terms, <50 chars, ≤5 words, illegal chars dropped).
 
 Default providers (see `AppConfig.cs`):
 
@@ -393,7 +396,7 @@ Default providers (see `AppConfig.cs`):
 | `mistral` | Mistral | HTTPS | Voxtral batch |
 | `openai` | OpenAI | HTTPS | Whisper-1, whisper_prompt bias |
 | `elevenlabs` | ElevenLabs Scribe | HTTPS | `xi-api-key`, `model_id`, keyterms |
-| `cohere-api` | Cohere Transcribe API | HTTPS | Cohere v2, temp 0.1, cohere_terms |
+| `cohere-api` | Cohere Transcribe API | HTTPS | Cohere v2, temp 0.1; no native biasing |
 | `local` | Local Server | HTTP | `localhost:8100`, whisper_prompt |
 | `cohere-onnx` | Cohere Local (ONNX) | in-process | Bypasses HTTP entirely |
 | `cohere-gguf` | Cohere Local (CrispASR GGUF) | subprocess | llama.cpp CLI |
@@ -417,7 +420,7 @@ Default providers (see `AppConfig.cs`):
 
 ### Cohere v2 multipart quirk
 
-The Cohere v2 transcription endpoint rejects requests where the `file` part appears before string fields. WhisperInk therefore always appends string fields (`model`, `language`, `temperature`, `context_bias_terms`, `keyterms`) *before* the `file` part in the multipart body.
+The Cohere v2 transcription endpoint rejects requests where the `file` part appears before string fields. WhisperInk therefore always appends string fields (`model`, `language`, `temperature`, and any bias field such as `context_bias` / `keyterms`) *before* the `file` part in the multipart body.
 
 ### UI sounds
 

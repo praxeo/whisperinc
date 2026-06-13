@@ -202,16 +202,12 @@
                 <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
                            Text="Leave blank for auto-detection (where supported)"/>
 
-                <Label Content="Context Bias Mode (how to send bias terms)"/>
-                <ComboBox x:Name="CmbContextBiasMode" Margin="0,0,0,4">
-                    <ComboBoxItem Content="None (don't send bias)" Tag="none"/>
-                    <ComboBoxItem Content="Whisper Prompt (OpenAI-compatible)" Tag="whisper_prompt"/>
-                    <ComboBoxItem Content="Cohere Terms (Cohere v2 API)" Tag="cohere_terms"/>
-                </ComboBox>
-                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
-                           Text="Whisper Prompt: OpenAI, Groq, DeepInfra, local servers"/>
-                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8"
-                           Text="Cohere Terms: Cohere v2 cloud API only"/>
+                <Label Content="Context biasing"/>
+                <TextBlock x:Name="BiasInfoLabel" TextWrapping="Wrap"
+                           Foreground="#AAAAAA" FontSize="11" Margin="0,0,0,4"
+                           Text="Routed automatically."/>
+                <TextBlock Foreground="#666" FontSize="10" Margin="0,0,0,8" TextWrapping="Wrap"
+                           Text="Vocabulary is entered once in the global Context Bias Terms list (tray → Context Bias Terms) and routed to each provider's native mechanism automatically — no per-provider mode to pick."/>
 
                 <Separator Background="#333" Margin="0,4,0,8"/>
 
@@ -224,10 +220,11 @@
                         <CheckBox x:Name="ChkNoVerbatim" Content="Strip fillers and false starts (no_verbatim)"
                                   ToolTip="On = clean output. Off = preserve every &quot;um&quot;/&quot;uh&quot;/restart — better for patient interviews."/>
 
-                        <Label Content="Keyterms" Margin="0,8,0,0"/>
+                        <Label Content="Extra keyterms (optional)" Margin="0,8,0,0"/>
                         <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10" Margin="0,0,0,6">
-                            One term per line. Max 1000 terms, &lt;50 chars each, 5 words max.
-                            Only sent when ElevenLabs Scribe v2 is the active provider. ~20% cost surcharge.
+                            ElevenLabs keyterms come from the global Context Bias Terms list.
+                            Add ElevenLabs-only extras here (one per line) — they're merged with
+                            that list. Max 1000 terms, &lt;50 chars each, 5 words max. ~20% cost surcharge.
                         </TextBlock>
                         <TextBox x:Name="TxtScribeKeyterms"
                                  AcceptsReturn="True"
@@ -247,8 +244,12 @@
                     <StackPanel Margin="4,4,4,4">
                         <Label Content="Beam size (beam_size)"/>
                         <TextBox x:Name="TxtLocalBeamSize" Margin="0,0,0,4"/>
-                        <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10"
+                        <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10" Margin="0,0,0,8"
                                    Text="Blank = server default (greedy). 5 is a good starting point — better accuracy, slower decode. Requires CrispASR v0.7+."/>
+                        <Label Content="Hotword boost (Parakeet only)"/>
+                        <TextBox x:Name="TxtHotwordsBoost" Margin="0,0,0,4"/>
+                        <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10"
+                                   Text="Strength of the Parakeet hotword trie. Blank = server default 2.0 (≈no effect); ~10 nudges rare terms. Greedy (beam 1) weakens it — pair with beam ≥2. Ignored by Cohere/Voxtral/Granite backends."/>
                     </StackPanel>
                 </GroupBox>
 

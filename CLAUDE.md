@@ -40,8 +40,8 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 | `CrispAsrServerTranscriber.cs` | Generic adapter for `crispasr.exe --server`. Reads port / model glob / backend hint / GPU backend / model folder from the `ApiProvider`. One class for Parakeet, Cohere, Voxtral, Granite, Canary, …  |
 | `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe INT4/INT8 (encoder-decoder, 30s chunking, 5s overlap). |
 | `GoogleChirp3Transcriber.cs` | Google Cloud STT v2 with OAuth + base64 JSON body and `adaptation.phraseSets` biasing. |
-| `SonioxTranscriber.cs` | Soniox async REST job (`api.soniox.com/v1`): upload WAV → create transcription → poll status → fetch token array → concatenate → best-effort delete of job+file. Bias terms ride the v4 `context.terms` field. Not OpenAI-compatible, so it bypasses `HttpTranscriber`. |
-| `ProviderSettingsWindow.xaml(.cs)` | GUI for URLs, keys, auth header, model field, bias mode, Scribe keyterms. ElevenLabs-only fields hide for other providers. |
+| `SonioxTranscriber.cs` | Soniox async REST job (`api.soniox.com/v1`): upload WAV → create transcription → poll status → fetch token array → concatenate → best-effort delete of job+file. Bias terms ride the `context.terms` field. Not OpenAI-compatible, so it bypasses `HttpTranscriber`. |
+| `ProviderSettingsWindow.xaml(.cs)` | GUI for URLs, keys, auth header, model field, a read-only biasing-mechanism line, and the Parakeet hotword-boost / Scribe extras. ElevenLabs-only fields hide for other providers. |
 | `ContextBiasWindow.xaml(.cs)` | Global context-bias term list. |
 | `HistoryService.cs`, `HistoryWindow.xaml(.cs)` | Local transcript log + viewer. |
 
@@ -58,8 +58,8 @@ Records to `~/Documents/MyRecordings/temp_audio.wav`, POSTs multipart form, past
 `ApiProvider` captures every knob; the cloud-vs-local split lives in `TranscriberKind`:
 
 - **Shared HTTP/cloud knobs**: `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`), `TranscriptionModel`, `SupportsTranscription`, `TranscriptionTemperature` (nullable)
-- **Bias**: `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array). Independent of the mode, LocalCrispAsrServer providers ALWAYS additionally send bias terms as the CrispASR v0.7+ `hotwords` form field (comma-separated) — real CTC/TDT phrase boost on Parakeet, prompt injection on Voxtral/Qwen3-style decoders; older servers ignore the unknown field.
-- **ElevenLabs-only**: `ScribeKeytermsRaw` (newline-delimited, capped at 1000 terms / <50 chars / ≤5 words each), `TagAudioEvents`, `NoVerbatim`
+- **Bias**: one shared `AppConfig.ContextBiasTerms` list is routed to each provider's NATIVE field by `ApiProvider.BiasMechanism` (baked per provider in `CreateDefaults`; never user-set — `ResolvedBiasMechanism` falls back to the legacy `ContextBiasMode` for user-added providers). Mechanisms: `whisper_prompt` (labeled glossary in `prompt` — OpenAI, local shims), `mistral_context_bias` (comma string in `context_bias` — Mistral Voxtral batch, ≤100 terms), `elevenlabs_keyterms` (repeated `keyterms` from the shared list), `hotwords` (comma string — CrispASR local: real CTC/TDT/RNNT trie on Parakeet driven by `HotwordsBoost` ~10, prompt-injection on Voxtral-3B/Qwen3, accepted-but-no-op on Cohere/Granite/Voxtral-4B), `phrase_sets` / `context_terms` (Google / Soniox, handled natively in their transcribers), `none`. **Cohere Transcribe v2 has no biasing field** — its old `cohere_terms`→`context_bias_terms` was a phantom the server silently dropped, now removed.
+- **ElevenLabs-only**: `TagAudioEvents`, `NoVerbatim`. Keyterms now come from the shared Context Bias list; `ScribeKeytermsRaw` remains an optional ElevenLabs-only supplement merged in (validated together: ≤1000 terms / <50 chars / ≤5 words, illegal chars dropped).
 - **TranscriberKind**: `Http` | `LocalOnnx` | `LocalCrispAsrServer` | `GoogleChirp3` | `Soniox` — picks the `ITranscriber` implementation
 - **LocalCrispAsrServer-only**: `LocalServerPort`, `LocalModelGlob` (e.g. `"parakeet-*.gguf"`), `LocalBackendHint` (e.g. `"cohere"` when auto-detect doesn't cover the GGUF), `LocalGpuBackend` (blank → fall back to global `CrispGpuBackend`), `LocalModelFolder` (blank → `cohere-gguf`), `LocalBeamSize` (nullable int → `beam_size` form field; null = greedy; needs CrispASR v0.7+; editable in provider settings), `LocalPuncModel` (server-side punctuation model → crispasr `--punc-model`: `"fullstop"`/`"auto"`/`"firered"`/`"punctuate-all"`; blank → none; restores punctuation + sentence case for non-PnC backends like Parakeet RNNT/CTC — **requires the local #161-punc CrispASR build**, see the regression note below)
 
@@ -70,16 +70,16 @@ Default providers (`AppConfig.CreateDefaults()`):
 | `mistral` | Mistral | `Http` | Voxtral batch |
 | `openai` | OpenAI | `Http` | Whisper-1, `whisper_prompt` bias |
 | `elevenlabs` | ElevenLabs Scribe | `Http` | `xi-api-key` auth, `model_id` field, keyterms |
-| `cohere-api` | Cohere Transcribe API | `Http` | Cohere v2, temp 0.1, `cohere_terms` |
+| `cohere-api` | Cohere Transcribe API | `Http` | Cohere v2, temp 0.1; no native biasing |
 | `cohere-onnx` | Cohere Local (ONNX) | `LocalOnnx` | In-process; `CohereOnnxTranscriber` |
 | `cohere-gguf-server` | Cohere Local (CrispASR, CPU) | `LocalCrispAsrServer` | Port 8766, `--backend cohere`, `cpu` |
 | `qwen3-asr` | Qwen3-ASR Local | `Http` | Port 8102, user-managed external server |
 | `parakeet-local` | Parakeet Local (CrispASR) | `LocalCrispAsrServer` | Port 8103, TDT 0.6b, glob `parakeet-tdt-*.gguf`, auto-detect backend |
 | `parakeet-rnnt-local` | Parakeet RNNT 1.1b Local (CrispASR) | `LocalCrispAsrServer` | Port 8109, RNNT 1.1b q4_k, glob `parakeet-rnnt-1.1b-*.gguf`, auto-detect backend, server-side punctuation via `LocalPuncModel="fullstop"` (RNNT emits no punctuation natively) |
 | `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | `LocalCrispAsrServer` | Port 8105, Q6_K GGUF, near-F16 accuracy |
-| `voxtral-local` | Voxtral Local (CrispASR) | `LocalCrispAsrServer` | Port 8106, `--backend voxtral`, prompt bias (3B GGUF) |
+| `voxtral-local` | Voxtral Local (CrispASR) | `LocalCrispAsrServer` | Port 8106, `--backend voxtral`, `hotwords` bias (3B GGUF) |
 | `voxtral4b-local` | Voxtral 4B Realtime Local (CrispASR) | `LocalCrispAsrServer` | Port 8108, `--backend voxtral4b` — upstream treats the 4B realtime checkpoint as a distinct backend from the 3B |
-| `granite-local` | Granite Speech 4.1 Local (CrispASR) | `LocalCrispAsrServer` | Port 8107, `--backend granite`, prompt bias |
+| `granite-local` | Granite Speech 4.1 Local (CrispASR) | `LocalCrispAsrServer` | Port 8107, `--backend granite`; biasing is a no-op (backend has no hotword/prompt splice) |
 | `google-chirp3` | Google Chirp 3 | `GoogleChirp3` | OAuth + JSON body, native `phraseSets` biasing |
 | `soniox` | Soniox | `Soniox` | Async REST (`api.soniox.com/v1`), `stt-async-v5`, Bearer key, `context.terms` biasing |
 
@@ -97,7 +97,7 @@ The factory caches one `ITranscriber` per provider id. Switching providers calls
 
 ### CrispAsrServerTranscriber (the generic one)
 
-The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X] [--punc-model FNAME]` (plus `-ng` when the effective backend is `cpu`, or `--gpu-backend X` when it's a specific GPU; `auto` passes nothing so ggml's `init_best` picks CUDA > Vulkan > CPU per what the binary was built with), waits up to **120s** for `/health` (v0.7 auto-warms the model in server mode, so first health on a CUDA build includes VRAM upload + warmup), and posts subsequent audio to `/v1/audio/transcriptions` with `language`, optional `prompt`, `hotwords` (whenever bias terms exist), and optional `beam_size`. Thread count is capped at `Min(8, ProcessorCount)` deliberately: ggml ASR scales with physical cores/memory bandwidth, not SMT, and `-t` barely matters on GPU backends. Server keeps model resident; process tree killed on `Dispose()`. When `LocalPuncModel` is set, the spawn adds `--punc-model <model>` so the resident server restores punctuation per segment (FireRedPunc) — stock CrispASR applied `--punc-model` only in CLI one-shot mode, so this requires the local #161-punc build (see the regression note).
+The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X] [--punc-model FNAME]` (plus `-ng` when the effective backend is `cpu`, or `--gpu-backend X` when it's a specific GPU; `auto` passes nothing so ggml's `init_best` picks CUDA > Vulkan > CPU per what the binary was built with), waits up to **120s** for `/health` (v0.7 auto-warms the model in server mode, so first health on a CUDA build includes VRAM upload + warmup), and posts subsequent audio to `/v1/audio/transcriptions` with `language`, `hotwords` (+ `hotwords_boost` when `HotwordsBoost` is set) whenever bias terms exist, and optional `beam_size`. The OpenAI `prompt` field is NOT sent — no CrispASR backend reads it (Voxtral/Qwen3 splice `hotwords` into their prompt themselves). Thread count is capped at `Min(8, ProcessorCount)` deliberately: ggml ASR scales with physical cores/memory bandwidth, not SMT, and `-t` barely matters on GPU backends. Server keeps model resident; process tree killed on `Dispose()`. When `LocalPuncModel` is set, the spawn adds `--punc-model <model>` so the resident server restores punctuation per segment (FireRedPunc) — stock CrispASR applied `--punc-model` only in CLI one-shot mode, so this requires the local #161-punc build (see the regression note).
 
 The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, and `CohereGgufCudaQ8ServerTranscriber.cs` files have been deleted — the same providers now use this generic class via config-only entries.
 
@@ -111,7 +111,7 @@ The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `Cohere
 
 ### Soniox async REST (SonioxTranscriber)
 
-Soniox has no synchronous "POST audio → text" endpoint, so each dictation is a four-step job on `api.soniox.com/v1` (Bearer auth): `POST /files` (multipart) → `POST /transcriptions` (JSON: `model`, `file_id`, `language_hints`, optional `context.terms`) → poll `GET /transcriptions/{id}` until `status` is `completed`/`error` → `GET /transcriptions/{id}/transcript`. The transcript is a `tokens[]` array whose text carries its own leading spacing, so concatenation rebuilds the sentence (a flat `text` field is a fallback). Polling is every 400 ms with a 120 s ceiling; each request is bounded by the shared 15 s `HttpClient` timeout. A `finally` block best-effort `DELETE`s both the transcription and the uploaded file (even on cancel/error) so nothing accumulates under the key. Default model `stt-async-v5` (current GA as of 2026-06-11; `stt-async-v4` is deprecated, removed 2026-06-30) is user-editable, so a Soniox model rename is a config edit, not a recompile. Context-bias terms map straight onto `context.terms` (real vocabulary steering), so `ContextBiasMode` is ignored — same approach as Google Chirp 3.
+Soniox has no synchronous "POST audio → text" endpoint, so each dictation is a four-step job on `api.soniox.com/v1` (Bearer auth): `POST /files` (multipart) → `POST /transcriptions` (JSON: `model`, `file_id`, `language_hints`, optional `context.terms`) → poll `GET /transcriptions/{id}` until `status` is `completed`/`error` → `GET /transcriptions/{id}/transcript`. The transcript is a `tokens[]` array whose text carries its own leading spacing, so concatenation rebuilds the sentence (a flat `text` field is a fallback). Polling is every 400 ms with a 120 s ceiling; each request is bounded by the shared 15 s `HttpClient` timeout. A `finally` block best-effort `DELETE`s both the transcription and the uploaded file (even on cancel/error) so nothing accumulates under the key. Default model `stt-async-v5` (current GA as of 2026-06-11; `stt-async-v4` is deprecated, removed 2026-06-30) is user-editable, so a Soniox model rename is a config edit, not a recompile. Context-bias terms map straight onto `context.terms` (real vocabulary steering, capped at 100), so `BiasMechanism` is informational only — same approach as Google Chirp 3.
 
 ### Text injection (`TextInjector.cs`)
 
@@ -130,7 +130,7 @@ Soniox has no synchronous "POST audio → text" endpoint, so each dictation is a
 
 ### Cohere v2 multipart quirk
 
-Cohere v2 rejects requests where `file` appears before string fields. WhisperInk always appends strings (`model`, `language`, `temperature`, `context_bias_terms`, `keyterms`) **before** the `file` part.
+Cohere v2 rejects requests where `file` appears before string fields. WhisperInk always appends string fields (`model`, `language`, `temperature`, and any bias field such as `context_bias` / `keyterms`) **before** the `file` part.
 
 ### UI sounds
 
