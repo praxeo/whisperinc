@@ -60,10 +60,7 @@ namespace WhisperInk
             TxtAuthHeaderName.Text = _current.AuthHeaderName;
             TxtModelFieldName.Text = _current.ModelFieldName;
             TxtTranscriptionModel.Text = _current.TranscriptionModel;
-            TxtChatModel.Text = _current.ChatModel;
-            TxtPostProcessModel.Text = _current.PostProcessModel;
             ChkSupportsTranscription.IsChecked = _current.SupportsTranscription;
-            ChkSupportsRealtime.IsChecked = _current.SupportsRealtime;
             TxtTranscriptionTemperature.Text = _current.TranscriptionTemperature?.ToString() ?? "";
 
             // Set language dropdown
@@ -114,10 +111,7 @@ namespace WhisperInk
             _current.AuthHeaderName = TxtAuthHeaderName.Text.Trim();
             _current.ModelFieldName = TxtModelFieldName.Text.Trim();
             _current.TranscriptionModel = TxtTranscriptionModel.Text.Trim();
-            _current.ChatModel = TxtChatModel.Text.Trim();
-            _current.PostProcessModel = TxtPostProcessModel.Text.Trim();
             _current.SupportsTranscription = ChkSupportsTranscription.IsChecked == true;
-            _current.SupportsRealtime = ChkSupportsRealtime.IsChecked == true;
 
             // Parse temperature
             if (double.TryParse(TxtTranscriptionTemperature.Text, out double temp))
@@ -239,9 +233,6 @@ namespace WhisperInk
             AuthHeaderName = src.AuthHeaderName,
             ModelFieldName = src.ModelFieldName,
             TranscriptionModel = src.TranscriptionModel,
-            ChatModel = src.ChatModel,
-            PostProcessModel = src.PostProcessModel,
-            SupportsRealtime = src.SupportsRealtime,
             SupportsTranscription = src.SupportsTranscription,
             TranscriptionTemperature = src.TranscriptionTemperature,
             Language = src.Language,

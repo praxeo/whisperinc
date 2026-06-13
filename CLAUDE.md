@@ -28,9 +28,9 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 
 | File | Purpose |
 |------|---------|
-| `MainWindow.xaml.cs` | Orchestration: recording state machine (`_recState` tri-state via `Interlocked`), transcription dispatch (one factory call), config load/save, the shared `BuildAppMenu()` tree, realtime WS streaming. ~1750 LOC. |
-| `KeyboardHookService.cs` | Owns the `WH_KEYBOARD_LL` hook: modifier tracking, hotkey suppression, synthetic-event filter (0x5AFE marker), Ctrl+Space / Ctrl+Alt detection. Callbacks fire on the hook thread; MainWindow marshals via Dispatcher + `RunSafe`. |
-| `TextInjector.cs` | Synthetic text delivery: per-char `WM_CHAR` typing (realtime), clipboard paste-with-restore (batch/AI), selection grab via Ctrl+C, `ReleaseAllModifierKeys()`. Owns pending clipboard-restore state. |
+| `MainWindow.xaml.cs` | Orchestration: recording state machine (`_recState` tri-state via `Interlocked`), transcription dispatch (one factory call), config load/save, the shared `BuildAppMenu()` tree. ~1750 LOC. |
+| `KeyboardHookService.cs` | Owns the `WH_KEYBOARD_LL` hook: modifier tracking, hotkey suppression, synthetic-event filter (0x5AFE marker), Ctrl+Space detection. Callbacks fire on the hook thread; MainWindow marshals via Dispatcher + `RunSafe`. |
+| `TextInjector.cs` | Synthetic text delivery: clipboard paste-with-restore (batch), selection grab via Ctrl+C, `ReleaseAllModifierKeys()`. Owns pending clipboard-restore state. |
 | `MenuModel.cs` | `MenuNode` record + `MenuSurface` (Both/TrayOnly/BarOnly) + WPF renderer. One canonical menu tree drives both the tray menu and the bar right-click menu — they cannot drift. |
 | `TrayIcon.cs` | `TrayIconManager`: notification-area icon + WinForms renderer over the shared `MenuNode` tree (rebuilt on every `Opening`). |
 | `AppConfig.cs` | `ApiProvider` model, `TranscriberKind` enum, default provider list. New providers added via `CreateDefaults()` or directly in `config.json`. |
@@ -43,27 +43,21 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 | `SonioxTranscriber.cs` | Soniox async REST job (`api.soniox.com/v1`): upload WAV → create transcription → poll status → fetch token array → concatenate → best-effort delete of job+file. Bias terms ride the v4 `context.terms` field. Not OpenAI-compatible, so it bypasses `HttpTranscriber`. |
 | `ProviderSettingsWindow.xaml(.cs)` | GUI for URLs, keys, auth header, model field, bias mode, Scribe keyterms. ElevenLabs-only fields hide for other providers. |
 | `ContextBiasWindow.xaml(.cs)` | Global context-bias term list. |
-| `PromptWindow.xaml(.cs)` | System-prompt editor for Ctrl+Alt AI mode. |
 | `HistoryService.cs`, `HistoryWindow.xaml(.cs)` | Local transcript log + viewer. |
 
 ### Hotkeys
 
-- **Ctrl+Space** — Hold to record, release to transcribe.
-  - **Realtime** mode: WebSocket streaming to Mistral Voxtral proxy → live character-by-character typing via `WM_CHAR`/`PostMessage`.
-  - **Batch** mode: Records WAV → HTTP POST to active provider → result pasted via clipboard (`Ctrl+V`).
-- **Ctrl+Alt** — Hold to record a voice instruction. Grabs selected text from the foreground app, sends instruction + selection to the chat model, pastes response.
+- **Ctrl+Space** — Hold to record, release to transcribe. Records WAV → HTTP POST to active provider → result pasted via clipboard (`Ctrl+V`).
 
-### Dictation modes
+### Dictation
 
-**Realtime** — Mistral-only. Requires a local WebSocket proxy at `ws://localhost:8765/v1/realtime`. Tunable `TargetStreamingDelayMs` (240–2400ms). Types each delta directly into the window that was in focus when recording started.
-
-**Batch** — Works with every provider. Records to `~/Documents/MyRecordings/temp_audio.wav`, POSTs multipart form, optionally runs post-processing LLM correction, pastes with a leading space.
+Records to `~/Documents/MyRecordings/temp_audio.wav`, POSTs multipart form, pastes with a leading space. Works with every provider.
 
 ### Provider system
 
 `ApiProvider` captures every knob; the cloud-vs-local split lives in `TranscriberKind`:
 
-- **Shared HTTP/cloud knobs**: `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`), `TranscriptionModel`, `ChatModel`, `PostProcessModel`, `SupportsRealtime`, `SupportsTranscription`, `TranscriptionTemperature` (nullable)
+- **Shared HTTP/cloud knobs**: `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`), `TranscriptionModel`, `SupportsTranscription`, `TranscriptionTemperature` (nullable)
 - **Bias**: `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array). Independent of the mode, LocalCrispAsrServer providers ALWAYS additionally send bias terms as the CrispASR v0.7+ `hotwords` form field (comma-separated) — real CTC/TDT phrase boost on Parakeet, prompt injection on Voxtral/Qwen3-style decoders; older servers ignore the unknown field.
 - **ElevenLabs-only**: `ScribeKeytermsRaw` (newline-delimited, capped at 1000 terms / <50 chars / ≤5 words each), `TagAudioEvents`, `NoVerbatim`
 - **TranscriberKind**: `Http` | `LocalOnnx` | `LocalCrispAsrServer` | `GoogleChirp3` | `Soniox` — picks the `ITranscriber` implementation
@@ -73,7 +67,7 @@ Default providers (`AppConfig.CreateDefaults()`):
 
 | Id | Name | TranscriberKind | Notes |
 |----|------|-----------------|-------|
-| `mistral` | Mistral | `Http` + realtime WS | Voxtral, realtime + batch |
+| `mistral` | Mistral | `Http` | Voxtral batch |
 | `openai` | OpenAI | `Http` | Whisper-1, `whisper_prompt` bias |
 | `elevenlabs` | ElevenLabs Scribe | `Http` | `xi-api-key` auth, `model_id` field, keyterms |
 | `cohere-api` | Cohere Transcribe API | `Http` | Cohere v2, temp 0.1, `cohere_terms` |
@@ -119,14 +113,9 @@ The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `Cohere
 
 Soniox has no synchronous "POST audio → text" endpoint, so each dictation is a four-step job on `api.soniox.com/v1` (Bearer auth): `POST /files` (multipart) → `POST /transcriptions` (JSON: `model`, `file_id`, `language_hints`, optional `context.terms`) → poll `GET /transcriptions/{id}` until `status` is `completed`/`error` → `GET /transcriptions/{id}/transcript`. The transcript is a `tokens[]` array whose text carries its own leading spacing, so concatenation rebuilds the sentence (a flat `text` field is a fallback). Polling is every 400 ms with a 120 s ceiling; each request is bounded by the shared 15 s `HttpClient` timeout. A `finally` block best-effort `DELETE`s both the transcription and the uploaded file (even on cancel/error) so nothing accumulates under the key. Default model `stt-async-v5` (current GA as of 2026-06-11; `stt-async-v4` is deprecated, removed 2026-06-30) is user-editable, so a Soniox model rename is a config edit, not a recompile. Context-bias terms map straight onto `context.terms` (real vocabulary steering), so `ContextBiasMode` is ignored — same approach as Google Chirp 3.
 
-### Post-processing
-
-Optional LLM correction pass (`PostProcessBatch` toggle). Uses `PostProcessModel` with a few-shot prompt that fixes garbled medical terms without over-correcting. Filters out commentary (e.g., "no correction needed").
-
 ### Text injection (`TextInjector.cs`)
 
-- **Realtime**: `PostMessage(WM_CHAR, ch, 0)` per character to the target window handle captured at recording start. Bypasses IME and most focus-stealing issues.
-- **Batch / AI**: `Clipboard.SetText` + synthetic `Ctrl+V`. Leading space prepended to avoid word-fusion. Prior clipboard contents are cloned and restored ~250ms after the paste; chained dictations reuse the pending saved data so the user's original clipboard survives rapid-fire use.
+- **Batch**: `Clipboard.SetText` + synthetic `Ctrl+V`. Leading space prepended to avoid word-fusion. Prior clipboard contents are cloned and restored ~250ms after the paste; chained dictations reuse the pending saved data so the user's original clipboard survives rapid-fire use.
 
 ### Keyboard hook internals (`KeyboardHookService.cs`)
 
@@ -142,10 +131,6 @@ Optional LLM correction pass (`PostProcessBatch` toggle). Uses `PostProcessModel
 ### Cohere v2 multipart quirk
 
 Cohere v2 rejects requests where `file` appears before string fields. WhisperInk always appends strings (`model`, `language`, `temperature`, `context_bias_terms`, `keyterms`) **before** the `file` part.
-
-### WebSocket serialization
-
-All WebSocket sends go through `SemaphoreSlim(1,1)` so concurrent audio chunks + control frames can't interleave.
 
 ### UI sounds
 
@@ -241,8 +226,8 @@ No C++ work needed — CrispASR auto-detects most backends from GGUF metadata.
 
 ## Future work
 
-- Realtime/batch pipeline state-machine extraction out of MainWindow (the riskiest remaining chunk; deferred deliberately).
+- Batch pipeline state-machine extraction out of MainWindow (the riskiest remaining chunk; deferred deliberately).
 - `-dev N` GPU-index pinning for multi-GPU machines (crispasr supports it; no provider knob yet).
 - `TextInjector.GetSelectedText()` still uses a fixed 100ms sleep before reading the clipboard — replace with a clipboard-listener.
-- The 15s `_httpClient` timeout (post-process/AI calls) is hardcoded.
+- The 15s `_httpClient` timeout is hardcoded.
 - CrispASR `/load` hot-swap could collapse the one-port-per-model preset scheme into a single resident server.

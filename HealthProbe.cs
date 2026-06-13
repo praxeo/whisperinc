@@ -95,36 +95,27 @@ namespace WhisperInk
 
         private static async Task<HealthReport> ProbeProviderAsync(ApiProvider prov)
         {
-            switch (prov.Id)
+            // Dispatch on transcriber TYPE, not hardcoded provider ids. Keying on
+            // ids meant any local provider not in the list (parakeet-rnnt-local,
+            // granite-local, voxtral4b-local, or any user-added one) fell through
+            // to the cloud branch and was flagged "Missing API key" — which is why
+            // a dummy key was needed to clear the red banner. Type-based dispatch
+            // covers every local provider automatically.
+            switch (prov.TranscriberKind)
             {
-                case "cohere-onnx":
+                case TranscriberKind.LocalOnnx:
                     return ProbeOnnx();
 
-                case "cohere-gguf":
-                case "cohere-gguf-server":
-                case "cohere-gguf-cuda-server":
-                case "cohere-gguf-cuda-server-q8":
-                    return ProbeLocalGgufFiles("cohere-*.gguf");
-
-                case "parakeet-local":
-                    return await ProbeLocalServerAsync("parakeet-*.gguf", prov.BaseUrl, 8103).ConfigureAwait(false);
-
-                case "cohere-local-q4":
-                    return await ProbeLocalServerAsync("cohere-transcribe-q4_k.gguf", prov.BaseUrl, 8104).ConfigureAwait(false);
-
-                case "cohere-local-q6k":
-                    return await ProbeLocalServerAsync("cohere-transcribe-q6_k.gguf", prov.BaseUrl, 8105).ConfigureAwait(false);
-
-                case "voxtral-local":
-                    return await ProbeLocalServerAsync("voxtral-mini-3b*.gguf", prov.BaseUrl, 8106).ConfigureAwait(false);
-
-                case "qwen3-asr":
-                case "local":
-                    return await ProbeHttpHealthAsync(prov.BaseUrl).ConfigureAwait(false);
+                case TranscriberKind.LocalCrispAsrServer:
+                    return await ProbeLocalServerAsync(prov).ConfigureAwait(false);
 
                 default:
-                    // Cloud provider: require an API key to consider "ok".
-                    if (string.IsNullOrWhiteSpace(prov.ApiKey))
+                    // An OpenAI-compatible server on localhost (e.g. qwen3-asr) needs
+                    // no key — probe its /health. Otherwise it's a cloud/credentialed
+                    // provider: require a key to consider it "ok".
+                    if (prov.IsLocalHttp)
+                        return await ProbeHttpHealthAsync(prov.BaseUrl).ConfigureAwait(false);
+                    if (prov.RequiresApiKey && string.IsNullOrWhiteSpace(prov.ApiKey))
                         return new HealthReport { Status = HealthStatus.Fail, Summary = $"Missing API key for {prov.Name}" };
                     return new HealthReport { Status = HealthStatus.Ok, Summary = $"{prov.Name} — API key present" };
             }
@@ -147,18 +138,22 @@ namespace WhisperInk
             return new HealthReport { Status = HealthStatus.Ok, Summary = "ONNX files present" };
         }
 
-        private static HealthReport ProbeLocalGgufFiles(string glob)
+        private static HealthReport ProbeLocalGgufFiles(string subFolder, string glob)
         {
             string dir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                ".WhisperInk", "cohere-gguf");
+                ".WhisperInk", subFolder);
             string exe = Path.Combine(dir, "crispasr.exe");
             var missing = new List<string>();
             if (!File.Exists(exe)) missing.Add("crispasr.exe");
             bool modelFound = false;
             if (Directory.Exists(dir))
             {
-                foreach (var _ in Directory.EnumerateFiles(dir, glob)) { modelFound = true; break; }
+                // literal filename first (no wildcard), then the glob pattern.
+                if (!glob.Contains('*') && File.Exists(Path.Combine(dir, glob)))
+                    modelFound = true;
+                else
+                    foreach (var _ in Directory.EnumerateFiles(dir, glob)) { modelFound = true; break; }
             }
             if (!modelFound) missing.Add(glob);
             if (missing.Count > 0)
@@ -166,14 +161,18 @@ namespace WhisperInk
             return new HealthReport { Status = HealthStatus.Ok, Summary = "crispasr.exe + model present" };
         }
 
-        private static async Task<HealthReport> ProbeLocalServerAsync(string modelGlob, string? baseUrl, int defaultPort)
+        private static async Task<HealthReport> ProbeLocalServerAsync(ApiProvider prov)
         {
-            var files = ProbeLocalGgufFiles(modelGlob);
+            string subFolder = string.IsNullOrWhiteSpace(prov.LocalModelFolder) ? "cohere-gguf" : prov.LocalModelFolder;
+            string modelGlob = string.IsNullOrWhiteSpace(prov.LocalModelGlob) ? "*.gguf" : prov.LocalModelGlob;
+
+            var files = ProbeLocalGgufFiles(subFolder, modelGlob);
             if (files.Status != HealthStatus.Ok) return files;
 
-            int port = defaultPort;
-            if (!string.IsNullOrWhiteSpace(baseUrl) && Uri.TryCreate(baseUrl, UriKind.Absolute, out var u) && u.Port > 0)
+            int port = prov.LocalServerPort ?? 0;
+            if (!string.IsNullOrWhiteSpace(prov.BaseUrl) && Uri.TryCreate(prov.BaseUrl, UriKind.Absolute, out var u) && u.Port > 0)
                 port = u.Port;
+            if (port <= 0) port = 8103;
 
             if (!await IsPortListeningAsync("127.0.0.1", port).ConfigureAwait(false))
             {

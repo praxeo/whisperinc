@@ -31,6 +31,79 @@
             <Setter Property="Padding" Value="12,4"/>
             <Setter Property="Margin" Value="4,0"/>
         </Style>
+
+        <!-- Dark ComboBox: the stock WPF template ignores Background and renders
+             our light #CCC text on near-white system chrome ("gray on white").
+             This template keeps both the closed box and the drop-down list dark
+             so the active-provider name and every option stay readable. -->
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#DDDDDD"/>
+            <Setter Property="Padding" Value="6,3"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#3D5A80"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#DDDDDD"/>
+            <Setter Property="BorderBrush" Value="#555"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+                                                BorderThickness="1" CornerRadius="2">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="18"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Path Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                      Data="M 0 0 L 4 4 L 8 0 Z" Fill="#CCC"/>
+                                            </Grid>
+                                        </Border>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              Margin="6,0,22,0"
+                                              VerticalAlignment="Center" HorizontalAlignment="Left"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                            <Popup Placement="Bottom" Focusable="False" AllowsTransparency="True"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}" PopupAnimation="Slide">
+                                <Border Background="#2D2D2D" BorderBrush="#555" BorderThickness="1"
+                                        MinWidth="{TemplateBinding ActualWidth}"
+                                        MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <ScrollViewer>
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid Margin="12">
@@ -99,16 +172,9 @@
                 <Label Content="Transcription Model  (e.g. voxtral-mini-latest, whisper-1, scribe_v2)"/>
                 <TextBox x:Name="TxtTranscriptionModel" Margin="0,0,0,8"/>
 
-                <Label Content="Chat Model  (/v1/chat/completions — for AnalyzeContext)"/>
-                <TextBox x:Name="TxtChatModel" Margin="0,0,0,8"/>
-
-                <Label Content="Post-Process Model  (med correction pass)"/>
-                <TextBox x:Name="TxtPostProcessModel" Margin="0,0,0,8"/>
-
                 <Separator Background="#333" Margin="0,4,0,8"/>
 
                 <CheckBox x:Name="ChkSupportsTranscription" Content="Supports /v1/audio/transcriptions"/>
-                <CheckBox x:Name="ChkSupportsRealtime" Content="Supports Mistral Realtime WebSocket (Mistral only)"/>
 
                 <Separator Background="#333" Margin="0,4,0,8"/>
 

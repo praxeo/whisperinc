@@ -4,8 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Net.WebSockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -28,25 +26,9 @@ namespace WhisperInk
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
-        // ── API configuration (derived from active provider) ────────
-        private const string RealtimeModel = "voxtral-mini-transcribe-realtime-2602";
-        private const string RealtimeWsUrl = "ws://localhost:8765/v1/realtime";
-
         // Active-provider state is computed, never cached: a provider
         // switch mid-flight can therefore never leave stale values behind.
         private string ActiveApiKey => GetActiveProvider()?.ApiKey ?? "";
-        private bool ActiveSupportsRealtime => GetActiveProvider()?.SupportsRealtime == true;
-        private string ChatApiUrl => $"{(GetActiveProvider()?.BaseUrl ?? "").TrimEnd('/')}/v1/chat/completions";
-        private string ChatModel => GetActiveProvider()?.ChatModel ?? "";
-        private string PostProcessModelName
-        {
-            get
-            {
-                var p = GetActiveProvider();
-                if (p == null) return "";
-                return string.IsNullOrWhiteSpace(p.PostProcessModel) ? p.ChatModel : p.PostProcessModel;
-            }
-        }
 
         private static readonly string ConfigFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk");
@@ -66,18 +48,9 @@ namespace WhisperInk
         private bool IsStopping  => Volatile.Read(ref _recState) == 2;
 
         private bool _isSoundEnabled = true;
-        private string _systemPrompt = new AppConfig().SystemPrompt;
         private int _selectedDeviceNumber;
-        private int _targetStreamingDelayMs = 480;
-        private string _proxyPath = "";
-
-        private string _dictationMode = "Realtime";
-        private bool IsRealtimeMode => _dictationMode == "Realtime";
 
         private List<string> _contextBiasTerms = new();
-
-        private bool _postProcessBatch = false;
-        private string _postProcessPrompt = new AppConfig().PostProcessPrompt;
 
         private List<ApiProvider> _providers = new();
         private string _activeProviderId = "mistral";
@@ -120,22 +93,7 @@ namespace WhisperInk
         private DispatcherTimer _animationTimer = null!;
         private readonly Random _rng = new();
 
-        // Watches the Mistral realtime proxy subprocess. The proxy can die
-        // silently — without this heartbeat, the next dictation surfaces the
-        // failure only when the WebSocket connect times out. Tick interval is
-        // 5s, low enough to feel "live" without flooding debug.log.
-        private DispatcherTimer? _proxyHeartbeat;
-        private bool _proxyHealthy = true;
-
         private enum SoundType { Start, Stop, Success, Error }
-
-        private ClientWebSocket? _realtimeWs;
-        private CancellationTokenSource? _realtimeCts;
-        private Task? _receiveTask;
-        private string _accumulatedTranscript = "";
-        private bool _leadingSpaceSent;
-        private readonly SemaphoreSlim _wsSendLock = new(1, 1);
-        private Process? _proxyProcess;
 
         private static readonly string LogFile = Path.Combine(ConfigFolder, "debug.log");
 
@@ -207,8 +165,6 @@ namespace WhisperInk
             }
 
             try { _hook?.Dispose(); } catch { }
-            try { _proxyHeartbeat?.Stop(); } catch { }
-            try { _proxyProcess?.Kill(); } catch (Exception ex) { Log($"Proxy kill on close failed: {ex.Message}"); }
             try { _transcribers?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
@@ -218,7 +174,7 @@ namespace WhisperInk
         {
             // Fresh log per session — must happen BEFORE LoadConfig, or the
             // truncation wipes the very startup diagnostics it should keep
-            // (provider appends, active-provider line, proxy startup).
+            // (provider appends, active-provider line).
             try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n"); } catch { }
 
             Topmost = true;
@@ -233,20 +189,10 @@ namespace WhisperInk
                 onDictationStart: target =>
                 {
                     _targetWindow = target;
-                    if (IsRealtimeMode)
-                        Dispatcher.BeginInvoke(() => RunSafe(StartRealtimeStreamingAsync, "StartRealtimeStreaming"));
-                    else
-                        Dispatcher.BeginInvoke(() => StartBatchDictation());
+                    Dispatcher.BeginInvoke(() => StartBatchDictation());
                 },
                 onDictationStop: () =>
-                {
-                    if (IsRealtimeMode)
-                        Dispatcher.BeginInvoke(() => RunSafe(StopRealtimeStreamingAsync, "StopRealtimeStreaming"));
-                    else
-                        Dispatcher.BeginInvoke(() => RunSafe(StopBatchDictationAsync, "StopBatchDictation"));
-                },
-                onAnalyzeStart: () => Dispatcher.BeginInvoke(() => StartBatchRecording()),
-                onAnalyzeStop: () => Dispatcher.BeginInvoke(() => RunSafe(StopBatchRecordingAsync, "StopBatchRecording")));
+                    Dispatcher.BeginInvoke(() => RunSafe(StopBatchDictationAsync, "StopBatchDictation")));
             _hook.Install();
 
             _animationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
@@ -259,95 +205,11 @@ namespace WhisperInk
             // without needing to drop and recreate every CrispASR server.
             _transcribers = new TranscriberFactory(_httpClient, () => _crispGpuBackend, Log);
 
-            if (!string.IsNullOrWhiteSpace(_proxyPath) && ActiveSupportsRealtime)
-            {
-                Log($"Starting proxy: {_proxyPath}");
-                try
-                {
-                    _proxyProcess = new Process();
-
-                    if (_proxyPath.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
-                    {
-                        _proxyProcess.StartInfo = new ProcessStartInfo
-                        {
-                            FileName = "py",
-                            Arguments = $"\"{_proxyPath}\" --api-key {ActiveApiKey}",
-                            CreateNoWindow = true,
-                            UseShellExecute = false,
-                            RedirectStandardError = true
-                        };
-                    }
-                    else
-                    {
-                        _proxyProcess.StartInfo = new ProcessStartInfo
-                        {
-                            FileName = _proxyPath,
-                            Arguments = $"--api-key {ActiveApiKey}",
-                            CreateNoWindow = true,
-                            UseShellExecute = false,
-                            RedirectStandardError = true
-                        };
-                    }
-
-                    _proxyProcess.Start();
-                    Log($"Proxy process started (PID {_proxyProcess.Id}), waiting for it to bind...");
-                    System.Threading.Thread.Sleep(2500);
-                }
-                catch (Exception ex) { Log($"Proxy start error: {ex.Message}"); }
-            }
-            else if (string.IsNullOrWhiteSpace(_proxyPath))
-            {
-                Log("ProxyPath is empty — proxy will NOT auto-start. Start it manually or set ProxyPath in config.");
-            }
-            else
-            {
-                Log($"Active provider ({GetActiveProvider()?.Name}) does not support realtime — proxy not started.");
-            }
-
             UpdateStatusLabel();
 
             InitializeTrayAndHealth();
             SyncLaunchAtStartupFromRegistry();
             RunFirstRunCheck();
-
-            StartProxyHeartbeat();
-        }
-
-        private void StartProxyHeartbeat()
-        {
-            if (_proxyHeartbeat != null) return;
-            _proxyHeartbeat = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
-            _proxyHeartbeat.Tick += (_, _) => CheckProxyHealth();
-            _proxyHeartbeat.Start();
-        }
-
-        private void CheckProxyHealth()
-        {
-            // Heartbeat is meaningful only when the active provider needs a
-            // proxy. For cloud/local providers without realtime support,
-            // we treat the proxy as healthy regardless (it may not even be
-            // running) so the status label doesn't show false warnings.
-            bool needsProxy = ActiveSupportsRealtime
-                              && IsRealtimeMode
-                              && !string.IsNullOrWhiteSpace(_proxyPath);
-            if (!needsProxy)
-            {
-                if (!_proxyHealthy)
-                {
-                    _proxyHealthy = true;
-                    UpdateStatusLabel();
-                }
-                return;
-            }
-
-            bool alive = false;
-            try { alive = _proxyProcess != null && !_proxyProcess.HasExited; }
-            catch { alive = false; }
-
-            if (alive == _proxyHealthy) return;
-            _proxyHealthy = alive;
-            Log(alive ? "Mistral proxy recovered." : "Mistral proxy is no longer running — realtime dictation will fail until it restarts.");
-            UpdateStatusLabel();
         }
 
         // ── Provider helpers ────────────────────────────────────────────
@@ -365,19 +227,13 @@ namespace WhisperInk
                 provider = _providers[0];
             }
 
-            Log($"Active provider: {provider.Name} → STT={provider.ResolvedTranscriptionUrl}  (RT={provider.SupportsRealtime}, auth={(string.IsNullOrEmpty(provider.AuthHeaderName) ? "Bearer" : provider.AuthHeaderName)}, modelField={provider.ResolvedModelField})");
+            Log($"Active provider: {provider.Name} → STT={provider.ResolvedTranscriptionUrl}  (auth={(string.IsNullOrEmpty(provider.AuthHeaderName) ? "Bearer" : provider.AuthHeaderName)}, modelField={provider.ResolvedModelField})");
         }
 
         private void SwitchProvider(string providerId)
         {
             ApplyProviderSwitch(providerId);
             SaveConfig();
-
-            if (IsRealtimeMode && !ActiveSupportsRealtime)
-            {
-                _dictationMode = "Batch";
-                SaveConfig();
-            }
 
             UpdateStatusLabel();
             UpdateLocalModelBanner();
@@ -389,7 +245,7 @@ namespace WhisperInk
         /// menu, or dialog close. Logs the change, flips the id, disposes any
         /// local CrispASR server owned by the previous provider (so we don't
         /// leak ~2 GB of resident model per switch). Per-provider state
-        /// (ActiveApiKey, ChatApiUrl, …) is computed, so nothing to re-derive.
+        /// (ActiveApiKey, …) is computed, so nothing to re-derive.
         /// Does not persist by itself — the caller owns SaveConfig().
         /// </summary>
         private void ApplyProviderSwitch(string newId)
@@ -488,12 +344,7 @@ namespace WhisperInk
         private void UpdateStatusLabel()
         {
             var provider = GetActiveProvider();
-            string provTag = provider?.Name ?? "?";
-            string modeTag = IsRealtimeMode ? "RT" : "Batch";
-            string proxyTag = (ActiveSupportsRealtime && IsRealtimeMode && !_proxyHealthy)
-                ? "  ⚠ proxy down"
-                : "";
-            lblStatus.Content = $"{provTag} ({modeTag}){proxyTag}";
+            lblStatus.Content = provider?.Name ?? "?";
             UpdateHealthDot();
         }
 
@@ -536,15 +387,7 @@ namespace WhisperInk
                     string legacyMistralKey = "";
                     if (root.TryGetProperty("MistralApiKey", out var key)) legacyMistralKey = key.GetString() ?? "";
                     if (root.TryGetProperty("IsSoundEnabled", out var snd)) _isSoundEnabled = snd.GetBoolean();
-                    if (root.TryGetProperty("SystemPrompt", out var sp)) _systemPrompt = sp.GetString() ?? _systemPrompt;
                     if (root.TryGetProperty("SelectedDevice", out var dev)) _selectedDeviceNumber = dev.GetInt32();
-                    if (root.TryGetProperty("TargetStreamingDelayMs", out var delay)) _targetStreamingDelayMs = delay.GetInt32();
-                    if (root.TryGetProperty("ProxyPath", out var pp)) _proxyPath = pp.GetString() ?? "";
-                    if (root.TryGetProperty("DictationMode", out var dm))
-                    {
-                        string mode = dm.GetString() ?? "Realtime";
-                        _dictationMode = (mode == "Batch") ? "Batch" : "Realtime";
-                    }
                     if (root.TryGetProperty("ContextBiasTerms", out var cbt) && cbt.ValueKind == JsonValueKind.Array)
                     {
                         _contextBiasTerms = new List<string>();
@@ -554,9 +397,6 @@ namespace WhisperInk
                             if (!string.IsNullOrWhiteSpace(s)) _contextBiasTerms.Add(s);
                         }
                     }
-                    if (root.TryGetProperty("PostProcessBatch", out var ppb)) _postProcessBatch = ppb.GetBoolean();
-                    if (root.TryGetProperty("PostProcessPrompt", out var ppp)) _postProcessPrompt = ppp.GetString() ?? _postProcessPrompt;
-
                     if (root.TryGetProperty("Providers", out var provArray) && provArray.ValueKind == JsonValueKind.Array)
                     {
                         _providers = new List<ApiProvider>();
@@ -568,9 +408,6 @@ namespace WhisperInk
                             if (pEl.TryGetProperty("BaseUrl", out var url)) p.BaseUrl = url.GetString() ?? "";
                             if (pEl.TryGetProperty("ApiKey", out var ak)) p.ApiKey = ak.GetString() ?? "";
                             if (pEl.TryGetProperty("TranscriptionModel", out var tm)) p.TranscriptionModel = tm.GetString() ?? "";
-                            if (pEl.TryGetProperty("ChatModel", out var cm)) p.ChatModel = cm.GetString() ?? "";
-                            if (pEl.TryGetProperty("PostProcessModel", out var ppm)) p.PostProcessModel = ppm.GetString() ?? "";
-                            if (pEl.TryGetProperty("SupportsRealtime", out var sr)) p.SupportsRealtime = sr.GetBoolean();
                             if (pEl.TryGetProperty("SupportsTranscription", out var st)) p.SupportsTranscription = st.GetBoolean();
                             if (pEl.TryGetProperty("TranscriptionEndpoint", out var te)) p.TranscriptionEndpoint = te.GetString() ?? "";
                             if (pEl.TryGetProperty("AuthHeaderName", out var ahn)) p.AuthHeaderName = ahn.GetString() ?? "";
@@ -715,14 +552,8 @@ namespace WhisperInk
                 {
                     MistralApiKey = legacyKey,
                     IsSoundEnabled = _isSoundEnabled,
-                    SystemPrompt = _systemPrompt,
                     SelectedDevice = _selectedDeviceNumber,
-                    TargetStreamingDelayMs = _targetStreamingDelayMs,
-                    ProxyPath = _proxyPath,
-                    DictationMode = _dictationMode,
                     ContextBiasTerms = _contextBiasTerms,
-                    PostProcessBatch = _postProcessBatch,
-                    PostProcessPrompt = _postProcessPrompt,
                     Providers = _providers,
                     ActiveProviderId = _activeProviderId,
                     QuitOnClose     = _quitOnClose,
@@ -746,296 +577,13 @@ namespace WhisperInk
         // MainWindow_Loaded). Synthetic typing/paste/release: TextInjector.
 
         // ════════════════════════════════════════════════════════════════
-        // MISTRAL REALTIME STREAMING MODE
-        // ════════════════════════════════════════════════════════════════
-
-        private async Task StartRealtimeStreamingAsync()
-        {
-            if (string.IsNullOrEmpty(ActiveApiKey))
-            {
-                lblStatus.Content = "No API key!";
-                return;
-            }
-            if (!ActiveSupportsRealtime)
-            {
-                lblStatus.Content = "Provider: no RT!";
-                return;
-            }
-
-            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
-            _accumulatedTranscript = "";
-            _leadingSpaceSent = false;
-            _hook?.BeginSuppression();
-            _injector.ReleaseAllModifierKeys();
-
-            MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(100, 255, 100));
-            lblStatus.Content = "🎙 LIVE";
-            lblStatus.Opacity = 1;
-            HistogramPanel.Visibility = Visibility.Visible;
-            _animationTimer.Start();
-
-            _realtimeCts = new CancellationTokenSource();
-
-            try
-            {
-                _realtimeWs = new ClientWebSocket();
-                _realtimeWs.Options.SetRequestHeader("Authorization", $"Bearer {ActiveApiKey}");
-                Log($"Connecting to Mistral Realtime {RealtimeWsUrl}...");
-
-                using var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(_realtimeCts.Token, connectTimeout.Token);
-
-                try
-                {
-                    await _realtimeWs.ConnectAsync(new Uri(RealtimeWsUrl), linked.Token);
-                }
-                catch (Exception ex) when (ex is OperationCanceledException || ex is System.Net.WebSockets.WebSocketException || ex is System.Net.Http.HttpRequestException)
-                {
-                    string hint = string.IsNullOrWhiteSpace(_proxyPath)
-                        ? "Proxy not configured — set ProxyPath in config or start proxy manually"
-                        : "Proxy may not be running — check debug.log";
-                    Log($"WS connect failed: {ex.GetType().Name}: {ex.Message} — {hint}");
-                    ForceCleanupRealtime($"No proxy! Start it first");
-                    return;
-                }
-
-                var sessionUpdate = JsonSerializer.Serialize(new
-                {
-                    type = "session.update",
-                    session = new
-                    {
-                        model = RealtimeModel,
-                        target_streaming_delay_ms = _targetStreamingDelayMs,
-                        audio_format = new
-                        {
-                            encoding = "pcm_s16le",
-                            sample_rate = 16000
-                        }
-                    }
-                });
-                await SendTextMessageSafe(sessionUpdate, _realtimeCts.Token);
-
-                _waveIn = new WaveInEvent();
-                if (_selectedDeviceNumber < WaveIn.DeviceCount) _waveIn.DeviceNumber = _selectedDeviceNumber;
-                else _selectedDeviceNumber = 0;
-
-                _waveIn.WaveFormat = new WaveFormat(16000, 16, 1);
-                _waveIn.BufferMilliseconds = 100;
-                _waveIn.DataAvailable += OnAudioDataAvailable;
-                _waveIn.StartRecording();
-
-                PlayUiSound(SoundType.Start);
-                _receiveTask = Task.Run(() => ReceiveTranscriptionLoop(_realtimeWs, _realtimeCts.Token));
-            }
-            catch (Exception ex)
-            {
-                Log($"[diag] StartRealtimeStreaming: ERROR {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
-                ForceCleanupRealtime($"Error: {ex.Message}");
-            }
-        }
-
-        private void OnAudioDataAvailable(object? sender, WaveInEventArgs e)
-        {
-            var cts = _realtimeCts;
-            if (!IsRecording || _realtimeWs?.State != WebSocketState.Open || cts == null || cts.IsCancellationRequested)
-                return;
-
-            // NAudio reuses e.Buffer across callbacks — encode synchronously
-            // in the handler; only the send is deferred.
-            string base64Audio = Convert.ToBase64String(e.Buffer, 0, e.BytesRecorded);
-            var msg = JsonSerializer.Serialize(new
-            {
-                type = "input_audio_buffer.append",
-                audio = base64Audio
-            });
-            RunSafe(() => SendTextMessageSafe(msg, cts.Token), "audio-chunk");
-        }
-
-        private async Task ReceiveTranscriptionLoop(ClientWebSocket ws, CancellationToken ct)
-        {
-            var buffer = new byte[8192];
-            var messageBuilder = new StringBuilder();
-
-            try
-            {
-                while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
-                {
-                    messageBuilder.Clear();
-                    WebSocketReceiveResult result;
-
-                    do
-                    {
-                        result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
-
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            if (IsStopping || result.CloseStatus == WebSocketCloseStatus.NormalClosure) return;
-                            var desc = result.CloseStatusDescription ?? result.CloseStatus?.ToString() ?? "unknown";
-                            Dispatcher.Invoke(() => ForceCleanupRealtime($"WS closed: {desc}"));
-                            return;
-                        }
-                        messageBuilder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                    } while (!result.EndOfMessage);
-
-                    ProcessRealtimeEvent(messageBuilder.ToString());
-                }
-            }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                Dispatcher.Invoke(() => ForceCleanupRealtime($"WS error: {ex.Message}"));
-            }
-        }
-
-        private void ProcessRealtimeEvent(string json)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-
-                if (!root.TryGetProperty("type", out var typeEl)) return;
-                string eventType = typeEl.GetString() ?? "";
-
-                switch (eventType)
-                {
-                    case "transcription.text.delta":
-                        if (!IsRecording) break;
-                        if (root.TryGetProperty("text", out var textEl))
-                        {
-                            string delta = textEl.GetString() ?? "";
-                            if (!string.IsNullOrEmpty(delta))
-                            {
-                                Log($"delta: \"{delta}\"");
-                                _accumulatedTranscript += delta;
-
-                                Dispatcher.Invoke(() =>
-                                {
-                                    Log($"Typing to hwnd: {_targetWindow}");
-                                    if (_targetWindow != IntPtr.Zero)
-                                        SetForegroundWindow(_targetWindow);
-                                    if (!_leadingSpaceSent)
-                                    {
-                                        _injector.TypeTextTo(_targetWindow, " ");
-                                        _leadingSpaceSent = true;
-                                    }
-                                    _injector.TypeTextTo(_targetWindow, delta);
-                                });
-                            }
-                        }
-                        break;
-
-                    case "transcription.done":
-                        Log($"Transcription done: {_accumulatedTranscript}");
-                        break;
-
-                    case "error":
-                        if (root.TryGetProperty("error", out var errEl))
-                        {
-                            string errorMsg = errEl.ToString();
-                            if (errEl.ValueKind == JsonValueKind.Object && errEl.TryGetProperty("message", out var msgEl))
-                                errorMsg = msgEl.GetString() ?? errorMsg;
-                            Dispatcher.Invoke(() => ForceCleanupRealtime($"Error: {errorMsg}"));
-                        }
-                        break;
-                }
-            }
-            catch (Exception ex) { Log($"Parse error: {ex.Message}"); }
-        }
-
-        private async Task StopRealtimeStreamingAsync()
-        {
-            if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
-            Log("[diag] StopRealtimeStreaming: enter");
-
-            try
-            {
-                PlayUiSound(SoundType.Stop);
-
-                try { _waveIn?.StopRecording(); } catch { }
-                try { _waveIn?.Dispose(); } catch { }
-                _waveIn = null;
-
-                try
-                {
-                    if (_realtimeWs?.State == WebSocketState.Open && _realtimeCts != null && !_realtimeCts.IsCancellationRequested)
-                    {
-                        var commit = JsonSerializer.Serialize(new { type = "input_audio_buffer.commit" });
-                        await SendTextMessageSafe(commit, _realtimeCts.Token);
-                        await Task.Delay(500);
-                    }
-                }
-                catch (Exception ex) { Log($"Realtime commit send failed: {ex.Message}"); }
-
-                if (_realtimeWs != null && _realtimeWs.State == WebSocketState.Open)
-                {
-                    try { await _realtimeWs.CloseAsync(WebSocketCloseStatus.NormalClosure, "Finished", CancellationToken.None); }
-                    catch { }
-                }
-
-                try { _realtimeCts?.Cancel(); } catch { }
-                try { _realtimeWs?.Dispose(); } catch { }
-                _realtimeWs = null;
-
-                if (_receiveTask != null)
-                {
-                    try { await Task.WhenAny(_receiveTask, Task.Delay(1000)); } catch { }
-                    _receiveTask = null;
-                }
-
-                if (!string.IsNullOrWhiteSpace(_accumulatedTranscript))
-                {
-                    HistoryService.Add(_accumulatedTranscript.Trim());
-                    PlayUiSound(SoundType.Success);
-                }
-
-                Log("[diag] StopRealtimeStreaming: exit");
-            }
-            catch (Exception ex)
-            {
-                Log($"[diag] StopRealtimeStreaming: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
-                throw;
-            }
-            finally
-            {
-                // Always run cleanup — see StopBatchDictation. Resetting
-                // _recState here too prevents a thrown stop from wedging the
-                // state machine so that the next Ctrl+Space could never start.
-                _injector.ReleaseAllModifierKeys();
-                Volatile.Write(ref _recState, 0);
-                ResetUi();
-                UpdateStatusLabel();
-            }
-        }
-
-        private void ForceCleanupRealtime(string statusMessage)
-        {
-            Log($"ForceCleanupRealtime: {statusMessage}");
-
-            if (Volatile.Read(ref _recState) == 0 && _realtimeWs == null) return;
-            Volatile.Write(ref _recState, 0);
-
-            try { _waveIn?.StopRecording(); _waveIn?.Dispose(); } catch { }
-            _waveIn = null;
-
-            try { _realtimeCts?.Cancel(); _realtimeWs?.Dispose(); } catch { }
-            _realtimeWs = null;
-
-            _injector.ReleaseAllModifierKeys();
-            ResetUi();
-            lblStatus.Content = statusMessage;
-            lblStatus.Opacity = 1;
-
-            PlayUiSound(SoundType.Error);
-        }
-
-        // ════════════════════════════════════════════════════════════════
         // BATCH DICTATION MODE — now with parallel in-memory WAV capture
         // ════════════════════════════════════════════════════════════════
 
         private void StartBatchDictation()
         {
-            if (string.IsNullOrEmpty(ActiveApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
+            var startProvider = GetActiveProvider();
+            if (startProvider != null && startProvider.RequiresApiKey && string.IsNullOrWhiteSpace(startProvider.ApiKey))
             {
                 lblStatus.Content = "No API key!";
                 return;
@@ -1061,7 +609,7 @@ namespace WhisperInk
             else _selectedDeviceNumber = 0;
             _waveIn.WaveFormat = new WaveFormat(16000, 1);
 
-            // Parallel writers: one to disk (for AnalyzeContext replay / debugging),
+            // Parallel writers: one to disk (for replay / debugging),
             // one to memory (for local GGUF server providers to use directly).
             _writer = new WaveFileWriter(_currentFileName, _waveIn.WaveFormat);
             _memWavStream = new MemoryStream();
@@ -1090,7 +638,7 @@ namespace WhisperInk
             {
                 // ── Pipeline timing instrumentation ──
                 var swBatch = System.Diagnostics.Stopwatch.StartNew();
-                long tPlaySound, tWaveStop, tFlush, tTranscribe, tPostProc, tPaste;
+                long tPlaySound, tWaveStop, tFlush, tTranscribe, tPaste;
 
                 PlayUiSound(SoundType.Stop);
                 tPlaySound = swBatch.ElapsedMilliseconds;
@@ -1126,13 +674,6 @@ namespace WhisperInk
                 Log($"[diag] StopBatchDictation: post-transcribe, text.Length={text?.Length ?? -1}");
                 if (!string.IsNullOrEmpty(text))
                 {
-                    if (_postProcessBatch)
-                    {
-                        lblStatus.Content = "Correcting...";
-                        text = await PostProcessTranscription(text) ?? text;
-                    }
-                    tPostProc = swBatch.ElapsedMilliseconds;
-
                     if (_targetWindow != IntPtr.Zero)
                         SetForegroundWindow(_targetWindow);
                     Log("[diag] StopBatchDictation: pre-paste");
@@ -1144,7 +685,7 @@ namespace WhisperInk
                     PlayUiSound(SoundType.Success);
 
                     int charCount = text?.Length ?? 0;
-                    Log($"Batch pipeline: sound={tPlaySound}ms  waveStop={tWaveStop - tPlaySound}ms  flush={tFlush - tWaveStop}ms  transcribe={tTranscribe - tFlush}ms  postproc={tPostProc - tTranscribe}ms  paste={tPaste - tPostProc}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
+                    Log($"Batch pipeline: sound={tPlaySound}ms  waveStop={tWaveStop - tPlaySound}ms  flush={tFlush - tWaveStop}ms  transcribe={tTranscribe - tFlush}ms  paste={tPaste - tTranscribe}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
                 }
                 else
                 {
@@ -1168,119 +709,6 @@ namespace WhisperInk
                 // physical key-up, so this synthetic release is the only thing
                 // that tells the OS the key came back up. A stuck Ctrl turns the
                 // next keystroke into Ctrl+<key> (e.g. Ctrl+O pops an Open dialog).
-                _injector.ReleaseAllModifierKeys();
-                Volatile.Write(ref _recState, 0);
-                ResetUi();
-                UpdateStatusLabel();
-            }
-        }
-
-        // ════════════════════════════════════════════════════════════════
-        // BATCH RECORDING MODE (Ctrl+Alt = AnalyzeContext)
-        // ════════════════════════════════════════════════════════════════
-
-        private void StartBatchRecording()
-        {
-            if (string.IsNullOrEmpty(ActiveApiKey) && !GetActiveProvider()!.BaseUrl.Contains("localhost") && !IsLocalProvider)
-            {
-                lblStatus.Content = "No API key!";
-                return;
-            }
-
-            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
-            _lastWavBytes = null;
-
-            try { Clipboard.Clear(); } catch { }
-            MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(100, 100, 255));
-
-            lblStatus.Content = "🎙 AI";
-            lblStatus.Opacity = 1;
-            HistogramPanel.Visibility = Visibility.Visible;
-            _animationTimer.Start();
-
-            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MyRecordings");
-            if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
-            _currentFileName = Path.Combine(folder, "temp_audio.wav");
-
-            _waveIn = new WaveInEvent();
-            if (_selectedDeviceNumber < WaveIn.DeviceCount) _waveIn.DeviceNumber = _selectedDeviceNumber;
-            else _selectedDeviceNumber = 0;
-            _waveIn.WaveFormat = new WaveFormat(16000, 1);
-
-            _writer = new WaveFileWriter(_currentFileName, _waveIn.WaveFormat);
-            _memWavStream = new MemoryStream();
-            _memWavWriter = new WaveFileWriter(new IgnoreDisposeStream(_memWavStream), _waveIn.WaveFormat);
-
-            _waveIn.DataAvailable += OnBatchAudioDataAvailable;
-            _waveIn.StartRecording();
-
-            PlayUiSound(SoundType.Start);
-        }
-
-        private async Task StopBatchRecordingAsync()
-        {
-            if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
-            Log("[diag] StopBatchRecording: enter");
-
-            try
-            {
-                PlayUiSound(SoundType.Stop);
-
-                try { _waveIn?.StopRecording(); } catch { }
-                try { _waveIn?.Dispose(); } catch { }
-                _waveIn = null;
-
-                try { _writer?.Dispose(); } catch { }
-                _writer = null;
-
-                try
-                {
-                    _memWavWriter?.Dispose();
-                    if (_memWavStream != null)
-                    {
-                        _lastWavBytes = _memWavStream.ToArray();
-                        _memWavStream.Dispose();
-                    }
-                }
-                catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
-                finally { _memWavWriter = null; _memWavStream = null; }
-
-                lblStatus.Content = "Processing...";
-                lblStatus.Opacity = 1;
-
-                string selectedText = _injector.GetSelectedText();
-                Log("[diag] StopBatchRecording: pre-transcribe");
-                string? transcribedVoice = await TranscribeAudioAsync(_currentFileName);
-                Log($"[diag] StopBatchRecording: post-transcribe, len={transcribedVoice?.Length ?? -1}");
-
-                if (!string.IsNullOrEmpty(transcribedVoice))
-                {
-                    lblStatus.Content = "AI...";
-                    string? aiResponse = await ProcessAiQueryAsync(selectedText, transcribedVoice);
-                    Log($"[diag] StopBatchRecording: post-AI, len={aiResponse?.Length ?? -1}");
-                    if (!string.IsNullOrEmpty(aiResponse))
-                    {
-                        Log("[diag] StopBatchRecording: pre-paste");
-                        _injector.PasteTextToActiveWindow(aiResponse);
-                        Log("[diag] StopBatchRecording: post-paste, pre-history");
-                        HistoryService.Add(aiResponse);
-                        Log("[diag] StopBatchRecording: post-history");
-                        PlayUiSound(SoundType.Success);
-                    }
-                    else { PlayUiSound(SoundType.Error); lblStatus.Content = "AI error"; }
-                }
-                else { PlayUiSound(SoundType.Error); lblStatus.Content = "Transcribe error"; }
-
-                Log("[diag] StopBatchRecording: exit");
-            }
-            catch (Exception ex)
-            {
-                Log($"[diag] StopBatchRecording: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
-                throw;
-            }
-            finally
-            {
-                // Always release — see StopBatchDictation.
                 _injector.ReleaseAllModifierKeys();
                 Volatile.Write(ref _recState, 0);
                 ResetUi();
@@ -1340,119 +768,9 @@ namespace WhisperInk
             return result;
         }
 
-        private async Task<string?> ProcessAiQueryAsync(string context, string voiceInstruction)
-        {
-            try
-            {
-                string userContent = string.IsNullOrEmpty(context)
-                    ? voiceInstruction
-                    : $"Context:\n{context}\n\nInstruction: {voiceInstruction}";
-
-                var payload = new
-                {
-                    model = ChatModel,
-                    messages = new[] {
-                        new { role = "system", content = _systemPrompt },
-                        new { role = "user", content = userContent }
-                    }
-                };
-
-                using var request = new HttpRequestMessage(HttpMethod.Post, ChatApiUrl);
-                if (!string.IsNullOrEmpty(ActiveApiKey))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ActiveApiKey);
-                request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-                var response = await _httpClient.SendAsync(request);
-                string responseString = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode) return null;
-                using var doc = JsonDocument.Parse(responseString);
-                return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
-            }
-            catch (Exception ex) { Log($"AI error: {ex.Message}"); return null; }
-        }
-
-        private async Task<string?> PostProcessTranscription(string rawText)
-        {
-            try
-            {
-                Log("Post-processing batch transcription...");
-                var messages = new[] {
-                    new { role = "user", content = $"{_postProcessPrompt}\n\nINPUT:\n{rawText}\n\nOUTPUT:\n" }
-                };
-                var payload = new
-                {
-                    model = PostProcessModelName,
-                    messages,
-                    temperature = 0.0
-                };
-
-                using var request = new HttpRequestMessage(HttpMethod.Post, ChatApiUrl);
-                if (!string.IsNullOrEmpty(ActiveApiKey))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", ActiveApiKey);
-                request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
-
-                var response = await _httpClient.SendAsync(request);
-                string responseString = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    Log($"Post-process failed ({response.StatusCode}), using raw transcription");
-                    return rawText;
-                }
-                using var doc = JsonDocument.Parse(responseString);
-                string? corrected = doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
-
-                if (!string.IsNullOrEmpty(corrected))
-                {
-                    if (corrected.StartsWith("OUTPUT:", StringComparison.OrdinalIgnoreCase))
-                        corrected = corrected.Substring(7);
-                    corrected = corrected.Replace("**", "").Replace("*", "").Replace("```", "");
-                    corrected = corrected.Trim();
-                    int blankLine = corrected.IndexOf("\n\n");
-                    if (blankLine > 0) corrected = corrected.Substring(0, blankLine).Trim();
-
-                    if (corrected.StartsWith("(") ||
-                        corrected.Contains("no correction", StringComparison.OrdinalIgnoreCase) ||
-                        corrected.Contains("not clinical", StringComparison.OrdinalIgnoreCase) ||
-                        corrected.Contains("no speech recognition", StringComparison.OrdinalIgnoreCase) ||
-                        corrected.Contains("cannot", StringComparison.OrdinalIgnoreCase) ||
-                        corrected.Contains("I'm sorry", StringComparison.OrdinalIgnoreCase) ||
-                        corrected.Contains("no errors", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Log("Post-process returned commentary, using raw transcription");
-                        return rawText;
-                    }
-                }
-
-                Log($"Post-process done: {corrected?.Length ?? 0} chars");
-                return string.IsNullOrWhiteSpace(corrected) ? rawText : corrected;
-            }
-            catch (Exception ex)
-            {
-                Log($"Post-process error: {ex.Message}, using raw transcription");
-                return rawText;
-            }
-        }
-
         // ── Text input ──────────────────────────────────────────────────
         // Typing, paste-with-clipboard-restore, selection grab, and modifier
         // release all live in TextInjector (_injector).
-
-        private async Task SendTextMessageSafe(string message, CancellationToken ct)
-        {
-            if (_realtimeWs == null || _realtimeWs.State != WebSocketState.Open) return;
-
-            await _wsSendLock.WaitAsync(ct);
-            try
-            {
-                var bytes = Encoding.UTF8.GetBytes(message);
-                await _realtimeWs.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
-            }
-            catch (OperationCanceledException) { } // normal during stop
-            catch (Exception ex) { Log($"WS send failed: {ex.Message}"); }
-            finally { _wsSendLock.Release(); }
-        }
 
         private void ResetUi()
         {
@@ -1550,8 +868,6 @@ namespace WhisperInk
 
             BuildProviderMenu(),
             MenuNode.Separator(),
-            BuildModeMenu(),
-            MenuNode.Separator(),
             BuildMicMenu(),
             new MenuNode
             {
@@ -1559,17 +875,6 @@ namespace WhisperInk
                 Action = () => { _isSoundEnabled = !_isSoundEnabled; SaveConfig(); },
             },
             MenuNode.Separator(),
-            BuildDelayMenu(),
-            MenuNode.Separator(),
-            new MenuNode
-            {
-                Header = "📝 System Prompt",
-                Action = () =>
-                {
-                    var pw = new PromptWindow(_systemPrompt);
-                    if (pw.ShowDialog() == true) { _systemPrompt = pw.PromptText; SaveConfig(); }
-                },
-            },
             new MenuNode
             {
                 Header = "🎯 Context Bias Terms",
@@ -1585,11 +890,6 @@ namespace WhisperInk
             },
             new MenuNode { Header = "📋 History", Action = () => new HistoryWindow().Show() },
             MenuNode.Separator(),
-            new MenuNode
-            {
-                Header = _postProcessBatch ? "🩺 Med Correction: ON" : "🩺 Med Correction: OFF",
-                Action = () => { _postProcessBatch = !_postProcessBatch; SaveConfig(); UpdateStatusLabel(); },
-            },
             BuildGpuBackendMenu(),
             MenuNode.Separator(),
             new MenuNode { Header = "📂 Open config folder", ToolTip = ConfigFile, Action = () => OpenExplorerSelect(ConfigFile) },
@@ -1636,35 +936,6 @@ namespace WhisperInk
             return new MenuNode { Header = $"🔌 Provider: {GetActiveProvider()?.Name ?? "?"}", Children = children };
         }
 
-        private MenuNode BuildModeMenu() => new()
-        {
-            Header = $"⚡ Mode: {_dictationMode}",
-            Children = new List<MenuNode>
-            {
-                new MenuNode
-                {
-                    Header = "Realtime (live typing)",
-                    IsChecked = IsRealtimeMode,
-                    Action = () =>
-                    {
-                        if (!ActiveSupportsRealtime)
-                        {
-                            MessageBox.Show("Current provider does not support Mistral Realtime.\nSwitch to Mistral or use Batch mode.",
-                                "Realtime Unavailable", MessageBoxButton.OK, MessageBoxImage.Information);
-                            return;
-                        }
-                        _dictationMode = "Realtime"; SaveConfig(); UpdateStatusLabel();
-                    },
-                },
-                new MenuNode
-                {
-                    Header = "Batch (record → paste)",
-                    IsChecked = !IsRealtimeMode,
-                    Action = () => { _dictationMode = "Batch"; SaveConfig(); UpdateStatusLabel(); },
-                },
-            },
-        };
-
         private MenuNode BuildMicMenu()
         {
             var children = new List<MenuNode>();
@@ -1680,31 +951,6 @@ namespace WhisperInk
                 });
             }
             return new MenuNode { Header = "🎙 Microphone", Children = children };
-        }
-
-        private MenuNode BuildDelayMenu()
-        {
-            var children = new List<MenuNode>();
-            foreach (int ms in new[] { 240, 480, 1000, 1500, 2400 })
-            {
-                int delayMs = ms; // capture for the closure
-                string label = ms switch
-                {
-                    240  => "240ms (fastest)",
-                    480  => "480ms (recommended)",
-                    1000 => "1000ms",
-                    1500 => "1500ms",
-                    2400 => "2400ms (most accurate)",
-                    _    => $"{ms}ms"
-                };
-                children.Add(new MenuNode
-                {
-                    Header = label,
-                    IsChecked = _targetStreamingDelayMs == ms,
-                    Action = () => { _targetStreamingDelayMs = delayMs; SaveConfig(); },
-                });
-            }
-            return new MenuNode { Header = "⏱ Streaming Delay", Children = children };
         }
 
         private MenuNode BuildGpuBackendMenu()

@@ -10,14 +10,12 @@ namespace WhisperInk
     /// <see cref="TextInjector.SyntheticMarkerValue"/> are our own
     /// injections and never treated as physical keys).
     ///
-    /// Hotkeys: Ctrl+Space hold-to-dictate, Ctrl+Alt hold-to-instruct.
+    /// Hotkey: Ctrl+Space hold-to-dictate.
     /// All callbacks fire on the hook thread — the host wraps them in
     /// Dispatcher.BeginInvoke.
     /// </summary>
     public sealed class KeyboardHookService : IDisposable
     {
-        public enum HotkeyMode { Dictation, AnalyzeContext }
-
         [DllImport("user32.dll")]
         private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc callback, IntPtr hInstance, uint threadId);
 
@@ -40,10 +38,6 @@ namespace WhisperInk
         private const int WM_SYSKEYUP = 0x0105;
         private const int VK_LCONTROL = 0xA2;
         private const int VK_RCONTROL = 0xA3;
-        private const int VK_LWIN = 0x5B;
-        private const int VK_RWIN = 0x5C;
-        private const int VK_LMENU = 0xA4;
-        private const int VK_RMENU = 0xA5;
         private const int VK_SPACE = 0x20;
 
         [StructLayout(LayoutKind.Sequential)]
@@ -61,8 +55,6 @@ namespace WhisperInk
         private readonly Func<bool> _isRecording;
         private readonly Action<IntPtr> _onDictationStart; // arg: foreground hwnd captured at press
         private readonly Action _onDictationStop;
-        private readonly Action _onAnalyzeStart;
-        private readonly Action _onAnalyzeStop;
 
         private IntPtr _hookId = IntPtr.Zero;
         // Field, not a local: the hook keeps a native pointer to this
@@ -70,25 +62,17 @@ namespace WhisperInk
         private LowLevelKeyboardProc? _hookCallback;
 
         private bool _ctrlPressed;
-        private bool _winPressed;
-        private bool _altPressed;
         private bool _spacePressed;
         private bool _suppressingKeys;
-
-        public HotkeyMode CurrentMode { get; private set; } = HotkeyMode.Dictation;
 
         public KeyboardHookService(
             Func<bool> isRecording,
             Action<IntPtr> onDictationStart,
-            Action onDictationStop,
-            Action onAnalyzeStart,
-            Action onAnalyzeStop)
+            Action onDictationStop)
         {
             _isRecording = isRecording;
             _onDictationStart = onDictationStart;
             _onDictationStop = onDictationStop;
-            _onAnalyzeStart = onAnalyzeStart;
-            _onAnalyzeStop = onAnalyzeStop;
         }
 
         public void Install()
@@ -121,7 +105,7 @@ namespace WhisperInk
                         if (vkCode == VK_SPACE) _spacePressed = isDown;
                         else _ctrlPressed = isDown;
 
-                        if (isUp && _isRecording() && CurrentMode == HotkeyMode.Dictation)
+                        if (isUp && _isRecording())
                         {
                             if (!_ctrlPressed || !_spacePressed)
                                 _onDictationStop();
@@ -136,39 +120,15 @@ namespace WhisperInk
                 if (vkCode == VK_LCONTROL || vkCode == VK_RCONTROL)
                 {
                     if (!isSynthetic) _ctrlPressed = isDown;
-                    if (isUp && _isRecording() && CurrentMode == HotkeyMode.AnalyzeContext)
-                    {
-                        if (!_ctrlPressed || !_altPressed)
-                            _onAnalyzeStop();
-                    }
                 }
                 else if (vkCode == VK_SPACE)
                 {
                     if (!isSynthetic) _spacePressed = isDown;
                     if (isDown && !isSynthetic && _ctrlPressed && !_isRecording() && !_suppressingKeys)
                     {
-                        CurrentMode = HotkeyMode.Dictation;
                         _suppressingKeys = true;
                         _onDictationStart(GetForegroundWindow());
                         return (IntPtr)1;
-                    }
-                }
-                else if (vkCode == VK_LWIN || vkCode == VK_RWIN)
-                {
-                    _winPressed = isDown;
-                }
-                else if (vkCode == VK_LMENU || vkCode == VK_RMENU)
-                {
-                    _altPressed = isDown;
-                    if (isDown && _ctrlPressed && !_isRecording())
-                    {
-                        CurrentMode = HotkeyMode.AnalyzeContext;
-                        _onAnalyzeStart();
-                    }
-                    if (isUp && _isRecording() && CurrentMode == HotkeyMode.AnalyzeContext)
-                    {
-                        if (!_ctrlPressed || !_altPressed)
-                            _onAnalyzeStop();
                     }
                 }
             }
