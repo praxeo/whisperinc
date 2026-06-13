@@ -683,6 +683,7 @@ namespace WhisperInk
                             if (string.IsNullOrWhiteSpace(p.LocalGpuBackend))  p.LocalGpuBackend  = def.LocalGpuBackend;
                             if (string.IsNullOrWhiteSpace(p.LocalModelFolder)) p.LocalModelFolder = def.LocalModelFolder;
                             if (p.LocalServerPort == null)                     p.LocalServerPort  = def.LocalServerPort;
+                            if (string.IsNullOrWhiteSpace(p.LocalPuncModel))   p.LocalPuncModel   = def.LocalPuncModel;
                         }
                     }
                 }

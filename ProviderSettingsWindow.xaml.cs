@@ -258,6 +258,7 @@ namespace WhisperInk
             LocalGpuBackend  = src.LocalGpuBackend,
             LocalModelFolder = src.LocalModelFolder,
             LocalBeamSize    = src.LocalBeamSize,
+            LocalPuncModel   = src.LocalPuncModel,
         };
     }
 }

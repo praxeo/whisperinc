@@ -40,6 +40,7 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 | `CrispAsrServerTranscriber.cs` | Generic adapter for `crispasr.exe --server`. Reads port / model glob / backend hint / GPU backend / model folder from the `ApiProvider`. One class for Parakeet, Cohere, Voxtral, Granite, Canary, …  |
 | `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe INT4/INT8 (encoder-decoder, 30s chunking, 5s overlap). |
 | `GoogleChirp3Transcriber.cs` | Google Cloud STT v2 with OAuth + base64 JSON body and `adaptation.phraseSets` biasing. |
+| `SonioxTranscriber.cs` | Soniox async REST job (`api.soniox.com/v1`): upload WAV → create transcription → poll status → fetch token array → concatenate → best-effort delete of job+file. Bias terms ride the v4 `context.terms` field. Not OpenAI-compatible, so it bypasses `HttpTranscriber`. |
 | `ProviderSettingsWindow.xaml(.cs)` | GUI for URLs, keys, auth header, model field, bias mode, Scribe keyterms. ElevenLabs-only fields hide for other providers. |
 | `ContextBiasWindow.xaml(.cs)` | Global context-bias term list. |
 | `PromptWindow.xaml(.cs)` | System-prompt editor for Ctrl+Alt AI mode. |
@@ -65,8 +66,8 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 - **Shared HTTP/cloud knobs**: `BaseUrl`, `TranscriptionEndpoint` (override), `AuthHeaderName` (blank = Bearer, `xi-api-key` for ElevenLabs), `ModelFieldName` (`model` vs `model_id`), `TranscriptionModel`, `ChatModel`, `PostProcessModel`, `SupportsRealtime`, `SupportsTranscription`, `TranscriptionTemperature` (nullable)
 - **Bias**: `ContextBiasMode`: `"none"` | `"whisper_prompt"` (OpenAI-compatible `prompt` field) | `"cohere_terms"` (JSON array). Independent of the mode, LocalCrispAsrServer providers ALWAYS additionally send bias terms as the CrispASR v0.7+ `hotwords` form field (comma-separated) — real CTC/TDT phrase boost on Parakeet, prompt injection on Voxtral/Qwen3-style decoders; older servers ignore the unknown field.
 - **ElevenLabs-only**: `ScribeKeytermsRaw` (newline-delimited, capped at 1000 terms / <50 chars / ≤5 words each), `TagAudioEvents`, `NoVerbatim`
-- **TranscriberKind**: `Http` | `LocalOnnx` | `LocalCrispAsrServer` | `GoogleChirp3` — picks the `ITranscriber` implementation
-- **LocalCrispAsrServer-only**: `LocalServerPort`, `LocalModelGlob` (e.g. `"parakeet-*.gguf"`), `LocalBackendHint` (e.g. `"cohere"` when auto-detect doesn't cover the GGUF), `LocalGpuBackend` (blank → fall back to global `CrispGpuBackend`), `LocalModelFolder` (blank → `cohere-gguf`), `LocalBeamSize` (nullable int → `beam_size` form field; null = greedy; needs CrispASR v0.7+; editable in provider settings)
+- **TranscriberKind**: `Http` | `LocalOnnx` | `LocalCrispAsrServer` | `GoogleChirp3` | `Soniox` — picks the `ITranscriber` implementation
+- **LocalCrispAsrServer-only**: `LocalServerPort`, `LocalModelGlob` (e.g. `"parakeet-*.gguf"`), `LocalBackendHint` (e.g. `"cohere"` when auto-detect doesn't cover the GGUF), `LocalGpuBackend` (blank → fall back to global `CrispGpuBackend`), `LocalModelFolder` (blank → `cohere-gguf`), `LocalBeamSize` (nullable int → `beam_size` form field; null = greedy; needs CrispASR v0.7+; editable in provider settings), `LocalPuncModel` (server-side punctuation model → crispasr `--punc-model`: `"fullstop"`/`"auto"`/`"firered"`/`"punctuate-all"`; blank → none; restores punctuation + sentence case for non-PnC backends like Parakeet RNNT/CTC — **requires the local #161-punc CrispASR build**, see the regression note below)
 
 Default providers (`AppConfig.CreateDefaults()`):
 
@@ -78,16 +79,15 @@ Default providers (`AppConfig.CreateDefaults()`):
 | `cohere-api` | Cohere Transcribe API | `Http` | Cohere v2, temp 0.1, `cohere_terms` |
 | `cohere-onnx` | Cohere Local (ONNX) | `LocalOnnx` | In-process; `CohereOnnxTranscriber` |
 | `cohere-gguf-server` | Cohere Local (CrispASR, CPU) | `LocalCrispAsrServer` | Port 8766, `--backend cohere`, `cpu` |
-| `cohere-gguf-cuda-server` | Cohere Local (CrispASR, CUDA) | `LocalCrispAsrServer` | Port 8767, `--backend cohere`, `cuda` |
-| `cohere-gguf-cuda-server-q8` | Cohere Local (CrispASR, CUDA Q8) | `LocalCrispAsrServer` | Port 8768, Q8 GGUF |
 | `qwen3-asr` | Qwen3-ASR Local | `Http` | Port 8102, user-managed external server |
-| `parakeet-local` | Parakeet Local (CrispASR) | `LocalCrispAsrServer` | Port 8103, auto-detect backend |
-| `cohere-local-q4` | Cohere Local Q4 (CrispASR) | `LocalCrispAsrServer` | Port 8104, Q4_K GGUF, `--backend cohere` |
+| `parakeet-local` | Parakeet Local (CrispASR) | `LocalCrispAsrServer` | Port 8103, TDT 0.6b, glob `parakeet-tdt-*.gguf`, auto-detect backend |
+| `parakeet-rnnt-local` | Parakeet RNNT 1.1b Local (CrispASR) | `LocalCrispAsrServer` | Port 8109, RNNT 1.1b q4_k, glob `parakeet-rnnt-1.1b-*.gguf`, auto-detect backend, server-side punctuation via `LocalPuncModel="fullstop"` (RNNT emits no punctuation natively) |
 | `cohere-local-q6k` | Cohere Local Q6_K (CrispASR) | `LocalCrispAsrServer` | Port 8105, Q6_K GGUF, near-F16 accuracy |
 | `voxtral-local` | Voxtral Local (CrispASR) | `LocalCrispAsrServer` | Port 8106, `--backend voxtral`, prompt bias (3B GGUF) |
 | `voxtral4b-local` | Voxtral 4B Realtime Local (CrispASR) | `LocalCrispAsrServer` | Port 8108, `--backend voxtral4b` — upstream treats the 4B realtime checkpoint as a distinct backend from the 3B |
 | `granite-local` | Granite Speech 4.1 Local (CrispASR) | `LocalCrispAsrServer` | Port 8107, `--backend granite`, prompt bias |
 | `google-chirp3` | Google Chirp 3 | `GoogleChirp3` | OAuth + JSON body, native `phraseSets` biasing |
+| `soniox` | Soniox | `Soniox` | Async REST (`api.soniox.com/v1`), `stt-async-v5`, Bearer key, `context.terms` biasing |
 
 ### Dispatch pipeline (`TranscriberFactory` + `ITranscriber`)
 
@@ -103,7 +103,7 @@ The factory caches one `ITranscriber` per provider id. Switching providers calls
 
 ### CrispAsrServerTranscriber (the generic one)
 
-The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X]` (plus `-ng` when the effective backend is `cpu`, or `--gpu-backend X` when it's a specific GPU; `auto` passes nothing so ggml's `init_best` picks CUDA > Vulkan > CPU per what the binary was built with), waits up to **120s** for `/health` (v0.7 auto-warms the model in server mode, so first health on a CUDA build includes VRAM upload + warmup), and posts subsequent audio to `/v1/audio/transcriptions` with `language`, optional `prompt`, `hotwords` (whenever bias terms exist), and optional `beam_size`. Thread count is capped at `Min(8, ProcessorCount)` deliberately: ggml ASR scales with physical cores/memory bandwidth, not SMT, and `-t` barely matters on GPU backends. Server keeps model resident; process tree killed on `Dispose()`.
+The path for every GGUF model. The constructor reads everything from the `ApiProvider`: port, model glob, backend hint, GPU backend (with fallback to the global `CrispGpuBackend`), model folder. First `TranscribeAsync` call lazy-spawns `crispasr.exe --server -m <model> --host 127.0.0.1 --port <port> -t <threads> -np [--backend X] [--punc-model FNAME]` (plus `-ng` when the effective backend is `cpu`, or `--gpu-backend X` when it's a specific GPU; `auto` passes nothing so ggml's `init_best` picks CUDA > Vulkan > CPU per what the binary was built with), waits up to **120s** for `/health` (v0.7 auto-warms the model in server mode, so first health on a CUDA build includes VRAM upload + warmup), and posts subsequent audio to `/v1/audio/transcriptions` with `language`, optional `prompt`, `hotwords` (whenever bias terms exist), and optional `beam_size`. Thread count is capped at `Min(8, ProcessorCount)` deliberately: ggml ASR scales with physical cores/memory bandwidth, not SMT, and `-t` barely matters on GPU backends. Server keeps model resident; process tree killed on `Dispose()`. When `LocalPuncModel` is set, the spawn adds `--punc-model <model>` so the resident server restores punctuation per segment (FireRedPunc) — stock CrispASR applied `--punc-model` only in CLI one-shot mode, so this requires the local #161-punc build (see the regression note).
 
 The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `CohereGgufCudaServerTranscriber.cs`, and `CohereGgufCudaQ8ServerTranscriber.cs` files have been deleted — the same providers now use this generic class via config-only entries.
 
@@ -114,6 +114,10 @@ The legacy `CohereGgufTranscriber.cs`, `CohereGgufServerTranscriber.cs`, `Cohere
 - INT4 from `cstr/cohere-transcribe-onnx-int4`; swap filenames for INT8
 - 30s max chunk, 5s overlap, greedy autoregressive decoding
 - CPU-only via `Microsoft.ML.OnnxRuntime.Gpu.Windows` (DirectML loaded but slow for autoregressive decoding; CUDA path blocked pending cuDNN for CUDA 13.0)
+
+### Soniox async REST (SonioxTranscriber)
+
+Soniox has no synchronous "POST audio → text" endpoint, so each dictation is a four-step job on `api.soniox.com/v1` (Bearer auth): `POST /files` (multipart) → `POST /transcriptions` (JSON: `model`, `file_id`, `language_hints`, optional `context.terms`) → poll `GET /transcriptions/{id}` until `status` is `completed`/`error` → `GET /transcriptions/{id}/transcript`. The transcript is a `tokens[]` array whose text carries its own leading spacing, so concatenation rebuilds the sentence (a flat `text` field is a fallback). Polling is every 400 ms with a 120 s ceiling; each request is bounded by the shared 15 s `HttpClient` timeout. A `finally` block best-effort `DELETE`s both the transcription and the uploaded file (even on cancel/error) so nothing accumulates under the key. Default model `stt-async-v5` (current GA as of 2026-06-11; `stt-async-v4` is deprecated, removed 2026-06-30) is user-editable, so a Soniox model rename is a config edit, not a recompile. Context-bias terms map straight onto `context.terms` (real vocabulary steering), so `ContextBiasMode` is ignored — same approach as Google Chirp 3.
 
 ### Post-processing
 
@@ -175,7 +179,9 @@ The script downloads the asset via `gh`, stops any running crispasr server (Whis
 
 A CUDA build with global backend `auto` lights up NVIDIA GPUs automatically (`init_best`: CUDA > Vulkan > CPU); presets pinned `LocalGpuBackend: "cpu"` still run CPU via `-ng`. v0.7 also brings server-mode hotwords/beam-search fields (wired into `CrispAsrServerTranscriber`), auto-warmup at server start, and a `/load` model-hot-swap endpoint (unused so far). Upstream has no CLAUDE.md — its agent file is a 3-line `AGENTS.md`; the real docs are `README.md`, `docs/` (server.md, cli.md), `PERFORMANCE.md`, `ARCHITECTURE.md`.
 
-**⚠️ v0.7.x performance regression — deployed binary is the 2026-05-03 local CUDA build, NOT v0.7.1.** Measured A/B on the desktop (8.4s clip, q6_k cohere, warm server requests): May-3 build CUDA **0.4s (~20× RT)** / CPU 2.7s; v0.7.1 CUDA 4.6s / CPU 6.0s / Vulkan 27s+. v0.7.1 regressed cohere-CUDA ~10× and CPU ~2× vs the May build (regression window: clone sha `5c0ac1f` → `v0.7.1` 75e35f76, bisectable). Tracked upstream as [CrispASR#161](https://github.com/CrispStrobe/CrispASR/issues/161) (filed 2026-06-10). Root cause (confirmed 2026-06-11 on a local build of the fix, `main` @ `4b27392f`): v0.7 defaulted **`beam_size=5` for every backend** in CLI *and* server mode, and cohere's beam search snapshotted the KV cache through host memory per beam per step — `4b27392f` keeps snapshots on-device (warm q6_k CUDA: beam-5 0.85–0.94s, `-bs 1` greedy 0.31s vs v0.7.1's 4.6s). Parakeet's slice of the regression was purely the beam-5 default (TDT beam ≈4.5× cost; `beam_size=1` restores 0.8s). Once a release ships the fix, consider `LocalBeamSize: 1` on latency-sensitive presets — a null `LocalBeamSize` now means *server-default beam 5*, not greedy, on v0.7+. The v0.7.1 binaries are archived in `cohere-gguf\.v0.7.1-cuda-regressed\`; the old set was restored from `.old-2026-06-09-2232\`. Re-run `update-crispasr.ps1` only after upstream fixes the regression (watch #161) — and A/B against the May build before keeping it. Consequence: the `hotwords`/`beam_size` fields WhisperInk now sends are silently ignored by the deployed pre-v0.7 binary (harmless; they activate when a fixed upstream build lands). The May build predates server auto-warmup, so the first dictation after a server (re)spawn pays ~2s of spawn+health inside the logged "took" time — warm dictations show the true ~0.3-0.5s.
+**⚠️ v0.7.x performance regression — desktop now runs the local CUDA build of the fix (`main` @ `4b27392f`), deployed 2026-06-12.** History: v0.7.1 regressed cohere-CUDA ~10× and CPU ~2× vs the 2026-05-03 build (8.4s clip, q6_k cohere, warm: May CUDA **0.4s** / CPU 2.7s vs v0.7.1 4.6s / 6.0s / Vulkan 27s+). Tracked upstream as [CrispASR#161](https://github.com/CrispStrobe/CrispASR/issues/161) (filed 2026-06-10, still open — no release with the fix yet). Root cause (confirmed 2026-06-11): v0.7 defaulted **`beam_size=5` for every backend** in CLI *and* server mode, and cohere's beam search snapshotted the KV cache through host memory per beam per step — `4b27392f` keeps snapshots on-device (warm q6_k CUDA: beam-5 0.85–0.94s, `-bs 1` greedy **0.31s**, beating the May build). Parakeet's slice was purely the beam-5 default (TDT beam ≈4.5× cost; `beam_size=1` restores 0.8s). The verified `4b27392f` build (from `CrispASR\build-161\bin\Release\`) is deployed in `cohere-gguf\`; the May-3 set is backed up in `.old-2026-06-12-1354\` and v0.7.1 stays archived in `.v0.7.1-cuda-regressed\`. Desktop config.json sets `LocalBeamSize: 1` on the six cohere/parakeet presets (null = *server-default beam 5*, not greedy, on v0.7+); voxtral/granite left at server default. The `hotwords`/`beam_size` fields WhisperInk sends are now actually honored on the desktop. The laptop still runs a pre-v0.7 binary. Upstream pushed a further "beam wiring" fix to `main` on 2026-06-12 (re: the beam-default question) — unverified; A/B any newer build or release against `4b27392f` before switching (watch #161).
+
+**⚠️ The deployed `cohere-gguf\` binary now carries a LOCAL patch on top of `4b27392f`: server-mode punctuation (#161-punc), rebuilt & redeployed 2026-06-12.** Stock CrispASR applies `--punc-model` only in CLI one-shot mode; the server (`examples/cli/crispasr_server.cpp`) ignored the flag, so non-PnC backends (Parakeet RNNT/CTC) returned lowercase, unpunctuated text through WhisperInk's server path. The patch is ~6 additive edits to `crispasr_server.cpp`: load a resident `fireredpunc_context` at server start when `--punc-model` is set (same alias resolver the CLI uses — `auto`/`firered`/`fullstop`/`punctuate-all`, auto-downloads to `~/.cache/crispasr`), thread it into `do_transcribe`, and apply `fireredpunc_process` per segment after the existing punctuation-strip block (serialized on a private mutex). Verified: RNNT+`fullstop` now returns `"The patient presents … shortness of breath. Vitals are stable. … oxygen?"` via `/v1/audio/transcriptions`; warm **≈1.1s at `beam_size=1`** (the punc pass adds only ~100 ms; the ~4s seen with no `beam_size` is RNNT beam-5, not punctuation). The patch lives in the sibling `CrispASR` clone as an **uncommitted local change — NOT upstream**, so it must be re-applied after any CrispASR pull/update (same status as the ggml-blas patch). Pre-patch `crispasr.exe`+`crispasr.dll` backed up in `cohere-gguf\.pre-punc-2026-06-12\`. WhisperInk drives it via `ApiProvider.LocalPuncModel` (`parakeet-rnnt-local` → `"fullstop"`); the field is backfilled in `LoadConfig` like the other `Local*` fields. Build target is **`crispasr-cli`** (not `whisper-cli`).
 
 ### CrispASR native build (alternative: from source)
 
@@ -199,15 +205,15 @@ Config-only — no recompile required.
    {
      "Id": "canary-local",
      "Name": "Canary Local (CrispASR)",
-     "BaseUrl": "http://localhost:8109",
+     "BaseUrl": "http://localhost:8110",
      "TranscriberKind": "LocalCrispAsrServer",
-     "LocalServerPort": 8109,
+     "LocalServerPort": 8110,
      "LocalModelGlob": "canary-*.gguf",
      "ContextBiasMode": "none",
      "Language": "en"
    }
    ```
-   (Ports 8103–8108 are taken by the shipped presets.) Set `LocalBackendHint` if the GGUF doesn't auto-detect (Cohere needs `"cohere"`, Voxtral 3B `"voxtral"`, Voxtral 4B Realtime `"voxtral4b"`, Granite `"granite"`).
+   (Ports 8103 and 8105–8109 are taken by the shipped presets — 8109 is `parakeet-rnnt-local`, which is why this canary example moved to 8110; the two Parakeet presets share `cohere-gguf\` and rely on disjoint globs (`parakeet-tdt-*` vs `parakeet-rnnt-1.1b-*`) so neither hijacks the other. 8104/8767/8768 belonged to the retired cuda/cuda-q8/Q4 cohere presets — removed from `CreateDefaults()` 2026-06-12 because the additive default-merge in `LoadConfig` resurrected them on every launch after the user deleted them. Their Ids still resolve in `KindForId`/`HealthProbe`/`ProviderDiagnostics` for configs that carry them.) Set `LocalBackendHint` if the GGUF doesn't auto-detect (Cohere needs `"cohere"`, Voxtral 3B `"voxtral"`, Voxtral 4B Realtime `"voxtral4b"`, Granite `"granite"`).
 3. Restart WhisperInk. The provider appears in the tray menu under 🔌 Provider, and `CrispAsrServerTranscriber` lazy-spawns the server on first dictation.
 
 For a permanent default (shipped to every install), add the same entry to `AppConfig.CreateDefaults()` so new users get it on first run.

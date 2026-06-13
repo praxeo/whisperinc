@@ -50,6 +50,7 @@ namespace WhisperInk
             TranscriberKind.LocalOnnx           => new CohereOnnxTranscriber(provider, _log),
             TranscriberKind.LocalCrispAsrServer => new CrispAsrServerTranscriber(provider, _resolveGlobalGpuBackend, _log),
             TranscriberKind.GoogleChirp3        => new GoogleChirp3Transcriber(provider, _log),
+            TranscriberKind.Soniox              => new SonioxTranscriber(provider, _http, _log),
             _                                   => new HttpTranscriber(provider, _http, _log),
         };
 

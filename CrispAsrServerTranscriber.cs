@@ -42,6 +42,7 @@ namespace WhisperInk
         private readonly int _port;
         private readonly int _threads;
         private readonly string? _backendHint;
+        private readonly string? _puncModel;
         private readonly string _inferenceUrl;
         private readonly string _healthUrl;
 
@@ -73,6 +74,7 @@ namespace WhisperInk
             // threads oversubscribe 8-core laptops for no desktop gain.
             _threads = Math.Min(8, Environment.ProcessorCount);
             _backendHint = string.IsNullOrWhiteSpace(provider.LocalBackendHint) ? null : provider.LocalBackendHint;
+            _puncModel = string.IsNullOrWhiteSpace(provider.LocalPuncModel) ? null : provider.LocalPuncModel;
             _inferenceUrl = $"http://{ServerHost}:{_port}/v1/audio/transcriptions";
             _healthUrl = $"http://{ServerHost}:{_port}/health";
         }
@@ -205,6 +207,15 @@ namespace WhisperInk
                 {
                     psi.ArgumentList.Add("--gpu-backend");
                     psi.ArgumentList.Add(gpuBackend);
+                }
+
+                // Server-side punctuation restoration for non-PnC backends
+                // (Parakeet RNNT/CTC). Honored by the #161-punc CrispASR build;
+                // older servers ignore the unknown flag.
+                if (!string.IsNullOrWhiteSpace(_puncModel))
+                {
+                    psi.ArgumentList.Add("--punc-model");
+                    psi.ArgumentList.Add(_puncModel);
                 }
 
                 _serverProc = new Process { StartInfo = psi };

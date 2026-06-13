@@ -16,6 +16,7 @@ namespace WhisperInk
         LocalOnnx,            // In-process ONNX inference (CohereOnnxTranscriber)
         LocalCrispAsrServer,  // Auto-spawned crispasr.exe --server (all GGUF backends)
         GoogleChirp3,         // Google Cloud STT v2 with OAuth + JSON body
+        Soniox,               // Soniox async REST job: upload → create → poll → transcript (SonioxTranscriber)
     }
 
     public class ApiProvider
@@ -147,6 +148,15 @@ namespace WhisperInk
         // servers ignore unknown fields). Beam search is implemented for
         // Cohere, Parakeet TDT/RNNT, Canary, FunASR and others.
         public int? LocalBeamSize { get; set; } = null;
+
+        // Optional server-side punctuation model, passed to crispasr.exe as
+        // --punc-model (e.g. "fullstop", "auto"/"firered", "punctuate-all", or a
+        // direct GGUF path). Blank → none. Restores punctuation + sentence case
+        // for backends that emit raw lowercase text (Parakeet RNNT/CTC). Requires
+        // a CrispASR build whose SERVER honors --punc-model — stock v0.7 applied
+        // it only in CLI one-shot mode; the in-tree #161-punc patch wires it into
+        // the persistent server (load once, FireRedPunc per segment).
+        public string LocalPuncModel { get; set; } = "";
 
         public List<string> GetValidatedKeyterms(out List<string> warnings)
         {
@@ -306,36 +316,12 @@ namespace WhisperInk
                 LocalBackendHint = "cohere",
                 LocalGpuBackend = "cpu",
             },
-            new ApiProvider
-            {
-                Id = "cohere-gguf-cuda-server",
-                Name = "Cohere Local (CrispASR server, CUDA)",
-                BaseUrl = "http://localhost:8767",
-                TranscriptionModel = "cohere",
-                SupportsTranscription = true,
-                ContextBiasMode = "none",
-                Language = "en",
-                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
-                LocalServerPort = 8767,
-                LocalModelGlob = "cohere-transcribe-*.gguf",
-                LocalBackendHint = "cohere",
-                LocalGpuBackend = "cuda",
-            },
-            new ApiProvider
-            {
-                Id = "cohere-gguf-cuda-server-q8",
-                Name = "Cohere Local (CrispASR server, CUDA Q8)",
-                BaseUrl = "http://localhost:8768",
-                TranscriptionModel = "cohere",
-                SupportsTranscription = true,
-                ContextBiasMode = "cohere_terms",
-                Language = "en",
-                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
-                LocalServerPort = 8768,
-                LocalModelGlob = "cohere-transcribe-q8_0.gguf",
-                LocalBackendHint = "cohere",
-                LocalGpuBackend = "cuda",
-            },
+            // The cuda/cuda-q8 server presets (ports 8767/8768) and the Q4
+            // preset (8104) were removed from the defaults 2026-06-12:
+            // cohere-local-q6k covers the GPU path (Q6_K ≈ F16 accuracy) and
+            // cohere-gguf-server stays as the pinned-CPU fallback. The Ids
+            // remain valid in KindForId/HealthProbe/ProviderDiagnostics so
+            // configs that still carry them keep working.
             new ApiProvider
             {
                 Id = "qwen3-asr",
@@ -353,9 +339,12 @@ namespace WhisperInk
             },
             new ApiProvider
             {
-                // User-managed external CrispASR server (run by hand:
-                // `crispasr.exe --server -m parakeet.gguf --port 8103`).
-                // Talks OpenAI multipart — Http branch covers it.
+                // Parakeet TDT 0.6b — auto-spawned CrispASR server on port 8103.
+                // Glob is pinned to the TDT family on purpose: the RNNT 1.1b
+                // preset below shares the cohere-gguf\ folder, and a bare
+                // "parakeet-*.gguf" would match BOTH files (EnumerateFiles
+                // returns "rnnt" before "tdt", so it would silently hijack this
+                // preset). CrispASR auto-detects Parakeet — no backend hint.
                 Id = "parakeet-local",
                 Name = "Parakeet Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8103",
@@ -366,32 +355,39 @@ namespace WhisperInk
                 Language = "en",
                 TranscriberKind = TranscriberKind.LocalCrispAsrServer,
                 LocalServerPort = 8103,
-                LocalModelGlob = "parakeet-*.gguf",
-                // No backend hint — CrispASR auto-detects Parakeet.
+                LocalModelGlob = "parakeet-tdt-*.gguf",
             },
             new ApiProvider
             {
-                // Cohere Transcribe Q4_K — auto-spawned CrispASR server on
-                // port 8104. Cohere GGUFs don't expose the backend marker
-                // CrispASR auto-detect needs, so the explicit hint is required.
-                Id = "cohere-local-q4",
-                Name = "Cohere Local Q4 (CrispASR, auto-spawn)",
-                BaseUrl = "http://localhost:8104",
-                TranscriptionEndpoint = "http://localhost:8104/v1/audio/transcriptions",
-                TranscriptionModel = "cohere",
+                // Parakeet RNNT 1.1b — auto-spawned CrispASR server on port 8109.
+                // Larger sibling of the TDT 0.6b preset above
+                // (cstr/parakeet-rnnt-1.1b-GGUF, q4_k ≈770 MB). Real CTC/transducer
+                // hotword biasing, same as TDT. CrispASR auto-detects the RNNT
+                // backend from GGUF metadata — no hint. RNNT beam search is costly
+                // like TDT's, so per-machine config.json pins LocalBeamSize=1 for a
+                // greedy sub-second decode (null here = server-default beam-5).
+                Id = "parakeet-rnnt-local",
+                Name = "Parakeet RNNT 1.1b Local (CrispASR, auto-spawn)",
+                BaseUrl = "http://localhost:8109",
+                TranscriptionEndpoint = "http://localhost:8109/v1/audio/transcriptions",
+                TranscriptionModel = "parakeet",
                 SupportsTranscription = true,
                 ContextBiasMode = "none",
                 Language = "en",
                 TranscriberKind = TranscriberKind.LocalCrispAsrServer,
-                LocalServerPort = 8104,
-                LocalModelGlob = "cohere-transcribe-q4_k.gguf",
-                LocalBackendHint = "cohere",
+                LocalServerPort = 8109,
+                LocalModelGlob = "parakeet-rnnt-1.1b-*.gguf",
+                // RNNT emits no punctuation; restore it server-side via FireRedPunc
+                // (fullstop multilingual model). Needs the #161-punc CrispASR build.
+                LocalPuncModel = "fullstop",
             },
             new ApiProvider
             {
                 // Cohere Transcribe Q6_K — auto-spawned CrispASR server on
                 // port 8105. Q6_K is mixed-precision K-quant, near-F16 accuracy
                 // at essentially the same RTFx (~1.05× on 8 CPU threads).
+                // Cohere GGUFs don't expose the backend marker CrispASR
+                // auto-detect needs, so the explicit hint is required.
                 Id = "cohere-local-q6k",
                 Name = "Cohere Local Q6_K (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8105",
@@ -484,6 +480,34 @@ namespace WhisperInk
                 ContextBiasMode = "none",
                 Language = "en",
                 TranscriberKind = TranscriberKind.GoogleChirp3,
+            },
+            new ApiProvider
+            {
+                // Soniox Speech-to-Text — async REST API (api.soniox.com/v1).
+                // Not OpenAI-compatible: each dictation is a multi-step job
+                // (upload WAV → create transcription → poll status → fetch the
+                // token array), so SonioxTranscriber handles it, not the generic
+                // HTTP multipart path. ApiKey holds the Soniox API key (sent as
+                // Authorization: Bearer). TranscriptionModel is the async model
+                // id — user-editable so a Soniox model rename is a config edit,
+                // not a recompile.
+                //
+                // ContextBiasMode stays "none" because biasing doesn't flow
+                // through the generic switch — SonioxTranscriber maps the global
+                // ContextBiasTerms into the v4 `context.terms` field directly
+                // (real vocabulary steering), same pattern as Google Chirp 3.
+                Id = "soniox",
+                Name = "Soniox",
+                BaseUrl = "https://api.soniox.com",
+                TranscriptionModel = "stt-async-v5",
+                ChatModel = "",
+                PostProcessModel = "",
+                SupportsRealtime = false,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Soniox,
             }
         };
 
@@ -500,9 +524,10 @@ namespace WhisperInk
             "cohere-gguf-server"                                           => TranscriberKind.LocalCrispAsrServer,
             "cohere-gguf-cuda-server"                                      => TranscriberKind.LocalCrispAsrServer,
             "cohere-gguf-cuda-server-q8"                                   => TranscriberKind.LocalCrispAsrServer,
-            "parakeet-local" or "cohere-local-q4" or "cohere-local-q6k"
+            "parakeet-local" or "parakeet-rnnt-local" or "cohere-local-q4" or "cohere-local-q6k"
                 or "voxtral-local" or "voxtral4b-local" or "granite-local" => TranscriberKind.LocalCrispAsrServer,
             "google-chirp3"                                                => TranscriberKind.GoogleChirp3,
+            "soniox"                                                       => TranscriberKind.Soniox,
             _                                                              => TranscriberKind.Http,
         };
     }
