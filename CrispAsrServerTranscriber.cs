@@ -139,8 +139,9 @@ namespace WhisperInk
                 if (!string.IsNullOrWhiteSpace(hotwords))
                 {
                     content.Add(new StringContent(hotwords), "hotwords");
-                    // Per-term boost strength for the Parakeet trie. The server
-                    // default (2.0) is effectively inert; Parakeet presets set ~10.
+                    // Per-term boost strength for the Parakeet trie. Server default
+                    // (2.0) is effectively inert; opt in to ~10+ in settings to nudge
+                    // rare terms (it can garble neighboring words). Off by default.
                     // Ignored by the LLM / cohere backends.
                     if (_provider.HotwordsBoost is double boost && boost > 0)
                         content.Add(

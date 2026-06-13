@@ -384,7 +384,7 @@ Expects an OpenAI-compatible transcription endpoint at `http://localhost:8102`. 
   - `"whisper_prompt"` — labeled glossary in `prompt` (OpenAI, local prompt-aware servers).
   - `"mistral_context_bias"` — comma-joined string in `context_bias` (Mistral Voxtral batch, ≤100).
   - `"elevenlabs_keyterms"` — repeated `keyterms` fields (ElevenLabs Scribe v2), sourced from the shared list.
-  - `"hotwords"` — comma-joined `hotwords` for local CrispASR servers (`HotwordsBoost` tunes the Parakeet trie; no-op on Cohere/Granite/Voxtral-4B).
+  - `"hotwords"` — comma-joined `hotwords` for local CrispASR servers (`HotwordsBoost` tunes the Parakeet trie — off by default, since boosting can garble neighboring words; no-op on Cohere/Granite/Voxtral-4B).
   - `"phrase_sets"` / `"context_terms"` — Google / Soniox, handled natively in their transcribers.
   - `"none"` — provider has no biasing field (e.g. Cohere Transcribe v2).
 - `ScribeKeytermsRaw` — optional ElevenLabs-only extra keyterms, merged with the shared list and validated together (≤1000 terms, <50 chars, ≤5 words, illegal chars dropped).

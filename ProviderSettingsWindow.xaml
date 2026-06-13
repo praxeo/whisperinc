@@ -249,7 +249,7 @@
                         <Label Content="Hotword boost (Parakeet only)"/>
                         <TextBox x:Name="TxtHotwordsBoost" Margin="0,0,0,4"/>
                         <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10"
-                                   Text="Strength of the Parakeet hotword trie. Blank = server default 2.0 (≈no effect); ~10 nudges rare terms. Greedy (beam 1) weakens it — pair with beam ≥2. Ignored by Cohere/Voxtral/Granite backends."/>
+                                   Text="Strength of the Parakeet hotword trie. Blank = off (server default 2.0 ≈ no effect). ~10+ nudges rare terms but can GARBLE neighboring words — leave blank unless you accept that trade-off. Greedy (beam 1) weakens it; pair with beam ≥2. Ignored by Cohere/Voxtral/Granite backends."/>
                     </StackPanel>
                 </GroupBox>
 

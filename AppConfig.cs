@@ -396,8 +396,10 @@ namespace WhisperInk
                 // returns "rnnt" before "tdt", so it would silently hijack this
                 // preset). CrispASR auto-detects Parakeet — no backend hint.
                 Id = "parakeet-local",
+                // hotwords is Parakeet's native mechanism, but the boost knob is
+                // left OFF by default: at a real boost the trie garbles neighboring
+                // words, so it's opt-in (set HotwordsBoost in provider settings).
                 BiasMechanism = "hotwords",
-                HotwordsBoost = 10,
                 Name = "Parakeet Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8103",
                 TranscriptionEndpoint = "http://localhost:8103/v1/audio/transcriptions",
@@ -420,7 +422,6 @@ namespace WhisperInk
                 // greedy sub-second decode (null here = server-default beam-5).
                 Id = "parakeet-rnnt-local",
                 BiasMechanism = "hotwords",
-                HotwordsBoost = 10,
                 Name = "Parakeet RNNT 1.1b Local (CrispASR, auto-spawn)",
                 BaseUrl = "http://localhost:8109",
                 TranscriptionEndpoint = "http://localhost:8109/v1/audio/transcriptions",
