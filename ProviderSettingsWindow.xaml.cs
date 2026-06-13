@@ -263,6 +263,10 @@ namespace WhisperInk
             LocalModelFolder = src.LocalModelFolder,
             LocalBeamSize    = src.LocalBeamSize,
             LocalPuncModel   = src.LocalPuncModel,
+            LocalTruecaseModel = src.LocalTruecaseModel,
+            LocalExtraParams = src.LocalExtraParams != null
+                ? new Dictionary<string, string>(src.LocalExtraParams)
+                : new Dictionary<string, string>(),
             BiasMechanism    = src.BiasMechanism,
             HotwordsBoost    = src.HotwordsBoost,
         };

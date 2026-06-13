@@ -465,6 +465,18 @@ namespace WhisperInk
                                 p.LocalModelFolder = lmf.GetString() ?? "";
                             if (pEl.TryGetProperty("LocalBeamSize", out var lbs) && lbs.ValueKind == JsonValueKind.Number)
                                 p.LocalBeamSize = lbs.GetInt32();
+                            if (pEl.TryGetProperty("LocalPuncModel", out var lpm))
+                                p.LocalPuncModel = lpm.GetString() ?? "";
+                            if (pEl.TryGetProperty("LocalTruecaseModel", out var ltm))
+                                p.LocalTruecaseModel = ltm.GetString() ?? "";
+                            if (pEl.TryGetProperty("LocalExtraParams", out var lep) && lep.ValueKind == JsonValueKind.Object)
+                            {
+                                var extra = new Dictionary<string, string>();
+                                foreach (var prop in lep.EnumerateObject())
+                                    if (prop.Value.ValueKind == JsonValueKind.String)
+                                        extra[prop.Name] = prop.Value.GetString() ?? "";
+                                p.LocalExtraParams = extra;
+                            }
                             if (pEl.TryGetProperty("HotwordsBoost", out var hwb) && hwb.ValueKind == JsonValueKind.Number)
                                 p.HotwordsBoost = hwb.GetDouble();
 
@@ -525,6 +537,7 @@ namespace WhisperInk
                             if (string.IsNullOrWhiteSpace(p.LocalModelFolder)) p.LocalModelFolder = def.LocalModelFolder;
                             if (p.LocalServerPort == null)                     p.LocalServerPort  = def.LocalServerPort;
                             if (string.IsNullOrWhiteSpace(p.LocalPuncModel))   p.LocalPuncModel   = def.LocalPuncModel;
+                            if (string.IsNullOrWhiteSpace(p.LocalTruecaseModel)) p.LocalTruecaseModel = def.LocalTruecaseModel;
                             if (string.IsNullOrWhiteSpace(p.BiasMechanism))    p.BiasMechanism    = def.BiasMechanism;
                             if (p.HotwordsBoost == null)                       p.HotwordsBoost    = def.HotwordsBoost;
                         }

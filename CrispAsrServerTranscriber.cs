@@ -43,6 +43,7 @@ namespace WhisperInk
         private readonly int _threads;
         private readonly string? _backendHint;
         private readonly string? _puncModel;
+        private readonly string? _truecaseModel;
         private readonly string _inferenceUrl;
         private readonly string _healthUrl;
 
@@ -52,6 +53,12 @@ namespace WhisperInk
         private bool _disposed;
 
         private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(120) };
+
+        // Form-field names this transcriber sets itself. LocalExtraParams entries
+        // that collide with these are skipped so config.json can't clobber them.
+        private static readonly HashSet<string> _reservedFormFields =
+            new(StringComparer.OrdinalIgnoreCase)
+            { "language", "hotwords", "hotwords_boost", "beam_size", "response_format", "file" };
 
         public string DisplayName => _provider.Name;
         public int Port => _port;
@@ -75,6 +82,7 @@ namespace WhisperInk
             _threads = Math.Min(8, Environment.ProcessorCount);
             _backendHint = string.IsNullOrWhiteSpace(provider.LocalBackendHint) ? null : provider.LocalBackendHint;
             _puncModel = string.IsNullOrWhiteSpace(provider.LocalPuncModel) ? null : provider.LocalPuncModel;
+            _truecaseModel = string.IsNullOrWhiteSpace(provider.LocalTruecaseModel) ? null : provider.LocalTruecaseModel;
             _inferenceUrl = $"http://{ServerHost}:{_port}/v1/audio/transcriptions";
             _healthUrl = $"http://{ServerHost}:{_port}/health";
         }
@@ -151,6 +159,22 @@ namespace WhisperInk
                 if (_provider.LocalBeamSize is int beam and > 0)
                     content.Add(new StringContent(beam.ToString()), "beam_size");
                 content.Add(new StringContent("json"), "response_format");
+
+                // Per-provider passthrough of additional transcription params
+                // (punctuation, vad, seed, suppress_nst, …). §166+ servers read
+                // these per request; older servers ignore unknown fields. Keys we
+                // already set above are skipped. Added before the file part so all
+                // string fields stay ahead of it (the Cohere-v2 ordering rule).
+                if (_provider.LocalExtraParams is { Count: > 0 })
+                {
+                    foreach (var kv in _provider.LocalExtraParams)
+                    {
+                        if (string.IsNullOrWhiteSpace(kv.Key) || string.IsNullOrWhiteSpace(kv.Value)) continue;
+                        if (_reservedFormFields.Contains(kv.Key)) continue;
+                        content.Add(new StringContent(kv.Value), kv.Key);
+                    }
+                }
+
                 content.Add(fileContent, "file", "audio.wav");
 
                 using var response = await _http.PostAsync(_inferenceUrl, content, ct).ConfigureAwait(false);
@@ -217,6 +241,15 @@ namespace WhisperInk
                 {
                     psi.ArgumentList.Add("--punc-model");
                     psi.ArgumentList.Add(_puncModel);
+                }
+
+                // Server-side truecasing (proper-noun / acronym casing), applied
+                // after punctuation. §166-era servers honor --truecase-model in
+                // server mode; older builds ignore the unknown flag.
+                if (!string.IsNullOrWhiteSpace(_truecaseModel))
+                {
+                    psi.ArgumentList.Add("--truecase-model");
+                    psi.ArgumentList.Add(_truecaseModel);
                 }
 
                 _serverProc = new Process { StartInfo = psi };

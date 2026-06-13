@@ -163,13 +163,31 @@ namespace WhisperInk
         public int? LocalBeamSize { get; set; } = null;
 
         // Optional server-side punctuation model, passed to crispasr.exe as
-        // --punc-model (e.g. "fullstop", "auto"/"firered", "punctuate-all", or a
-        // direct GGUF path). Blank → none. Restores punctuation + sentence case
-        // for backends that emit raw lowercase text (Parakeet RNNT/CTC). Requires
-        // a CrispASR build whose SERVER honors --punc-model — stock v0.7 applied
-        // it only in CLI one-shot mode; the in-tree #161-punc patch wires it into
-        // the persistent server (load once, FireRedPunc per segment).
+        // --punc-model (e.g. "fullstop", "auto"/"firered", "punctuate-all",
+        // "pcs", or a direct GGUF path). Blank → none. Restores punctuation +
+        // sentence case for backends that emit raw lowercase text (Parakeet
+        // RNNT/CTC). Server-mode --punc-model is upstream as of the §166 parity
+        // series (CrispStrobe/CrispASR 36f35f2a + PCS/CTC auto-enable in
+        // 8d803f04); older pre-§166 servers honored it only in CLI one-shot mode.
         public string LocalPuncModel { get; set; } = "";
+
+        // Optional server-side truecasing model, passed to crispasr.exe as
+        // --truecase-model (e.g. "auto", "crf", "lstm", or a direct path).
+        // Applied AFTER punctuation. Blank → none. Adds proper-noun / acronym
+        // casing on top of the sentence-case that --punc-model already restores,
+        // for backends that emit lowercase text (Parakeet RNNT/CTC). Resident
+        // startup flag, not per-request. Requires a §166-era CrispASR server.
+        public string LocalTruecaseModel { get; set; } = "";
+
+        // Per-provider passthrough of extra /v1/audio/transcriptions form fields,
+        // merged verbatim into each request (e.g. {"punctuation":"false"},
+        // {"vad":"true"}, {"seed":"42"}, {"suppress_nst":"true"}). The CrispASR
+        // server (§166+) exposes most transcription params per request; this lets
+        // config.json reach them with no recompile. Keys already set by the
+        // transcriber (language / hotwords / hotwords_boost / beam_size /
+        // response_format / file) are reserved and skipped. Older servers ignore
+        // unknown fields.
+        public Dictionary<string, string> LocalExtraParams { get; set; } = new();
 
         /// <summary>Validate an arbitrary term list against the ElevenLabs Scribe v2
         /// keyterm rules (≤1000 terms, &lt;50 chars, ≤5 words, no chars that break the
