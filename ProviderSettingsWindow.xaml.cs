@@ -147,6 +147,7 @@ namespace WhisperInk
             "hotwords"             => "Domain vocabulary → CrispASR hotwords (real on Parakeet/Voxtral; ignored by Cohere/Granite/Voxtral-4B).",
             "phrase_sets"          => "Domain vocabulary → Google phrase sets (native).",
             "context_terms"        => "Domain vocabulary → Soniox context terms (native).",
+            "deepgram_keyterm"     => "Domain vocabulary → Deepgram Nova-3 keyterm prompting (native; `keywords` on older models).",
             _                      => "No native biasing — context-bias terms have no effect for this provider.",
         };
 
@@ -266,6 +267,9 @@ namespace WhisperInk
             LocalTruecaseModel = src.LocalTruecaseModel,
             LocalExtraParams = src.LocalExtraParams != null
                 ? new Dictionary<string, string>(src.LocalExtraParams)
+                : new Dictionary<string, string>(),
+            DeepgramExtraParams = src.DeepgramExtraParams != null
+                ? new Dictionary<string, string>(src.DeepgramExtraParams)
                 : new Dictionary<string, string>(),
             BiasMechanism    = src.BiasMechanism,
             HotwordsBoost    = src.HotwordsBoost,

@@ -477,6 +477,14 @@ namespace WhisperInk
                                         extra[prop.Name] = prop.Value.GetString() ?? "";
                                 p.LocalExtraParams = extra;
                             }
+                            if (pEl.TryGetProperty("DeepgramExtraParams", out var dep) && dep.ValueKind == JsonValueKind.Object)
+                            {
+                                var extra = new Dictionary<string, string>();
+                                foreach (var prop in dep.EnumerateObject())
+                                    if (prop.Value.ValueKind == JsonValueKind.String)
+                                        extra[prop.Name] = prop.Value.GetString() ?? "";
+                                p.DeepgramExtraParams = extra;
+                            }
                             if (pEl.TryGetProperty("HotwordsBoost", out var hwb) && hwb.ValueKind == JsonValueKind.Number)
                                 p.HotwordsBoost = hwb.GetDouble();
 

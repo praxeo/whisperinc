@@ -17,6 +17,7 @@ namespace WhisperInk
         LocalCrispAsrServer,  // Auto-spawned crispasr.exe --server (all GGUF backends)
         GoogleChirp3,         // Google Cloud STT v2 with OAuth + JSON body
         Soniox,               // Soniox async REST job: upload → create → poll → transcript (SonioxTranscriber)
+        Deepgram,             // Deepgram Listen API: raw-body POST, Token auth, query-param options (DeepgramTranscriber)
     }
 
     public class ApiProvider
@@ -84,6 +85,8 @@ namespace WhisperInk
         //   "hotwords"             — comma-joined "hotwords" form field (CrispASR local)
         //   "phrase_sets"          — Google Chirp 3 inline phraseSets (handled natively)
         //   "context_terms"        — Soniox context.terms (handled natively)
+        //   "deepgram_keyterm"     — Deepgram Nova-3 keyterm prompting / legacy
+        //                            `keywords` query params (handled natively)
         //
         // Blank → derived from the legacy ContextBiasMode via ResolvedBiasMechanism.
         public string BiasMechanism { get; set; } = "";
@@ -189,6 +192,17 @@ namespace WhisperInk
         // unknown fields.
         public Dictionary<string, string> LocalExtraParams { get; set; } = new();
 
+        // Per-provider passthrough of extra Deepgram /v1/listen QUERY params,
+        // merged verbatim into the request URL (e.g. {"measurements":"true"},
+        // {"numerals":"true"}, {"dictation":"true"}, {"paragraphs":"true"}).
+        // The Deepgram analog of LocalExtraParams: it lets a preset carry
+        // calibration/formatting knobs (and any future Deepgram param) with no
+        // recompile. Only consulted by DeepgramTranscriber. Keys the transcriber
+        // already sets (model / smart_format / language / keyterm / keywords) are
+        // reserved and skipped. Values are sent as-is (URL-encoded); Deepgram
+        // ignores unknown params.
+        public Dictionary<string, string> DeepgramExtraParams { get; set; } = new();
+
         /// <summary>Validate an arbitrary term list against the ElevenLabs Scribe v2
         /// keyterm rules (≤1000 terms, &lt;50 chars, ≤5 words, no chars that break the
         /// multipart field / keyterm parser). Used for both the shared Context Bias
@@ -271,7 +285,7 @@ namespace WhisperInk
 
         /// <summary>Whether this provider needs an API key / credential to work.
         /// Local in-process and localhost HTTP providers don't; cloud endpoints
-        /// (and credentialed services like Google Chirp 3 / Soniox) do. Used by
+        /// (and credentialed services like Google Chirp 3 / Soniox / Deepgram) do. Used by
         /// the health probe, diagnostics, and the record-start guard so local
         /// models never demand a (dummy) key.</summary>
         public bool RequiresApiKey => !IsLocalProvider && !IsLocalHttp;
@@ -588,6 +602,67 @@ namespace WhisperInk
                 ContextBiasMode = "none",
                 Language = "en",
                 TranscriberKind = TranscriberKind.Soniox,
+            },
+            new ApiProvider
+            {
+                // Deepgram — pre-recorded Listen API (api.deepgram.com/v1/listen).
+                // Not OpenAI-compatible: the audio is the raw request body, every
+                // option is a URL query param, and auth is "Authorization: Token
+                // <key>", so DeepgramTranscriber handles it, not the generic HTTP
+                // multipart path. ApiKey holds the Deepgram API key.
+                //
+                // Nova-3 is Deepgram's flagship model; TranscriptionModel is
+                // user-editable, so nova-3-medical / nova-2 / whisper-cloud are a
+                // config edit, not a recompile.
+                //
+                // ContextBiasMode stays "none" because biasing doesn't flow through
+                // the generic switch — DeepgramTranscriber maps the global
+                // ContextBiasTerms onto Nova-3 keyterm-prompting `keyterm` params
+                // (or legacy `keywords` on older models), same pattern as Soniox.
+                Id = "deepgram",
+                BiasMechanism = "deepgram_keyterm",
+                Name = "Deepgram Nova-3",
+                BaseUrl = "https://api.deepgram.com",
+                TranscriptionModel = "nova-3",
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Deepgram,
+            },
+            new ApiProvider
+            {
+                // Deepgram Nova-3 MEDICAL — separate preset (model nova-3-medical),
+                // tuned for clinical dictation. Same Deepgram path as the general
+                // entry above; differs only by model + medical-appropriate
+                // calibration params carried in DeepgramExtraParams (merged into
+                // the /v1/listen query string by DeepgramTranscriber). Keyterm
+                // biasing routes the shared Context Bias list (clinical terms) to
+                // Nova-3 keyterm prompting, same as the general entry.
+                Id = "deepgram-medical",
+                BiasMechanism = "deepgram_keyterm",
+                Name = "Deepgram Nova-3 Medical",
+                BaseUrl = "https://api.deepgram.com",
+                TranscriptionModel = "nova-3-medical",
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Deepgram,
+                // DeepgramExtraParams intentionally EMPTY. A live A/B on real
+                // clinical clips (hematochezia/ureterolithiasis/biliary-colic)
+                // rejected every calibration knob for unattended dictation that
+                // pastes verbatim into the EHR: dictation=true stripped the
+                // terminal period + downcased "CT"->"Ct"; measurements risks ISMP
+                // unit abbreviations (units->U, international units->IU); numerals
+                // over-converts idiomatic number-words ("cranial nerve two"->"2");
+                // filler_words is unsupported on nova-3-medical; paragraphs is
+                // subsumed by the baked-in smart_format. smart_format=true (in
+                // DeepgramTranscriber.BuildUrl) is the safe formatter. Any of these
+                // is a pure config.json opt-in (add to this dict) — no recompile.
+                // NB: the API reports arch="nova-3" for nova-3-medical (internal
+                // name medical-nova-3); that's expected, not a fallback.
+                DeepgramExtraParams = new(),
             }
         };
 
@@ -608,6 +683,7 @@ namespace WhisperInk
                 or "voxtral-local" or "voxtral4b-local" or "granite-local" => TranscriberKind.LocalCrispAsrServer,
             "google-chirp3"                                                => TranscriberKind.GoogleChirp3,
             "soniox"                                                       => TranscriberKind.Soniox,
+            "deepgram" or "deepgram-medical"                               => TranscriberKind.Deepgram,
             _                                                              => TranscriberKind.Http,
         };
     }
