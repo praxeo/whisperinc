@@ -7,8 +7,8 @@ namespace WhisperInk
 {
     /// <summary>
     /// Common surface every batch-transcription backend exposes — cloud HTTP,
-    /// local ONNX, local CrispASR server, Google Chirp 3. The dispatch site in
-    /// MainWindow doesn't care which backend handled the audio; it just feeds
+    /// local CrispASR server, Google Chirp 3, Soniox, Deepgram. The dispatch site
+    /// in MainWindow doesn't care which backend handled the audio; it just feeds
     /// WAV bytes in and gets text back.
     ///
     /// Implementations are constructed once per <see cref="ApiProvider"/> by
@@ -22,7 +22,7 @@ namespace WhisperInk
 
         /// <summary>
         /// True when the transcriber has everything it needs to run a call.
-        /// For local models this checks that the GGUF/ONNX files and exe
+        /// For local models this checks that the GGUF files and exe
         /// exist; for cloud providers it usually returns true (errors surface
         /// at request time). When false, <paramref name="diagnostic"/> contains
         /// a human-readable reason suitable for the setup banner.

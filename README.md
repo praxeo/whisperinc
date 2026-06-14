@@ -1,6 +1,6 @@
 # WhisperInk
 
-A WPF (C#/.NET 8) system-wide dictation tool for Windows. Hold a global hotkey, speak, and the transcript is typed or pasted into whichever application has focus. Works with multiple cloud ASR backends (Mistral Voxtral, OpenAI Whisper, ElevenLabs Scribe, Cohere Transcribe) and optional local inference paths (ONNX, GGUF via llama.cpp, Qwen3-ASR).
+A WPF (C#/.NET 8) system-wide dictation tool for Windows. Hold a global hotkey, speak, and the transcript is typed or pasted into whichever application has focus. Works with multiple cloud ASR backends (Mistral Voxtral, OpenAI Whisper, ElevenLabs Scribe, Cohere Transcribe, Deepgram Nova-3, Google Chirp 3, Soniox) and optional local inference paths (GGUF via CrispASR/llama.cpp, Qwen3-ASR).
 
 - **Repository**: https://github.com/praxeo/whisperinc
 - **Platform**: Windows 10/11, .NET 8.0
@@ -41,7 +41,7 @@ Uninstall with `.\scripts\uninstall.ps1`. It removes shortcuts and the auto-star
 ## Features
 
 - **Global hotkey dictation** — `Ctrl+Space` to record and transcribe into any foreground app.
-- **Multi-provider** — cloud (Mistral, OpenAI, ElevenLabs, Cohere) and local (ONNX, GGUF llama.cpp subprocess/server, Qwen3-ASR HTTP). Per-provider auth header, endpoint, model, temperature, and context-bias configuration.
+- **Multi-provider** — cloud (Mistral, OpenAI, ElevenLabs, Cohere, Deepgram, Google Chirp 3, Soniox) and local (GGUF via CrispASR subprocess/server, Qwen3-ASR HTTP). Per-provider auth header, endpoint, model, temperature, and context-bias configuration.
 - **Batch dictation** — record → POST to the active provider → paste via clipboard; works with every provider.
 - **Context biasing** — one shared term list, routed to each provider's native mechanism automatically (prompt glossary for OpenAI, `context_bias` for Mistral, `keyterms` for ElevenLabs, `hotwords` for local CrispASR/Parakeet, phrase sets for Google, context terms for Soniox).
 - **History log** — every transcription recorded locally, viewable from the tray.
@@ -338,17 +338,6 @@ crispasr.exe --server `
 
 Then in Providers… duplicate the Parakeet preset, change the name, point Base URL + Transcription Endpoint at `http://localhost:8104`. If there's interest we can generalize auto-spawn to any CrispASR model; for now, Parakeet is the turnkey one.
 
-### Cohere ONNX (CPU, no server)
-
-Runs Cohere Transcribe directly inside the WhisperInk process via ONNX Runtime — no subprocess, no HTTP. Slower than GPU paths for autoregressive decoding, but completely offline.
-
-Place these in `%APPDATA%\.WhisperInk\cohere-onnx\`:
-- `cohere-encoder.int4.onnx`
-- `cohere-decoder.int4.onnx`
-- `tokens.txt`
-
-INT4 weights: `cstr/cohere-transcribe-onnx-int4` on HuggingFace. Swap filenames for INT8 if you have those.
-
 ### Qwen3-ASR local server
 
 Expects an OpenAI-compatible transcription endpoint at `http://localhost:8102`. Any inference server that exposes `/v1/audio/transcriptions` in that shape will work.
@@ -363,8 +352,8 @@ Expects an OpenAI-compatible transcription endpoint at `http://localhost:8102`. 
 |------|---------|
 | `MainWindow.xaml.cs` | Global low-level keyboard hook, recording state machine, transcription logic, tray & context menu UI, clipboard/paste plumbing. ~1800 LOC — the heart of the app. |
 | `AppConfig.cs` | `ApiProvider` model (one per backend) and `AppConfig` (top-level settings, provider list, bias terms). `CreateDefaults()` seeds the provider list. |
-| `CohereOnnxTranscriber.cs` | In-process ONNX inference for Cohere Transcribe (encoder-decoder, 30s chunks, 5s overlap, greedy decoding). |
-| `CohereGguf*Transcriber.cs` | Four variants for llama.cpp-based Cohere deployments (subprocess / HTTP CPU / HTTP CUDA / HTTP CUDA Q8). |
+| `CrispAsrServerTranscriber.cs` | Generic adapter for `crispasr.exe --server` — one class for every GGUF backend (Cohere, Parakeet, Voxtral, Granite, …) via config-only provider entries. |
+| `DeepgramTranscriber.cs` | Deepgram Listen API (`/v1/listen`) — raw-body POST, `Token` auth, query-param options, Nova-3 `keyterm` biasing. |
 | `CrispAsrServerTranscriber.cs` | Generic adapter for the `crispasr.exe --server` mode — model-agnostic, auto-detects backend from GGUF metadata. Used by the Parakeet provider; the path new models should adopt. |
 | `ProviderSettingsWindow.xaml(.cs)` | GUI for editing providers — URLs, keys, auth header, model field, a read-only biasing-mechanism line, and Parakeet hotword-boost / Scribe v2 extra keyterms. |
 | `ContextBiasWindow.xaml(.cs)` | Global context-bias term list — the single source routed to each provider's native biasing field. |
@@ -398,7 +387,6 @@ Default providers (see `AppConfig.cs`):
 | `elevenlabs` | ElevenLabs Scribe | HTTPS | `xi-api-key`, `model_id`, keyterms |
 | `cohere-api` | Cohere Transcribe API | HTTPS | Cohere v2, temp 0.1; no native biasing |
 | `local` | Local Server | HTTP | `localhost:8100`, whisper_prompt |
-| `cohere-onnx` | Cohere Local (ONNX) | in-process | Bypasses HTTP entirely |
 | `cohere-gguf` | Cohere Local (CrispASR GGUF) | subprocess | llama.cpp CLI |
 | `cohere-gguf-server` | Cohere Local (CrispASR server) | HTTP | llama.cpp server, CPU |
 | `cohere-gguf-cuda-server` | Cohere Local (CrispASR CUDA) | HTTP | llama.cpp server, CUDA |
@@ -435,7 +423,6 @@ Start/stop chirps are procedurally generated sine waves in memory — no asset f
 | `%APPDATA%\.WhisperInk\config.json` | All providers, active id, mic selection, bias terms. |
 | `%APPDATA%\.WhisperInk\debug.log` | Rolling log. First place to check for any failure. |
 | `%APPDATA%\.WhisperInk\history.json` | Transcription history (viewable from the tray). |
-| `%APPDATA%\.WhisperInk\cohere-onnx\` | ONNX weights + `tokens.txt` (only if you use the ONNX provider). |
 | `~/Documents/MyRecordings/temp_audio.wav` | The most recent Batch-mode recording (overwritten each time). |
 
 Config is loaded on startup and rewritten after any settings change. Safe to back up or sync.
@@ -463,7 +450,7 @@ Helper scripts:
 
 NuGet dependencies (`WhisperInk.csproj`):
 - `NAudio 2.2.1` — microphone capture.
-- `Microsoft.ML.OnnxRuntime.Gpu.Windows 1.24.4` — ONNX inference; loads DirectML, falls back to CPU.
+- `Google.Apis.Auth 1.69.0` — Google Chirp 3 OAuth (service-account tokens).
 
 ---
 
@@ -503,9 +490,6 @@ Install the **.NET 8 Desktop Runtime (x64)**, not the base runtime. Alternativel
 
 **Recording starts but nothing pastes**
 Check `debug.log` for the HTTP response. 401/403 = bad API key. 404 = wrong endpoint (especially common if you customized the TranscriptionEndpoint field). 422 on ElevenLabs with keyterms = swap the repeated form fields for a JSON fallback (commented in `MainWindow.xaml.cs` at the keyterms block).
-
-**Local ONNX is slow**
-Autoregressive decoding on CPU/DirectML is genuinely slow — a 10s utterance can take several seconds. Prefer a cloud provider or a GGUF CUDA server if you have an NVIDIA GPU. INT8 is more accurate but slower than INT4.
 
 **Parakeet/Cohere Q4 is slower than expected (RTFx <2× on a laptop)**
 Windows' default **Balanced** power plan throttles CPU to its base clock even while plugged in — on a Ryzen 5825U that's 2.0 GHz versus the 4.5 GHz boost. Roughly halves ASR throughput. Switch to Ultimate Performance:

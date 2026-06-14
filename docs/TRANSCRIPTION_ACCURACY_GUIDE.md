@@ -19,7 +19,6 @@ WhisperInk supports multiple transcription providers, each with different parame
 - **Cohere Transcribe** - Optimized for medical and technical domains with context biasing
 - **Mistral Voxtral** - Fast, accurate transcription with language detection
 - **ElevenLabs Scribe** - High-quality transcription with speaker diarization support
-- **Local ONNX** - Run Cohere models locally with CPU/GPU acceleration
 
 ## Core Accuracy Parameters
 
@@ -45,7 +44,6 @@ WhisperInk supports multiple transcription providers, each with different parame
 | Cohere Transcribe | Yes | No | Must be set |
 | Mistral Voxtral | No | Yes | Explicit setting improves accuracy |
 | ElevenLabs Scribe | No | Yes | Auto-detects well |
-| Local ONNX | Yes | No | Must be set |
 
 ### Temperature
 
@@ -71,7 +69,6 @@ WhisperInk supports multiple transcription providers, each with different parame
 | Cohere Transcribe | 0.1 | Optimized for medical dictation |
 | Mistral Voxtral | N/A | Not configurable |
 | ElevenLabs Scribe | 0.0-0.3 | Optional parameter |
-| Local ONNX | N/A | Not configurable |
 
 ### Context Bias Terms
 
@@ -107,7 +104,6 @@ hypotension
 | Cohere Transcribe | `cohere_terms` | 100 terms | JSON array |
 | Mistral Voxtral | N/A | N/A | Not supported |
 | ElevenLabs Scribe | N/A | N/A | Not supported |
-| Local ONNX | N/A | N/A | Not supported |
 
 ### Context Bias Mode
 
@@ -132,7 +128,6 @@ hypotension
 | Mistral | `none` |
 | ElevenLabs Scribe | `none` |
 | Local Server | `whisper_prompt` |
-| Cohere Local (ONNX) | `none` |
 
 ## Provider-Specific Recommendations
 
@@ -182,7 +177,6 @@ Context Bias Terms: [up to 100 domain terms]
 - Use the full JSON array format for `context_bias_terms`
 - Cohere's medical terminology recognition is excellent with proper biasing
 - Temperature of 0.1 is specifically recommended for medical dictation
-- Consider using the local ONNX version for privacy and cost savings
 
 **Known Limitations:**
 - Language parameter is required (no auto-detect)
@@ -243,35 +237,6 @@ Context Bias Terms: [not supported]
 - No context biasing support
 - Higher cost than some alternatives
 - Requires ElevenLabs API key
-
-### Local ONNX (Cohere)
-
-**Strengths:**
-- Privacy (no data leaves your machine)
-- No API costs
-- Works offline
-- GPU acceleration available
-
-**Optimal Configuration:**
-```
-Model: cohere-transcribe-03-2026 (local)
-Temperature: [not configurable]
-Language: [required, set in code]
-Context Bias Mode: none
-Context Bias Terms: [not supported]
-```
-
-**Advanced Tips:**
-- Use INT8 models for better accuracy (slightly slower)
-- Ensure CUDA/cuDNN is properly installed for GPU acceleration
-- 30-second chunking with 5-second overlap handles long audio
-- CPU-only mode works but is slower
-
-**Known Limitations:**
-- No context biasing in current implementation
-- Language must be set in code (not configurable via UI yet)
-- Requires ~2GB disk space for model files
-- Initial model loading takes 5-10 seconds
 
 ## Context Biasing Strategies
 
@@ -720,9 +685,8 @@ Post-Processing: OFF
 
 **Solution:**
 1. For Mistral Realtime: increase Streaming Delay
-2. For Local ONNX: use INT4 models or enable GPU
-3. For cloud providers: check network connectivity
-4. Consider using a faster model (e.g., voxtral-mini instead of full)
+2. For cloud providers: check network connectivity
+3. Consider using a faster model (e.g., voxtral-mini instead of full)
 
 ## Best Practices Summary
 

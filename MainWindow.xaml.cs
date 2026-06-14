@@ -747,8 +747,8 @@ namespace WhisperInk
         //
         // Single entry point for every batch transcription. The factory hands
         // back the right ITranscriber for the active provider (cloud HTTP,
-        // local ONNX, auto-spawned CrispASR server, Google Chirp 3); we don't
-        // care which it is. Adding a new model is now a config-only change â€”
+        // auto-spawned CrispASR server, Google Chirp 3, Soniox, Deepgram); we
+        // don't care which it is. Adding a new model is now a config-only change â€”
         // no new branches here.
 
         private async Task<string?> TranscribeAudioAsync(string filePath)

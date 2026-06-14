@@ -14,10 +14,6 @@ namespace WhisperInk
     /// </summary>
     internal static class ProviderDiagnostics
     {
-        private static readonly string OnnxFolder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            ".WhisperInk", "cohere-onnx");
-
         public static async Task<string> BuildAsync(ApiProvider? prov)
         {
             if (prov == null) return "No active provider configured.";
@@ -27,12 +23,6 @@ namespace WhisperInk
 
             switch (prov.TranscriberKind)
             {
-                case TranscriberKind.LocalOnnx:
-                    AppendFileCheck(sb, "cohere-encoder.int4.onnx", Path.Combine(OnnxFolder, "cohere-encoder.int4.onnx"));
-                    AppendFileCheck(sb, "cohere-decoder.int4.onnx", Path.Combine(OnnxFolder, "cohere-decoder.int4.onnx"));
-                    AppendFileCheck(sb, "tokens.txt",               Path.Combine(OnnxFolder, "tokens.txt"));
-                    break;
-
                 case TranscriberKind.LocalCrispAsrServer:
                     await AppendLocalGgufCheckAsync(sb, prov);
                     break;

@@ -13,7 +13,6 @@ namespace WhisperInk
     public enum TranscriberKind
     {
         Http,                 // OpenAI-compatible multipart POST (Mistral batch, OpenAI, Cohere cloud, ElevenLabs, …)
-        LocalOnnx,            // In-process ONNX inference (CohereOnnxTranscriber)
         LocalCrispAsrServer,  // Auto-spawned crispasr.exe --server (all GGUF backends)
         GoogleChirp3,         // Google Cloud STT v2 with OAuth + JSON body
         Soniox,               // Soniox async REST job: upload → create → poll → transcript (SonioxTranscriber)
@@ -270,7 +269,6 @@ namespace WhisperInk
 
         /// <summary>True when the provider runs locally (no cloud HTTP roundtrip).</summary>
         public bool IsLocalProvider =>
-            TranscriberKind == TranscriberKind.LocalOnnx ||
             TranscriberKind == TranscriberKind.LocalCrispAsrServer;
 
         /// <summary>True for an OpenAI-compatible HTTP provider pointed at a
@@ -355,20 +353,6 @@ namespace WhisperInk
                 ContextBiasMode = "cohere_terms",
                 Language = "en",
                 TranscriberKind = TranscriberKind.Http,
-            },
-            new ApiProvider
-            {
-                Id = "cohere-onnx",
-                BiasMechanism = "none",
-                Name = "Cohere Local (ONNX)",
-                BaseUrl = "local://cohere-onnx",
-                TranscriptionModel = "",
-                SupportsTranscription = true,
-                TranscriptionTemperature = null,
-                // Local ONNX inference — no HTTP multipart, so bias/temp fields are irrelevant here.
-                ContextBiasMode = "none",
-                Language = "en",
-                TranscriberKind = TranscriberKind.LocalOnnx,
             },
             // ─── Local CrispASR-based providers (unified server path) ──────
             // All of these spawn `crispasr.exe --server` lazily on first
@@ -674,7 +658,6 @@ namespace WhisperInk
         /// </summary>
         public static TranscriberKind InferKindFromLegacyId(string id) => id switch
         {
-            "cohere-onnx"                                                  => TranscriberKind.LocalOnnx,
             "cohere-gguf"                                                  => TranscriberKind.LocalCrispAsrServer,
             "cohere-gguf-server"                                           => TranscriberKind.LocalCrispAsrServer,
             "cohere-gguf-cuda-server"                                      => TranscriberKind.LocalCrispAsrServer,

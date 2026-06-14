@@ -103,9 +103,6 @@ namespace WhisperInk
             // covers every local provider automatically.
             switch (prov.TranscriberKind)
             {
-                case TranscriberKind.LocalOnnx:
-                    return ProbeOnnx();
-
                 case TranscriberKind.LocalCrispAsrServer:
                     return await ProbeLocalServerAsync(prov).ConfigureAwait(false);
 
@@ -119,23 +116,6 @@ namespace WhisperInk
                         return new HealthReport { Status = HealthStatus.Fail, Summary = $"Missing API key for {prov.Name}" };
                     return new HealthReport { Status = HealthStatus.Ok, Summary = $"{prov.Name} — API key present" };
             }
-        }
-
-        private static HealthReport ProbeOnnx()
-        {
-            string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                ".WhisperInk", "cohere-onnx");
-            string encoder = Path.Combine(dir, "cohere-encoder.int4.onnx");
-            string decoder = Path.Combine(dir, "cohere-decoder.int4.onnx");
-            string tokens  = Path.Combine(dir, "tokens.txt");
-            var missing = new List<string>();
-            if (!File.Exists(encoder)) missing.Add("cohere-encoder.int4.onnx");
-            if (!File.Exists(decoder)) missing.Add("cohere-decoder.int4.onnx");
-            if (!File.Exists(tokens))  missing.Add("tokens.txt");
-            if (missing.Count > 0)
-                return new HealthReport { Status = HealthStatus.Fail, Summary = $"Missing ONNX files: {string.Join(", ", missing)}" };
-            return new HealthReport { Status = HealthStatus.Ok, Summary = "ONNX files present" };
         }
 
         private static HealthReport ProbeLocalGgufFiles(string subFolder, string glob)

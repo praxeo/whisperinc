@@ -105,18 +105,6 @@ namespace WhisperInk
                 sb.AppendLine("  (cohere-gguf folder missing — no local models installed)");
             }
 
-            string onnxFolder = Path.Combine(ConfigFolder, "cohere-onnx");
-            if (Directory.Exists(onnxFolder))
-            {
-                sb.AppendLine();
-                sb.AppendLine("ONNX model folder contents:");
-                foreach (var f in Directory.EnumerateFiles(onnxFolder))
-                {
-                    var fi = new FileInfo(f);
-                    sb.AppendLine($"  {fi.Name,-45} {FormatSize(fi.Length)}");
-                }
-            }
-
             return sb.ToString();
         }
 
