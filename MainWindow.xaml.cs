@@ -192,7 +192,8 @@ namespace WhisperInk
                     Dispatcher.BeginInvoke(() => StartBatchDictation());
                 },
                 onDictationStop: () =>
-                    Dispatcher.BeginInvoke(() => RunSafe(StopBatchDictationAsync, "StopBatchDictation")));
+                    Dispatcher.BeginInvoke(() => RunSafe(StopBatchDictationAsync, "StopBatchDictation")),
+                log: Log);
             _hook.Install();
 
             _animationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
