@@ -29,6 +29,8 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 |------|---------|
 | `MainWindow.xaml.cs` | Orchestration: recording state machine (`_recState` tri-state via `Interlocked`), transcription dispatch (one factory call), config load/save, the shared `BuildAppMenu()` tree. ~1750 LOC. |
 | `KeyboardHookService.cs` | Owns the `WH_KEYBOARD_LL` hook: modifier tracking, hotkey suppression, synthetic-event filter (0x5AFE marker), Ctrl+Space detection. Callbacks fire on the hook thread; MainWindow marshals via Dispatcher + `RunSafe`. |
+| `MicCapture.cs` | Owns the microphone. Holds the device open between dictations ("warm mic") and streams every buffer into a `PreRollRing`, so `BeginCapture()` starts a recording that already contains the last ~400 ms. No device open on press, no teardown on release. Also hosts `PeakAmplitude()` for the silence gate. |
+| `UiSoundPlayer.cs` | Low-latency UI chirps over one persistent `WaveOutEvent` + `BufferedWaveProvider`, with pre-synthesised tones and default-endpoint-change detection. Replaces per-chirp `System.Media.SoundPlayer`. |
 | `TextInjector.cs` | Synthetic text delivery: clipboard paste-with-restore (batch), selection grab via Ctrl+C, `ReleaseAllModifierKeys()`. Owns pending clipboard-restore state. |
 | `MenuModel.cs` | `MenuNode` record + `MenuSurface` (Both/TrayOnly/BarOnly) + WPF renderer. One canonical menu tree drives both the tray menu and the bar right-click menu — they cannot drift. |
 | `TrayIcon.cs` | `TrayIconManager`: notification-area icon + WinForms renderer over the shared `MenuNode` tree (rebuilt on every `Opening`). |
@@ -50,7 +52,30 @@ The `%APPDATA%\.WhisperInk\cohere-gguf\` default folder is used by `CrispAsrServ
 
 ### Dictation
 
-Records to `~/Documents/MyRecordings/temp_audio.wav`, POSTs multipart form, pastes with a leading space. Works with every provider.
+Captures via `MicCapture`, POSTs the in-memory WAV, pastes with a leading space. Works with every provider. `~/Documents/MyRecordings/temp_audio.wav` is written **after** capture as a fire-and-forget replay/debug artifact only — it is no longer in the recording path (that folder is OneDrive-synced on the desktop, so a sync stall must never be able to stall a dictation).
+
+### Capture pipeline & responsiveness (2026-08-29)
+
+Three measured latencies used to make dictation feel slow and eat the first syllable. All were fixed by never opening a device on the hotkey path.
+
+| Symptom | Root cause (measured on the desktop) | Fix |
+|---|---|---|
+| "Lag on the beep" | `SoundPlayer.PlaySync()` took **190–222 ms for a 30 ms tone** — winmm reopens the render endpoint per call | `UiSoundPlayer`: one persistent `WaveOutEvent`, enqueue **0.02–0.46 ms** |
+| First part of the utterance clipped | press → first audio callback was **131–159 ms**; nothing said before that existed | Warm mic + **pre-roll ring**: the recording is seeded with audio from *before* the press |
+| Stop felt sluggish | `StopRecording()` + `Dispose()` cost **112–134 ms** in the real pipeline log | Device is never stopped per dictation; only the writer detaches |
+
+**Warm mic.** `MicCapture` keeps `WaveInEvent` open (`BufferMilliseconds = 50`) and every buffer flows into a `PreRollRing` whether or not a dictation is active. `BeginCapture()` attaches a `WaveFileWriter`, seeds it from the ring and flips a flag — all under one lock, so a buffer arriving mid-setup cannot fall through the gap. Measured: **2 ms**, with a full 400 ms of pre-press audio. `EndCapture(postRollMs)` waits (bounded, default 80 ms) for the in-flight buffer before flushing, so fixing the clipped start doesn't introduce a clipped end. Cost of staying warm is the Windows microphone-in-use indicator, hence the idle release (`WarmMicIdleSeconds`, default 180) and the 🎙 Microphone ▸ **Instant start** toggle.
+
+`PreRollRing` is split out of `MicCapture` specifically so the wrap arithmetic is testable without a microphone — an off-by-one there wouldn't crash, it would quietly mis-order the first few hundred ms of every dictation. Verified byte-exact against a reference model over 400 randomised trials × 40 writes.
+
+**Accidental presses and the lockout.** `_recState` stays at `Stopping` for the whole stop path, so anything slow there is a dead hotkey. Two guards now discard non-dictation before it can cost anything:
+
+1. **Min-hold** (`MinHoldMs`, default 250) — press-to-release shorter than this is a brush against the key. Discarded with no API call, no error tone, no post-roll wait.
+2. **Silence** (`SilenceThreshold`, default **0.003 RMS**) — covers "held it and then thought about what to say". Gated on **RMS, not peak**, and that distinction was measured, not assumed: two silent-room captures peaked at **0.0123 / 0.0124** (one fan or keyboard transient is enough) while their RMS was **0.00060 / 0.00124**. Speech RMS runs 0.01–0.1, so RMS separates by 20–100× where peak separated by 1.2× — a peak gate at any safe threshold simply never fires on the case it exists for. The 0.003 default sits 2.5–5× above the observed silence floor and 3–30× below speech. Both levels are logged on every capture (`[diag] captured …ms, RMS …, peak …`) so the threshold can be re-checked against real dictation, and the WAV is written to disk *before* the gate so a misjudged clip is recoverable.
+
+Also gone: the `await Task.Delay(1500)` that ran **inside** the try block on the error path, holding `_recState` at `Stopping` for 1.5 s after every failed dictation — on top of the transcription round-trip it had just wasted (observed in `debug.log`: four consecutive ~2 s lockouts on 0.17–0.42 s accidental clips). Transient status text now goes through `FlashStatus()`, a Background-priority one-shot timer that never blocks the state machine. An empty-but-successful transcription is no longer treated as an error either — it gets the quiet `Dismissed` blip, not the 300 Hz error buzz.
+
+**Tuning knobs** (all in `config.json`, all clamped on load): `WarmMicEnabled`, `WarmMicIdleSeconds` (0 = hold while running), `PreRollMs`, `PostRollMs`, `MinHoldMs`, `SilenceThreshold` (0 = disable the gate).
 
 ### Provider system
 
@@ -134,7 +159,9 @@ Cohere v2 rejects requests where `file` appears before string fields. WhisperInk
 
 ### UI sounds
 
-Start/stop chirps are procedurally generated sine waves. No asset files.
+Chirps are procedurally generated sine waves — no asset files — synthesised **once** at startup and played through `UiSoundPlayer`'s persistent output device. Five tones: `Start` (1200 Hz), `Stop` (800 Hz), `Success` (1600 Hz), `Error` (300 Hz), and `Dismissed` (520 Hz, quieter — "I saw the press and threw it away", deliberately not the error buzz). Each has a 4 ms attack ramp; the old synth started the envelope at full amplitude, which put a click in front of every chirp.
+
+Holding the render device open means WAVE_MAPPER binds to whatever was default at open time, so `UiSoundPlayer` re-checks the default endpoint before each tone (~3 ms, measured) and reopens when it changed — otherwise plugging in headphones would keep chirping at the speakers.
 
 ## Build & publish
 

@@ -77,23 +77,57 @@ namespace WhisperInk
         // fields plus their disposal boilerplate.
         private TranscriberFactory? _transcribers;
 
-        private WaveInEvent? _waveIn;
-        private WaveFileWriter? _writer;
         private string _currentFileName = "";
 
-        // ── In-memory WAV capture (Path 1 optimization) ───────────────
-        // Captures each audio chunk into an in-memory WaveFileWriter
-        // alongside the disk writer. When transcribing via local GGUF
-        // server providers, we upload these bytes directly and skip the
-        // disk-read round-trip, saving ~20-30ms per dictation.
-        private MemoryStream? _memWavStream;
-        private WaveFileWriter? _memWavWriter;
+        // ── Audio capture ────────────────────────────────────────────
+        // Owns the microphone: held open between dictations with a pre-roll
+        // ring buffer, so pressing the hotkey starts a recording that already
+        // contains the last few hundred ms. See MicCapture for why.
+        private MicCapture? _mic;
+
+        // Bytes of the last capture. Local GGUF servers get these directly and
+        // skip the disk round-trip; the on-disk copy is only a debug artifact.
         private byte[]? _lastWavBytes;
+
+        // Persistent output device for the UI chirps — the old per-chirp
+        // SoundPlayer cost 190-222 ms. See UiSoundPlayer.
+        private UiSoundPlayer? _sounds;
+
+        // Environment.TickCount64 at the moment the hotkey went down.
+        // Press-to-release duration is the intent signal used to throw away
+        // accidental taps without spending a transcription on them.
+        private long _pressTicks;
+
+        // Releases the warm mic after a spell of no dictation so the Windows
+        // microphone-in-use indicator isn't lit forever.
+        private DispatcherTimer? _micIdleTimer;
+
+        // One-shot restore for transient status text, so showing a message
+        // never blocks the recording state machine. See FlashStatus.
+        private DispatcherTimer? _statusFlashTimer;
 
         private DispatcherTimer _animationTimer = null!;
         private readonly Random _rng = new();
 
-        private enum SoundType { Start, Stop, Success, Error }
+        // ── Responsiveness tuning (all config.json-overridable) ───────
+        // Keep the mic open between dictations. Off = the pre-v2 behaviour:
+        // every press pays a ~130 ms device open and clips the onset.
+        private bool _warmMicEnabled = true;
+        // Close the warm mic after this long idle. 0 = hold it while running.
+        private int _warmMicIdleSeconds = 180;
+        // How much pre-press audio to prepend. 400 ms comfortably covers the
+        // ~130 ms open plus dispatcher and hook latency.
+        private int _preRollMs = 400;
+        // Wait this long at release for the in-flight buffer, so fixing the
+        // clipped start doesn't introduce a clipped end.
+        private int _postRollMs = 80;
+        // Presses shorter than this are treated as accidental: discarded with
+        // no API call, no error tone and no lockout.
+        private int _minHoldMs = 250;
+        // RMS level (0..1) below which a clip counts as "said nothing".
+        // Measured silence on this mic is 0.0006-0.0012 RMS and speech is
+        // 0.01-0.1, so 0.003 has margin both ways. 0 disables the gate.
+        private double _silenceThreshold = 0.003;
 
         private static readonly string LogFile = Path.Combine(ConfigFolder, "debug.log");
 
@@ -164,6 +198,9 @@ namespace WhisperInk
                 return;
             }
 
+            try { _micIdleTimer?.Stop(); } catch { }
+            try { _mic?.Dispose(); } catch { }
+            try { _sounds?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _transcribers?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
@@ -200,6 +237,12 @@ namespace WhisperInk
             _animationTimer.Tick += (_, _) => UpdateHistogram();
 
             LoadConfig();
+
+            // Audio devices are created after LoadConfig so they see the
+            // configured mic index and pre-roll length.
+            _sounds = new UiSoundPlayer(Log);
+            _mic = new MicCapture(() => _selectedDeviceNumber, () => _preRollMs, Log);
+            WarmMic();
 
             // Factory owns one ITranscriber per provider. The GPU-backend
             // delegate lets it pick up live edits from the settings dialog
@@ -389,6 +432,16 @@ namespace WhisperInk
                     if (root.TryGetProperty("MistralApiKey", out var key)) legacyMistralKey = key.GetString() ?? "";
                     if (root.TryGetProperty("IsSoundEnabled", out var snd)) _isSoundEnabled = snd.GetBoolean();
                     if (root.TryGetProperty("SelectedDevice", out var dev)) _selectedDeviceNumber = dev.GetInt32();
+
+                    // ── Responsiveness tuning ──
+                    // Clamped, not trusted: a hand-edited 0 ms pre-roll or a
+                    // 5 s min-hold would quietly break dictation.
+                    if (root.TryGetProperty("WarmMicEnabled", out var wm)) _warmMicEnabled = wm.GetBoolean();
+                    if (root.TryGetProperty("WarmMicIdleSeconds", out var wmi)) _warmMicIdleSeconds = Math.Max(0, wmi.GetInt32());
+                    if (root.TryGetProperty("PreRollMs", out var pr)) _preRollMs = Math.Clamp(pr.GetInt32(), 0, 3000);
+                    if (root.TryGetProperty("PostRollMs", out var po)) _postRollMs = Math.Clamp(po.GetInt32(), 0, 1000);
+                    if (root.TryGetProperty("MinHoldMs", out var mh)) _minHoldMs = Math.Clamp(mh.GetInt32(), 0, 2000);
+                    if (root.TryGetProperty("SilenceThreshold", out var sil)) _silenceThreshold = Math.Clamp(sil.GetDouble(), 0.0, 0.5);
                     if (root.TryGetProperty("ContextBiasTerms", out var cbt) && cbt.ValueKind == JsonValueKind.Array)
                     {
                         _contextBiasTerms = new List<string>();
@@ -587,7 +640,13 @@ namespace WhisperInk
                     QuitOnClose     = _quitOnClose,
                     LaunchAtStartup = _launchAtStartup,
                     HasSeenFirstRun = _hasSeenFirstRun,
-                    CrispGpuBackend = _crispGpuBackend
+                    CrispGpuBackend = _crispGpuBackend,
+                    WarmMicEnabled     = _warmMicEnabled,
+                    WarmMicIdleSeconds = _warmMicIdleSeconds,
+                    PreRollMs          = _preRollMs,
+                    PostRollMs         = _postRollMs,
+                    MinHoldMs          = _minHoldMs,
+                    SilenceThreshold   = _silenceThreshold
                 };
                 // Serialize the TranscriberKind enum as a string so config.json
                 // both stays human-readable AND round-trips through LoadConfig
@@ -605,7 +664,13 @@ namespace WhisperInk
         // MainWindow_Loaded). Synthetic typing/paste/release: TextInjector.
 
         // ════════════════════════════════════════════════════════════════
-        // BATCH DICTATION MODE — now with parallel in-memory WAV capture
+        // BATCH DICTATION MODE
+        //
+        // The press path does no device work: MicCapture is already streaming
+        // into a pre-roll ring, so starting a dictation attaches a writer and
+        // seeds it with audio from before the keypress. The release path does
+        // no device teardown either. What used to be ~130 ms of clipped onset
+        // and ~120 ms of teardown is now a couple of milliseconds each way.
         // ════════════════════════════════════════════════════════════════
 
         private void StartBatchDictation()
@@ -618,9 +683,17 @@ namespace WhisperInk
             }
 
             if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
+            _pressTicks = Environment.TickCount64;
+
+            // FIRST, before any device or UI work: the chirp is the user's only
+            // confirmation that the press registered, so nothing may queue ahead
+            // of it. It costs ~0 ms to enqueue and plays on its own thread.
+            PlayUiSound(UiSound.Start);
+
             _hook?.BeginSuppression();
             _lastWavBytes = null;
             _injector.ReleaseAllModifierKeys();
+            _micIdleTimer?.Stop();
 
             MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(255, 100, 100));
             lblStatus.Content = "🎙 REC";
@@ -628,70 +701,106 @@ namespace WhisperInk
             HistogramPanel.Visibility = Visibility.Visible;
             _animationTimer.Start();
 
-            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MyRecordings");
-            if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
-            _currentFileName = Path.Combine(folder, "temp_audio.wav");
+            // No device open, no file created: the mic is already streaming into
+            // the pre-roll ring, so this just attaches a writer and seeds it with
+            // audio from before the keypress. On a cold device it falls back to
+            // opening one (the old ~130 ms path) and preRoll comes back 0.
+            int preRoll = _mic?.BeginCapture() ?? -1;
+            if (preRoll < 0)
+            {
+                Log("[mic] capture could not start — no usable input device");
+                Volatile.Write(ref _recState, 0);
+                ResetUi();
+                PlayUiSound(UiSound.Error);
+                FlashStatus("No mic!", 1500);
+                return;
+            }
 
-            _waveIn = new WaveInEvent();
-            if (_selectedDeviceNumber < WaveIn.DeviceCount) _waveIn.DeviceNumber = _selectedDeviceNumber;
-            else _selectedDeviceNumber = 0;
-            _waveIn.WaveFormat = new WaveFormat(16000, 1);
-
-            // Parallel writers: one to disk (for replay / debugging),
-            // one to memory (for local GGUF server providers to use directly).
-            _writer = new WaveFileWriter(_currentFileName, _waveIn.WaveFormat);
-            _memWavStream = new MemoryStream();
-            _memWavWriter = new WaveFileWriter(new IgnoreDisposeStream(_memWavStream), _waveIn.WaveFormat);
-
-            _waveIn.DataAvailable += OnBatchAudioDataAvailable;
-            _waveIn.StartRecording();
-
-            PlayUiSound(SoundType.Start);
-        }
-
-        private void OnBatchAudioDataAvailable(object? sender, WaveInEventArgs a)
-        {
-            // Write each audio chunk to both sinks in the same callback, so they
-            // stay byte-identical. Tiny CPU cost; no I/O on the memory path.
-            try { _writer?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
-            try { _memWavWriter?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
+            Log($"[diag] StartBatchDictation: capturing (pre-roll {preRoll}ms, mic was {(preRoll > 0 ? "warm" : "cold")})");
         }
 
         private async Task StopBatchDictationAsync()
         {
             if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
-            Log("[diag] StopBatchDictation: enter");
+
+            // Press-to-release duration is the intent signal. A brush against
+            // the key is well under 250 ms; deliberate dictation never is.
+            long holdMs = Environment.TickCount64 - _pressTicks;
+            bool accidental = holdMs < _minHoldMs;
+            Log($"[diag] StopBatchDictation: enter (held {holdMs}ms)");
 
             try
             {
                 // ── Pipeline timing instrumentation ──
                 var swBatch = System.Diagnostics.Stopwatch.StartNew();
-                long tPlaySound, tWaveStop, tFlush, tTranscribe, tPaste;
+                long tCapture, tTranscribe, tPaste;
 
-                PlayUiSound(SoundType.Stop);
-                tPlaySound = swBatch.ElapsedMilliseconds;
+                // Detach the writer and collect the WAV. The mic itself keeps
+                // running, so there's no device teardown here any more — that
+                // used to cost 112-134 ms on every dictation. An accidental tap
+                // skips the post-roll drain entirely; there's nothing to save.
+                var mic = _mic;
+                byte[]? wav = mic == null
+                    ? null
+                    : await Task.Run(() => mic.EndCapture(accidental ? 0 : _postRollMs));
+                _lastWavBytes = wav;
+                tCapture = swBatch.ElapsedMilliseconds;
 
-                try { _waveIn?.StopRecording(); } catch { }
-                try { _waveIn?.Dispose(); } catch { }
-                _waveIn = null;
-                tWaveStop = swBatch.ElapsedMilliseconds;
-
-                // Flush both writers and capture in-memory bytes.
-                try { _writer?.Dispose(); } catch { }
-                _writer = null;
-
-                try
+                // ── Guard 1: accidental press ────────────────────────────
+                // Discarded before it can cost an API call, an error tone, or
+                // (worst case) a 120 s local-server spawn that pins the state
+                // machine and locks the hotkey out.
+                if (accidental)
                 {
-                    _memWavWriter?.Dispose();
-                    if (_memWavStream != null)
-                    {
-                        _lastWavBytes = _memWavStream.ToArray();
-                        _memWavStream.Dispose();
-                    }
+                    Log($"[skip] held {holdMs}ms < {_minHoldMs}ms — discarded, no transcription");
+                    PlayUiSound(UiSound.Dismissed);
+                    FlashStatus("(tap)");
+                    return;
                 }
-                catch (Exception ex) { Log($"Memory WAV flush error: {ex.Message}"); _lastWavBytes = null; }
-                finally { _memWavWriter = null; _memWavStream = null; }
-                tFlush = swBatch.ElapsedMilliseconds;
+
+                PlayUiSound(UiSound.Stop);
+
+                if (wav is not { Length: > 0 })
+                {
+                    Log("[skip] no audio captured");
+                    PlayUiSound(UiSound.Dismissed);
+                    FlashStatus("(no audio)");
+                    return;
+                }
+
+                // Debug/replay copy only — transcription uses the bytes in
+                // memory. Off the hot path because MyDocuments is OneDrive-
+                // synced here and a sync stall would otherwise stall dictation.
+                // Written BEFORE the silence gate on purpose: if that gate ever
+                // misjudges real speech, the audio is still on disk to check.
+                WriteDebugWav(wav);
+
+                // ── Guard 2: held but silent ─────────────────────────────
+                // Covers "pressed and then thought about what to say". The
+                // provider returns an empty string for this anyway; deciding it
+                // locally skips the round-trip and the error path.
+                //
+                // Gated on RMS, not peak. Peak is the intuitive choice and was
+                // measured useless: two silent-room captures peaked at 0.0123
+                // and 0.0124 (one fan or keyboard transient is enough) while
+                // their RMS was 0.00060 and 0.00124. Speech RMS runs 0.01-0.1,
+                // so the 0.003 default sits 2.5-5x above the observed silence
+                // floor and 3-30x below speech — margin in both directions,
+                // where peak had none at any safe threshold.
+                //
+                // Both levels are logged on every capture so the threshold can
+                // be re-checked against real dictation, and the WAV is already
+                // on disk above, so a misjudged clip is recoverable.
+                double audioMs = GetWavDurationMs(wav);
+                var level = MicCapture.Measure(wav);
+                if (_silenceThreshold > 0 && level.Rms < _silenceThreshold)
+                {
+                    Log($"[skip] {audioMs:F0}ms of audio, RMS {level.Rms:F5} < {_silenceThreshold:F5} (peak {level.Peak:F4}) — nothing said, no transcription");
+                    PlayUiSound(UiSound.Dismissed);
+                    FlashStatus("(silence)");
+                    return;
+                }
+                Log($"[diag] captured {audioMs:F0}ms, RMS {level.Rms:F5}, peak {level.Peak:F4}");
 
                 lblStatus.Content = "Processing...";
                 lblStatus.Opacity = 1;
@@ -700,7 +809,7 @@ namespace WhisperInk
                 string? text = await TranscribeAudioAsync(_currentFileName);
                 tTranscribe = swBatch.ElapsedMilliseconds;
                 Log($"[diag] StopBatchDictation: post-transcribe, text.Length={text?.Length ?? -1}");
-                if (!string.IsNullOrEmpty(text))
+                if (!string.IsNullOrWhiteSpace(text))
                 {
                     if (_targetWindow != IntPtr.Zero)
                         SetForegroundWindow(_targetWindow);
@@ -710,16 +819,24 @@ namespace WhisperInk
                     Log("[diag] StopBatchDictation: post-paste, pre-history");
                     HistoryService.Add(text);
                     Log("[diag] StopBatchDictation: post-history");
-                    PlayUiSound(SoundType.Success);
+                    PlayUiSound(UiSound.Success);
 
                     int charCount = text?.Length ?? 0;
-                    Log($"Batch pipeline: sound={tPlaySound}ms  waveStop={tWaveStop - tPlaySound}ms  flush={tFlush - tWaveStop}ms  transcribe={tTranscribe - tFlush}ms  paste={tPaste - tTranscribe}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
+                    Log($"Batch pipeline: capture={tCapture}ms  transcribe={tTranscribe - tCapture}ms  paste={tPaste - tTranscribe}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
+                }
+                else if (text != null)
+                {
+                    // The provider ran fine and heard nothing worth typing.
+                    // That is not a failure, so it gets neither the error tone
+                    // nor a status the user has to wait out.
+                    Log("[skip] provider returned no text");
+                    PlayUiSound(UiSound.Dismissed);
+                    FlashStatus("(nothing heard)");
                 }
                 else
                 {
-                    PlayUiSound(SoundType.Error);
-                    lblStatus.Content = "Error";
-                    await Task.Delay(1500);
+                    PlayUiSound(UiSound.Error);
+                    FlashStatus("Error", 1500);
                 }
 
                 Log("[diag] StopBatchDictation: exit");
@@ -741,7 +858,95 @@ namespace WhisperInk
                 Volatile.Write(ref _recState, 0);
                 ResetUi();
                 UpdateStatusLabel();
+                RestartMicIdleTimer();
             }
+        }
+
+        /// <summary>Shows a transient status without holding the recording
+        /// state machine. The old error path did `await Task.Delay(1500)`
+        /// INSIDE the try, so _recState stayed at Stopping for the whole
+        /// delay — the hotkey was dead for ~1.5 s after every mis-press, on
+        /// top of the transcription round-trip it had just wasted. This runs
+        /// at Background priority so it lands after the finally block's
+        /// UpdateStatusLabel() rather than being clobbered by it.
+        ///
+        /// Both halves bail out while recording. Dismissing an accidental tap
+        /// and immediately starting a real dictation is the common case, and
+        /// UpdateStatusLabel() sets the label unconditionally — without these
+        /// checks a stale flash would wipe "🎙 REC" off a live recording.</summary>
+        private void FlashStatus(string text, int ms = 900)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (IsRecording) return;
+                lblStatus.Content = text;
+                lblStatus.Opacity = 1;
+                _statusFlashTimer?.Stop();
+                _statusFlashTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
+                _statusFlashTimer.Tick += (_, _) =>
+                {
+                    _statusFlashTimer?.Stop();
+                    _statusFlashTimer = null;
+                    if (!IsRecording) UpdateStatusLabel();
+                };
+                _statusFlashTimer.Start();
+            }), DispatcherPriority.Background);
+        }
+
+        /// <summary>Writes the replay/debug copy of the capture. Fire-and-forget:
+        /// the transcription path uses the in-memory bytes, and MyDocuments
+        /// resolves to a OneDrive-synced folder on this machine, so a sync stall
+        /// must never be able to stall a dictation.</summary>
+        private void WriteDebugWav(byte[] wav)
+        {
+            string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MyRecordings");
+            string path = Path.Combine(folder, "temp_audio.wav");
+            _currentFileName = path; // set synchronously; only the write is deferred
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    if (!Directory.Exists(folder)) Directory.CreateDirectory(folder);
+                    File.WriteAllBytes(path, wav);
+                }
+                catch (Exception ex) { Log($"[diag] debug WAV write failed: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>Arms the countdown that closes the warm mic once dictation
+        /// has been idle for a while, so the Windows microphone-in-use
+        /// indicator isn't lit for the whole session.</summary>
+        private void RestartMicIdleTimer()
+        {
+            _micIdleTimer?.Stop();
+            if (!_warmMicEnabled || _warmMicIdleSeconds <= 0) return;
+            _micIdleTimer ??= CreateMicIdleTimer();
+            _micIdleTimer.Interval = TimeSpan.FromSeconds(_warmMicIdleSeconds);
+            _micIdleTimer.Start();
+        }
+
+        private DispatcherTimer CreateMicIdleTimer()
+        {
+            var timer = new DispatcherTimer();
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                if (IsRecording || IsStopping) return;
+                if (_mic?.IsWarm == true)
+                {
+                    _mic.Release();
+                    Log($"[mic] released after {_warmMicIdleSeconds}s idle");
+                }
+            };
+            return timer;
+        }
+
+        /// <summary>Opens the mic ahead of the first dictation so it isn't the
+        /// press itself that pays the ~130 ms device open.</summary>
+        private void WarmMic()
+        {
+            if (!_warmMicEnabled || _mic == null) return;
+            if (_mic.EnsureOpen()) RestartMicIdleTimer();
         }
 
         // ── Transcription dispatch ──────────────────────────────────────
@@ -822,50 +1027,16 @@ namespace WhisperInk
             }
         }
 
-        private void PlayUiSound(SoundType type)
+        /// <summary>Chirp. Delegates to the persistent output device in
+        /// UiSoundPlayer — the previous implementation synthesised a WAV and
+        /// called SoundPlayer.PlaySync() per chirp, which measured 190-222 ms
+        /// for a 30 ms tone because winmm reopens the render endpoint every
+        /// time. That delay was the "lag on the beep": the press had already
+        /// registered, but the confirmation arrived a fifth of a second late.</summary>
+        private void PlayUiSound(UiSound type)
         {
             if (!_isSoundEnabled) return;
-            Task.Run(() =>
-            {
-                try
-                {
-                    int sampleRate = 44100;
-                    int duration = type switch { SoundType.Start => 30, SoundType.Stop => 30, SoundType.Success => 50, SoundType.Error => 120, _ => 0 };
-                    double freq = type switch { SoundType.Start => 1200, SoundType.Stop => 800, SoundType.Success => 1600, SoundType.Error => 300, _ => 0 };
-
-                    int samples = sampleRate * duration / 1000;
-                    using var ms = new MemoryStream();
-                    using var writer = new BinaryWriter(ms);
-
-                    int dataSize = samples * 2;
-                    writer.Write(Encoding.ASCII.GetBytes("RIFF"));
-                    writer.Write(36 + dataSize);
-                    writer.Write(Encoding.ASCII.GetBytes("WAVE"));
-                    writer.Write(Encoding.ASCII.GetBytes("fmt "));
-                    writer.Write(16);
-                    writer.Write((short)1);
-                    writer.Write((short)1);
-                    writer.Write(sampleRate);
-                    writer.Write(sampleRate * 2);
-                    writer.Write((short)2);
-                    writer.Write((short)16);
-                    writer.Write(Encoding.ASCII.GetBytes("data"));
-                    writer.Write(dataSize);
-
-                    for (int i = 0; i < samples; i++)
-                    {
-                        double t = (double)i / sampleRate;
-                        double envelope = Math.Max(0, 1.0 - t / (duration / 1000.0));
-                        double sample = Math.Sin(2 * Math.PI * freq * t) * envelope * 0.3;
-                        writer.Write((short)(sample * short.MaxValue));
-                    }
-
-                    ms.Position = 0;
-                    using var player = new System.Media.SoundPlayer(ms);
-                    player.PlaySync();
-                }
-                catch { }
-            });
+            _sounds?.Play(type);
         }
 
         // ── Shared app menu ────────────────────────────────────────────
@@ -975,9 +1146,33 @@ namespace WhisperInk
                 {
                     Header = cap.ProductName,
                     IsChecked = i == _selectedDeviceNumber,
-                    Action = () => { _selectedDeviceNumber = deviceIndex; SaveConfig(); },
+                    Action = () =>
+                    {
+                        _selectedDeviceNumber = deviceIndex;
+                        SaveConfig();
+                        // The warm mic is bound to the old index — reopen it on
+                        // the new one, or the user's choice silently does nothing.
+                        _mic?.DeviceChanged();
+                    },
                 });
             }
+
+            children.Add(MenuNode.Separator());
+            children.Add(new MenuNode
+            {
+                // Holding the device open is what removes the ~130 ms open from
+                // the press and makes pre-roll possible; the cost is that
+                // Windows shows the mic as in use between dictations.
+                Header = _warmMicEnabled ? "⚡ Instant start: ON" : "⚡ Instant start: OFF",
+                Action = () =>
+                {
+                    _warmMicEnabled = !_warmMicEnabled;
+                    SaveConfig();
+                    if (_warmMicEnabled) WarmMic();
+                    else { _micIdleTimer?.Stop(); _mic?.Release(); }
+                },
+            });
+
             return new MenuNode { Header = "🎙 Microphone", Children = children };
         }
 
