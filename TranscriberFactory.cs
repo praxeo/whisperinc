@@ -51,6 +51,9 @@ namespace WhisperInk
             TranscriberKind.GoogleChirp3        => new GoogleChirp3Transcriber(provider, _log),
             TranscriberKind.Soniox              => new SonioxTranscriber(provider, _http, _log),
             TranscriberKind.Deepgram            => new DeepgramTranscriber(provider, _http, _log),
+            TranscriberKind.Modulate            => new ModulateTranscriber(provider, _http, _log),
+            TranscriberKind.Smallest            => new SmallestTranscriber(provider, _http, _log),
+            TranscriberKind.Reson8              => new Reson8Transcriber(provider, _http, _log),
             _                                   => new HttpTranscriber(provider, _http, _log),
         };
 

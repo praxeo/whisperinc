@@ -17,6 +17,9 @@ namespace WhisperInk
         GoogleChirp3,         // Google Cloud STT v2 with OAuth + JSON body
         Soniox,               // Soniox async REST job: upload → create → poll → transcript (SonioxTranscriber)
         Deepgram,             // Deepgram Listen API: raw-body POST, Token auth, query-param options (DeepgramTranscriber)
+        Modulate,             // Modulate Velma 2 batch: multipart upload_file, X-API-Key, model-per-endpoint (ModulateTranscriber)
+        Smallest,             // Smallest.ai Waves STT: raw-body POST, Bearer auth, query-param options (SmallestTranscriber)
+        Reson8,               // Reson8 prerecorded STT: raw-body POST, "ApiKey" auth, query-param options, RFC 7807 errors (Reson8Transcriber)
     }
 
     public class ApiProvider
@@ -86,6 +89,14 @@ namespace WhisperInk
         //   "context_terms"        — Soniox context.terms (handled natively)
         //   "deepgram_keyterm"     — Deepgram Nova-3 keyterm prompting / legacy
         //                            `keywords` query params (handled natively)
+        //   "modulate_custom_terms" — Modulate custom_terms, inside the JSON
+        //                            `config` form field (handled natively;
+        //                            Velma 2 Multilingual batch only)
+        //   "reson8_phrases"       — Reson8 comma-separated `phrases` query
+        //                            param, up to 250 (handled natively).
+        //                            NB: on this provider an over-long list
+        //                            actively DEGRADES accuracy per upstream,
+        //                            rather than being merely ignored.
         //
         // Blank → derived from the legacy ContextBiasMode via ResolvedBiasMechanism.
         public string BiasMechanism { get; set; } = "";
@@ -201,6 +212,24 @@ namespace WhisperInk
         // reserved and skipped. Values are sent as-is (URL-encoded); Deepgram
         // ignores unknown params.
         public Dictionary<string, string> DeepgramExtraParams { get; set; } = new();
+
+        // Per-provider passthrough of extra Reson8 prerecorded QUERY params,
+        // merged verbatim into the request URL. The Deepgram analog for the
+        // Reson8 path, and unlike Modulate/Smallest (which deliberately have no
+        // passthrough because every knob they expose degrades dictation) this
+        // one carries knobs worth having:
+        //   {"custom_model_id":"..."}  persistent vocabulary, up to 50,000
+        //                              phrases — far past the 250 that fit in
+        //                              the per-request `phrases` param
+        //   {"filler_mode":"clean"}    drop filler words ("um", "uh"); the API
+        //                              default is "natural" (model decides),
+        //                              "verbatim" keeps them
+        //   {"patterns":"..."}         regex-style recovery of short
+        //                              alphanumeric tokens (order codes, plates)
+        // Only consulted by Reson8Transcriber. Keys it already sets — language /
+        // phrases, plus encoding / sample_rate / channels (which describe the WAV
+        // body itself) — are reserved and skipped.
+        public Dictionary<string, string> Reson8ExtraParams { get; set; } = new();
 
         /// <summary>Validate an arbitrary term list against the ElevenLabs Scribe v2
         /// keyterm rules (≤1000 terms, &lt;50 chars, ≤5 words, no chars that break the
@@ -387,21 +416,55 @@ namespace WhisperInk
             // configs that still carry them keep working.
             new ApiProvider
             {
-                Id = "qwen3-asr",
-                BiasMechanism = "whisper_prompt",
-                Name = "Qwen3-ASR Local",
-                BaseUrl = "http://localhost:8102",
-                TranscriptionModel = "",
+                // Qwen3-ASR 1.7B — auto-spawned CrispASR server on port 8112.
+                // Replaces the old `qwen3-asr` Http entry (port 8102), which
+                // pointed at a server the user had to start by hand; this one
+                // is spawned and owned by WhisperInk like every other local
+                // preset. Ports 8103/8105-8109/8766 are taken by the presets
+                // above, 8110 is the canary example in CLAUDE.md and 8111 was
+                // the retired lfm2-audio trial, so 8112 is the first clean one.
+                Id = "qwen3-asr-1.7b-local",
+                // hotwords is REAL here and it is the only local preset where
+                // that is true. The qwen3 backend splices the term list into
+                // the decoder's ChatML prompt ("...may appear in the audio: ")
+                // rather than into a CTC/TDT trie, so it steers a speech-LLM
+                // instead of re-weighting lattice arcs. Measured 2026-08-29 on
+                // the clinical clips in _scratch/biasing/clips: baseline missed
+                // hematochezia twice (-> "hematuria" / "hematemesis") and
+                // mangled ureterolithiasis (-> "bursitis with edema"); with the
+                // terms supplied all three came back exactly right, 3/3
+                // reproducible, and the controls were untouched. No boost knob
+                // is set: unlike Parakeet's trie there is nothing to over-boost,
+                // and a long list dilutes rather than garbles (a 40-term list
+                // still fixed 5 of 6, softening only ureterolithiasis into
+                // "ureteral lithiasis").
+                BiasMechanism = "hotwords",
+                Name = "Qwen3-ASR 1.7B Local (CrispASR)",
+                BaseUrl = "http://localhost:8112",
+                TranscriptionEndpoint = "http://localhost:8112/v1/audio/transcriptions",
+                TranscriptionModel = "qwen3",
                 SupportsTranscription = true,
-                TranscriptionTemperature = null,
-                // Best-effort biasing: bias terms ride the OpenAI "prompt" field as a
-                // labeled glossary (honored by local prompt-aware shims). Real DashScope
-                // Qwen3-ASR biases via a chat system message, not the multipart path.
                 ContextBiasMode = "none",
                 Language = "en",
-                // User-managed external server — talks the OpenAI multipart
-                // protocol so the generic HTTP path handles it.
-                TranscriberKind = TranscriberKind.Http,
+                TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+                LocalServerPort = 8112,
+                // Pinned to the 1.7b family so a future qwen3-asr-0.6b GGUF
+                // dropped in the same folder cannot hijack this preset (the
+                // same trap the two Parakeet globs above are avoiding). Note
+                // it would still match a qwen3-asr-1.7b-ja-anime GGUF, which
+                // is the same architecture and would at least run correctly.
+                LocalModelGlob = "qwen3-asr-1.7b-*.gguf",
+                // Auto-detect resolves this GGUF to the plain `qwen3` backend
+                // and transcribes identically, but the hint is pinned anyway:
+                // it documents which of the two registered qwen3 backend names
+                // this preset means, and survives a change in auto-detection.
+                LocalBackendHint = "qwen3-1.7b",
+                // Deliberately no LocalPuncModel. Qwen3-ASR is a speech-LLM and
+                // emits punctuation and sentence case natively -- on jfk.wav it
+                // produced a correct semicolon and capitalised "Americans"
+                // where parakeet-rnnt needed --punc-model fullstop and still
+                // returned "americans". Adding one would only re-punctuate
+                // text that is already punctuated.
             },
             new ApiProvider
             {
@@ -647,6 +710,172 @@ namespace WhisperInk
                 // NB: the API reports arch="nova-3" for nova-3-medical (internal
                 // name medical-nova-3); that's expected, not a fallback.
                 DeepgramExtraParams = new(),
+            },
+            new ApiProvider
+            {
+                // Modulate Velma 2 — MULTILINGUAL batch (platform.modulate.ai).
+                // Not OpenAI-compatible: the audio part is "upload_file", auth is
+                // a bare X-API-Key header, and the model is chosen by ENDPOINT
+                // PATH rather than a "model" form field — which is why all three
+                // Modulate presets leave TranscriptionModel blank and differ only
+                // by TranscriptionEndpoint. ModulateTranscriber handles them.
+                //
+                // This is the full-featured endpoint and the only one of the
+                // three with custom vocabulary. ContextBiasMode stays "none"
+                // because biasing doesn't flow through the generic switch —
+                // ModulateTranscriber packs the shared ContextBiasTerms into the
+                // JSON `config` field's custom_terms array (real vocabulary
+                // steering), same pattern as Soniox/Deepgram.
+                Id = "modulate",
+                BiasMechanism = "modulate_custom_terms",
+                Name = "Modulate Velma 2 (Multilingual)",
+                BaseUrl = ModulateTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = ModulateTranscriber.DefaultBaseUrl + ModulateTranscriber.PathMultilingual,
+                TranscriptionModel = "",
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Modulate,
+            },
+            new ApiProvider
+            {
+                // Modulate Velma 2 — ENGLISH FAST batch. The lowest-latency
+                // Modulate model, and the one to reach for when dictation speed
+                // matters more than vocabulary control: English-only, no custom
+                // vocabulary, and it accepts no `language` parameter at all.
+                // Transcripts come back auto-capitalized and auto-punctuated.
+                Id = "modulate-english-fast",
+                BiasMechanism = "none",
+                Name = "Modulate Velma 2 English Fast",
+                BaseUrl = ModulateTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = ModulateTranscriber.DefaultBaseUrl + ModulateTranscriber.PathEnglishFast,
+                TranscriptionModel = "",
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Modulate,
+            },
+            new ApiProvider
+            {
+                // Modulate Velma 2 — MULTILINGUAL FAST batch. Any supported
+                // language with no metadata and no custom vocabulary; faster than
+                // the full Multilingual endpoint. Declaring Language takes the
+                // fastest direct path (blank or "auto" lets Modulate detect).
+                Id = "modulate-multilingual-fast",
+                BiasMechanism = "none",
+                Name = "Modulate Velma 2 Multilingual Fast",
+                BaseUrl = ModulateTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = ModulateTranscriber.DefaultBaseUrl + ModulateTranscriber.PathMultilingualFast,
+                TranscriptionModel = "",
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Modulate,
+            },
+            new ApiProvider
+            {
+                // Smallest.ai Waves — PULSE PRO (api.smallest.ai/waves/v1/stt/).
+                // Not OpenAI-compatible: the audio is the raw request body, all
+                // options are query params, and the transcript is a top-level
+                // "transcription". SmallestTranscriber handles both presets.
+                //
+                // English-only and the steadier of the two models — measured
+                // 1.37-1.69 s wall-clock on the six clinical clips with terminal
+                // punctuation on 6/6, where Pulse ranged 0.85-2.40 s and dropped
+                // the period twice.
+                //
+                // Language MUST resolve to "en": the API's enum for this model is
+                // exactly ["en"] and anything else (including WhisperInk's "auto")
+                // returns 400. SmallestTranscriber.ResolveLanguage enforces that,
+                // so this value is belt-and-braces rather than the only guard.
+                //
+                // BiasMechanism is a true "none" — the Waves STT API has no
+                // keyterm/hotword/custom-vocabulary field at all, so the shared
+                // ContextBiasTerms list cannot be routed anywhere and a
+                // mis-recognized term cannot be corrected on this provider.
+                Id = "smallest-pulse-pro",
+                BiasMechanism = "none",
+                Name = "Smallest.ai Pulse Pro (English)",
+                BaseUrl = SmallestTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = SmallestTranscriber.DefaultBaseUrl + SmallestTranscriber.PathTranscribe,
+                TranscriptionModel = SmallestTranscriber.ModelPulsePro,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Smallest,
+            },
+            new ApiProvider
+            {
+                // Smallest.ai Waves — PULSE (multilingual). Same endpoint as
+                // Pulse Pro; the model is a real `model` query param, so these
+                // two presets differ only by TranscriptionModel.
+                //
+                // Accepts 46 language codes (the published reference lists 26).
+                // Language must be set to SOMETHING: leaving it blank makes the
+                // server fall back to its own "multi" default, which is region-
+                // gated on this account and 400s. "auto" is safe — SmallestTranscriber
+                // maps it to the "multi-eu" aggregator, which is verified enabled.
+                Id = "smallest-pulse",
+                BiasMechanism = "none",
+                Name = "Smallest.ai Pulse (Multilingual)",
+                BaseUrl = SmallestTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = SmallestTranscriber.DefaultBaseUrl + SmallestTranscriber.PathTranscribe,
+                TranscriptionModel = SmallestTranscriber.ModelPulse,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Smallest,
+            },
+            new ApiProvider
+            {
+                // Reson8 — prerecorded STT (api.reson8.dev/v1/speech-to-text/
+                // prerecorded). Not OpenAI-compatible: the audio is the raw
+                // request body, every option is a query param, auth is
+                // "Authorization: ApiKey <key>" (a third scheme, alongside
+                // Deepgram's "Token"), and errors are RFC 7807 problem+json.
+                // Reson8Transcriber handles it.
+                //
+                // ONE preset, because there is one endpoint and NO `model`
+                // param — TranscriptionModel is unused here and stays blank.
+                // The customization axis is custom_model_id (a persistent
+                // vocabulary built in the Reson8 console), set via
+                // Reson8ExtraParams.
+                //
+                // ContextBiasMode stays "none" because biasing doesn't flow
+                // through the generic switch — Reson8Transcriber maps the shared
+                // ContextBiasTerms onto the `phrases` query param (up to 250
+                // terms), same native-routing pattern as Soniox/Deepgram.
+                //
+                // Language = "en" is deliberate rather than inherited. Reson8
+                // supports exactly ten languages and requests auto-detection by
+                // OMITTING the param (there is no "auto" value), but upstream
+                // warns detection is "less reliable for short utterances" —
+                // which is all a push-to-talk dictation tool ever sends. Note
+                // WhisperInk's language dropdown offers ja/ko/zh/ru/ar/hi, none
+                // of which Reson8 supports; Reson8Transcriber.ResolveLanguage
+                // drops those to auto-detect rather than letting them 400 away
+                // every dictation.
+                Id = "reson8",
+                BiasMechanism = "reson8_phrases",
+                Name = "Reson8",
+                BaseUrl = Reson8Transcriber.DefaultBaseUrl,
+                TranscriptionEndpoint = Reson8Transcriber.DefaultBaseUrl + Reson8Transcriber.PathTranscribe,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Reson8,
+                // Empty by default: filler_mode "natural" is the API default and
+                // "clean" would silently rewrite transcripts, so it stays a
+                // deliberate opt-in. Add custom_model_id here once a custom
+                // vocabulary exists in the console — config.json only, no
+                // recompile.
+                Reson8ExtraParams = new(),
             }
         };
 
@@ -663,10 +892,15 @@ namespace WhisperInk
             "cohere-gguf-cuda-server"                                      => TranscriberKind.LocalCrispAsrServer,
             "cohere-gguf-cuda-server-q8"                                   => TranscriberKind.LocalCrispAsrServer,
             "parakeet-local" or "parakeet-rnnt-local" or "cohere-local-q4" or "cohere-local-q6k"
-                or "voxtral-local" or "voxtral4b-local" or "granite-local" => TranscriberKind.LocalCrispAsrServer,
+                or "voxtral-local" or "voxtral4b-local" or "granite-local"
+                or "qwen3-asr-1.7b-local"                                  => TranscriberKind.LocalCrispAsrServer,
             "google-chirp3"                                                => TranscriberKind.GoogleChirp3,
             "soniox"                                                       => TranscriberKind.Soniox,
             "deepgram" or "deepgram-medical"                               => TranscriberKind.Deepgram,
+            "modulate" or "modulate-english-fast"
+                or "modulate-multilingual-fast"                            => TranscriberKind.Modulate,
+            "smallest-pulse-pro" or "smallest-pulse"                       => TranscriberKind.Smallest,
+            "reson8"                                                       => TranscriberKind.Reson8,
             _                                                              => TranscriberKind.Http,
         };
     }

@@ -539,6 +539,14 @@ namespace WhisperInk
                                         extra[prop.Name] = prop.Value.GetString() ?? "";
                                 p.DeepgramExtraParams = extra;
                             }
+                            if (pEl.TryGetProperty("Reson8ExtraParams", out var rep) && rep.ValueKind == JsonValueKind.Object)
+                            {
+                                var extra = new Dictionary<string, string>();
+                                foreach (var prop in rep.EnumerateObject())
+                                    if (prop.Value.ValueKind == JsonValueKind.String)
+                                        extra[prop.Name] = prop.Value.GetString() ?? "";
+                                p.Reson8ExtraParams = extra;
+                            }
                             if (pEl.TryGetProperty("HotwordsBoost", out var hwb) && hwb.ValueKind == JsonValueKind.Number)
                                 p.HotwordsBoost = hwb.GetDouble();
 
@@ -953,7 +961,8 @@ namespace WhisperInk
         //
         // Single entry point for every batch transcription. The factory hands
         // back the right ITranscriber for the active provider (cloud HTTP,
-        // auto-spawned CrispASR server, Google Chirp 3, Soniox, Deepgram); we
+        // auto-spawned CrispASR server, Google Chirp 3, Soniox, Deepgram,
+        // Modulate, Smallest.ai); we
         // don't care which it is. Adding a new model is now a config-only change â€”
         // no new branches here.
 

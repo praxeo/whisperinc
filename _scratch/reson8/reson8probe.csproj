@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Wire-format probe for Reson8Transcriber.
+
+      dotnet run  (project)  _scratch\reson8
+
+    Needs no API key and no network access: it stands up a local HttpListener,
+    points the transcriber at it via ApiProvider.TranscriptionEndpoint, and
+    asserts what actually went on the wire.
+
+    The transcriber sources are LINKED, not copied — the probe exercises the
+    shipping code, and a change to Reson8Transcriber.cs that breaks the request
+    shape fails here rather than silently at dictation time.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Reson8Probe</RootNamespace>
+    <AssemblyName>reson8probe</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- Keep build output out of the repo root's bin/obj. -->
+    <BaseOutputPath>$(MSBuildThisFileDirectory)bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)obj\</BaseIntermediateOutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\Reson8Transcriber.cs" />
+    <Compile Include="..\..\ITranscriber.cs" />
+    <Compile Include="..\..\AppConfig.cs" />
+    <!-- AppConfig.CreateDefaults() builds preset URLs from consts on these. -->
+    <Compile Include="..\..\ModulateTranscriber.cs" />
+    <Compile Include="..\..\SmallestTranscriber.cs" />
+  </ItemGroup>
+
+</Project>
