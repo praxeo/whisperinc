@@ -30,6 +30,18 @@
     </None>
   </ItemGroup>
 
+  <!-- _scratch\ holds investigation harnesses, some of which are their own
+       csproj (e.g. _scratch\reson8). The SDK's default glob is **\*.cs, so
+       without this the app would compile a harness's Program.cs into itself
+       AND pick up its generated obj\...AssemblyInfo.cs — which surfaces as a
+       confusing "Duplicate AssemblyCompanyAttribute" CS0579 in a _wpftmp
+       project, not as anything pointing at _scratch. -->
+  <ItemGroup>
+    <Compile Remove="_scratch\**" />
+    <None Remove="_scratch\**" />
+    <Page Remove="_scratch\**" />
+  </ItemGroup>
+
   <!-- UseWindowsForms=true adds a global `using System.Windows.Forms` that
        collides with WPF types (Application, MessageBox, Clipboard, Button,
        Color). Remove it so WPF code keeps compiling — the tray code

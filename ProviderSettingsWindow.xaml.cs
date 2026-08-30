@@ -148,6 +148,8 @@ namespace WhisperInk
             "phrase_sets"          => "Domain vocabulary → Google phrase sets (native).",
             "context_terms"        => "Domain vocabulary → Soniox context terms (native).",
             "deepgram_keyterm"     => "Domain vocabulary → Deepgram Nova-3 keyterm prompting (native; `keywords` on older models).",
+            "modulate_custom_terms" => "Domain vocabulary → Modulate custom_terms (native; Velma 2 Multilingual batch only — the Fast endpoints ignore it).",
+            "reson8_phrases"       => "Domain vocabulary → Reson8 phrases (native; ≤250 terms). Keep the list tight — an over-long or off-topic list degrades accuracy here rather than being ignored.",
             _                      => "No native biasing — context-bias terms have no effect for this provider.",
         };
 
@@ -270,6 +272,9 @@ namespace WhisperInk
                 : new Dictionary<string, string>(),
             DeepgramExtraParams = src.DeepgramExtraParams != null
                 ? new Dictionary<string, string>(src.DeepgramExtraParams)
+                : new Dictionary<string, string>(),
+            Reson8ExtraParams = src.Reson8ExtraParams != null
+                ? new Dictionary<string, string>(src.Reson8ExtraParams)
                 : new Dictionary<string, string>(),
             BiasMechanism    = src.BiasMechanism,
             HotwordsBoost    = src.HotwordsBoost,
