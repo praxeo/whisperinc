@@ -144,7 +144,7 @@ namespace WhisperInk
             "mistral_context_bias" => "Domain vocabulary → Mistral context_bias (batch; ≤100 terms).",
             "whisper_prompt"       => "Domain vocabulary → prompt glossary.",
             "elevenlabs_keyterms"  => "Domain vocabulary → ElevenLabs keyterms (from the global Context Bias list).",
-            "hotwords"             => "Domain vocabulary → CrispASR hotwords (real on Parakeet/Voxtral; ignored by Cohere/Granite/Voxtral-4B).",
+            "hotwords"             => "Domain vocabulary → CrispASR hotwords (prompt text on Qwen3-ASR/Voxtral/Granite, a boost trie on Parakeet; ignored by Cohere/Voxtral-4B).",
             "phrase_sets"          => "Domain vocabulary → Google phrase sets (native).",
             "context_terms"        => "Domain vocabulary → Soniox context terms (native).",
             "deepgram_keyterm"     => "Domain vocabulary → Deepgram Nova-3 keyterm prompting (native; `keywords` on older models).",

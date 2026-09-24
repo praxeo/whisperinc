@@ -17,6 +17,7 @@
   <ItemGroup>
     <Compile Include="..\..\CrispAsrServerTranscriber.cs" />
     <Compile Include="..\..\HttpTranscriber.cs" />
+    <Compile Include="..\..\StreamedTranscription.cs" />
     <Compile Include="..\..\TranscriptionDeadline.cs" />
     <Compile Include="..\..\TranscriptCoverage.cs" />
     <Compile Include="..\..\UnsentTakes.cs" />

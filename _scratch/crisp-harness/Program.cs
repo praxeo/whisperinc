@@ -122,11 +122,77 @@ foreach (var t in afterRestart) restarted.Remove(t);
 Check(restarted.List().Count == 0 && !Directory.EnumerateFiles(ufolder).Any(), "a retried take is removed with its sidecar");
 
 // ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0e. Provider resolution, sibling inheritance, repaired defaults ==");
+const string ElevenUrl = "https://api.elevenlabs.io/v1/speech-to-text";
+// The entry the user added by hand on 2026-09-23: no auth header, no bias
+// mechanism. It sent Bearer and got 401 on every take.
+var handAdded = new ApiProvider { Id = "dd794bcb", TranscriptionEndpoint = ElevenUrl, ModelFieldName = "model_id", TranscriptionModel = "scribe_v2_medical", ApiKey = "k" };
+Check(handAdded.IsElevenLabs && handAdded.UsesCustomAuthHeader && handAdded.ResolvedAuthHeaderName == "xi-api-key",
+      $"a hand-added ElevenLabs entry with no auth header sends xi-api-key, not Bearer (got \"{handAdded.ResolvedAuthHeaderName}\")");
+Check(new ApiProvider { TranscriptionEndpoint = ElevenUrl }.ResolvedModelField == "model_id", "... and model_id when the model field is blank");
+Check(handAdded.ResolvedBiasMechanism == "elevenlabs_keyterms", "... and routes the shared list to keyterms (the legacy fallback sent nothing)");
+Check(new ApiProvider { TranscriptionEndpoint = ElevenUrl, AuthHeaderName = "X-Custom" }.ResolvedAuthHeaderName == "X-Custom", "an explicit auth header still wins");
+var openAi = new ApiProvider { BaseUrl = "https://api.openai.com" };
+Check(!openAi.UsesCustomAuthHeader && openAi.ResolvedModelField == "model" && openAi.ResolvedBiasMechanism == "none",
+      "a non-ElevenLabs entry keeps Bearer, \"model\" and the legacy bias fallback");
+var lookalike = new ApiProvider { BaseUrl = "https://notelevenlabs.io" };
+Check(!lookalike.IsElevenLabs && !lookalike.UsesCustomAuthHeader, "a look-alike host is not ElevenLabs, so the key never goes to it as xi-api-key");
+
+var defs = ApiProvider.CreateDefaults();
+var med = defs.Single(p => p.Id == "elevenlabs-medical");
+var scribeDef = defs.Single(p => p.Id == "elevenlabs");
+Check(med is { TranscriptionModel: "scribe_v2_medical", AuthHeaderName: "xi-api-key", ModelFieldName: "model_id", BiasMechanism: "elevenlabs_keyterms", TagAudioEvents: false, NoVerbatim: true, Language: "en" }
+      && med.IsElevenLabs && med.ResolvedTranscriptionUrl == scribeDef.ResolvedTranscriptionUrl,
+      "the Scribe Medical preset is the Scribe request with model_id scribe_v2_medical");
+Check(defs.Select(p => p.Id).Distinct().Count() == defs.Count, "no duplicate preset ids");
+
+// Sibling inheritance, as LoadConfig runs it for a preset new to a config.
+var scribe = new ApiProvider { Id = "elevenlabs", Name = "ElevenLabs Scribe", TranscriptionEndpoint = ElevenUrl, AuthHeaderName = "xi-api-key",
+                               ApiKey = "sk-eleven", ScribeKeytermsRaw = "afebrile\nMepilex", NoVerbatim = false, TagAudioEvents = true };
+var handMed = new ApiProvider { Id = "dd794bcb", TranscriptionEndpoint = ElevenUrl, ApiKey = "sk-other" };
+var dg = new ApiProvider { Id = "deepgram", BaseUrl = "https://api.deepgram.com", TranscriberKind = TranscriberKind.Deepgram, ApiKey = "dg-key" };
+var newMed = ApiProvider.CreateDefaults().Single(p => p.Id == "elevenlabs-medical");
+var from = ApiProvider.InheritFromSibling(newMed, new[] { handMed, dg, scribe });
+Check(from == scribe && newMed.ApiKey == "sk-eleven", "Scribe Medical takes the key from \"elevenlabs\" (the id prefix wins over another ElevenLabs entry)");
+Check(newMed.ScribeKeytermsRaw == "afebrile\nMepilex" && !newMed.NoVerbatim && newMed.TagAudioEvents, "... and its Scribe keyterms and output switches");
+var newDgMed = ApiProvider.CreateDefaults().Single(p => p.Id == "deepgram-medical");
+Check(ApiProvider.InheritFromSibling(newDgMed, new[] { scribe, dg }) == dg && newDgMed.ApiKey == "dg-key" && newDgMed.ScribeKeytermsRaw == "",
+      "deepgram-medical takes deepgram's key and nothing ElevenLabs-only");
+var soniox = ApiProvider.CreateDefaults().Single(p => p.Id == "soniox");
+Check(ApiProvider.InheritFromSibling(soniox, new[] { scribe, dg }) == null && soniox.ApiKey == "", "no sibling on the same host -> nothing inherited");
+var keyed = ApiProvider.CreateDefaults().Single(p => p.Id == "elevenlabs-medical");
+keyed.ApiKey = "already";
+Check(ApiProvider.InheritFromSibling(keyed, new[] { scribe }) == null && keyed.ApiKey == "already", "a preset that already has a key keeps it");
+Check(ApiProvider.InheritFromSibling(ApiProvider.CreateDefaults().Single(p => p.Id == "qwen3-asr-1.7b-local"), new[] { scribe }) == null,
+      "a local preset inherits nothing");
+
+// The granite-local glob, checked the way the transcriber resolves it:
+// Directory.EnumerateFiles over a folder holding both Granite GGUFs.
+var granite = defs.Single(p => p.Id == "granite-local");
+string gdir = Path.Combine(dir, "granite-glob-test");
+if (Directory.Exists(gdir)) Directory.Delete(gdir, true);
+Directory.CreateDirectory(gdir);
+File.WriteAllBytes(Path.Combine(gdir, "granite-speech-4.1-2b-plus-q4_k.gguf"), Array.Empty<byte>());
+File.WriteAllBytes(Path.Combine(gdir, "granite-speech-4.1-2b-q4_k.gguf"), Array.Empty<byte>());
+var oldPick = Directory.EnumerateFiles(gdir, "granite-speech-*.gguf").Select(Path.GetFileName).ToList();
+var newPick = Directory.EnumerateFiles(gdir, granite.LocalModelGlob).Select(Path.GetFileName).ToList();
+Check(oldPick.FirstOrDefault() == "granite-speech-4.1-2b-plus-q4_k.gguf", $"(the bug) the old glob resolved to the 2b-plus GGUF first ({oldPick.FirstOrDefault()})");
+Check(newPick.SequenceEqual(new[] { "granite-speech-4.1-2b-q4_k.gguf" }), $"the pinned glob ({granite.LocalModelGlob}) resolves to the plain 4.1 2B GGUF only ({string.Join(", ", newPick)})");
+Directory.Delete(gdir, true);
+var oldGranite = new ApiProvider { Id = "granite-local", LocalModelGlob = "granite-speech-*.gguf" };
+Check(ApiProvider.RepairSupersededDefault(oldGranite) != null && oldGranite.LocalModelGlob == ApiProvider.GraniteLocalGlob,
+      "a config still carrying the old shipped glob is repaired");
+var handGranite = new ApiProvider { Id = "granite-local", LocalModelGlob = "granite-speech-4.1-2b-plus-q4_k.gguf" };
+Check(ApiProvider.RepairSupersededDefault(handGranite) == null && handGranite.LocalModelGlob == "granite-speech-4.1-2b-plus-q4_k.gguf",
+      "a glob the user set by hand is left alone");
+
+// ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");
 const string Prefix = "http://127.0.0.1:18999/";
 var requests = new List<FakeRequest>();
 string reply = "{}";
 int replyDelayMs = 0;
+int replyStatus = 200;
 var listener = new HttpListener();
 listener.Prefixes.Add(Prefix);
 listener.Start();
@@ -141,15 +207,18 @@ _ = Task.Run(async () =>
             try
             {
                 using var ms = new MemoryStream();
+                // A request cut off mid-body (a cancelled stream) throws here
+                // and is never recorded: the server didn't get it.
                 await ctx.Request.InputStream.CopyToAsync(ms);
+                var (fields, file) = ParseMultipart(ctx.Request.ContentType ?? "", ms.ToArray());
                 var req = new FakeRequest(ctx.Request.Url!.AbsolutePath, ctx.Request.Headers["xi-api-key"],
-                    ctx.Request.Headers["X-API-Key"], ctx.Request.Headers["Authorization"],
-                    ParseMultipart(ctx.Request.ContentType ?? "", ms.ToArray()));
+                    ctx.Request.Headers["X-API-Key"], ctx.Request.Headers["Authorization"], fields, file,
+                    Chunked: ctx.Request.ContentLength64 < 0);
                 lock (requests) requests.Add(req);
                 string body = reply;
                 if (replyDelayMs > 0) await Task.Delay(replyDelayMs);
                 byte[] buf = Encoding.UTF8.GetBytes(body);
-                ctx.Response.StatusCode = 200;
+                ctx.Response.StatusCode = replyStatus;
                 ctx.Response.ContentType = "application/json";
                 ctx.Response.ContentLength64 = buf.Length;
                 await ctx.Response.OutputStream.WriteAsync(buf);
@@ -251,6 +320,88 @@ if (!fast)
           $"a 16 s answer on a 30 s take is delivered (deadline {budget.TotalSeconds:F0}s, took {sws.ElapsedMilliseconds} ms) — the old 15 s client failed it");
 }
 replyDelayMs = 0;
+
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 1b. Streamed upload (StreamedTranscription) vs the fake server ==");
+reply = "{\"language_code\":\"en\",\"text\":\"The patient \\u2026 denies chest pain...\\nNo fever .\","
+      + "\"words\":[{\"text\":\"The\",\"start\":0.1,\"end\":0.3,\"type\":\"word\"},"
+      + "{\"text\":\"fever\",\"start\":3.0,\"end\":3.4,\"type\":\"word\"}],"
+      + "\"audio_duration_secs\":4.3}";
+byte[] speechPcm = PcmOf(speech);
+long speechPcmLen = StreamedTranscription.PcmLength(speech);
+Check(speechPcmLen == speechPcm.Length && speechPcmLen == speech.Length - 46,
+      $"PcmLength finds the data chunk behind an 18-byte fmt chunk ({speechPcmLen} bytes)");
+int RequestCount() { lock (requests) return requests.Count; }
+// The way MicCapture hands it over: the pre-roll first, then 50 ms buffers.
+void Feed(StreamedTranscription s, byte[] pcm)
+{
+    int first = Math.Min(pcm.Length, 400 * 32);
+    s.Append(pcm, 0, first);
+    for (int i = first; i < pcm.Length; i += 1600) s.Append(pcm, i, Math.Min(1600, pcm.Length - i));
+}
+var ordinary = q1.Fields.Where(f => f.Name != "file").Select(f => f.Name + "=" + f.Value).ToList();
+
+var s1 = te.BeginStreamedTranscription(new[] { "ureterolithiasis", "troponin" });
+Feed(s1, speechPcm);
+var o1 = await s1.FinishAsync(speechPcmLen, CancellationToken.None);
+s1.Dispose();
+var qs = LastRequest();
+Check(o1 is { FallBack: false, Text: "The patient denies chest pain No fever." }, $"a streamed take comes back cleaned ({o1.Text ?? "null"}; {o1.Reason})");
+Check(qs.Chunked, "sent chunked: the upload started before the take's length was known");
+Check(qs.XiApiKey == "test-key" && qs.Authorization == null, "same auth: xi-api-key");
+Check(qs.Get("file_format") == "pcm_s16le_16", "file_format=pcm_s16le_16");
+Check(qs.File != null && qs.File.SequenceEqual(speechPcm), $"the audio part is the take's PCM, byte for byte ({qs.File?.Length} bytes)");
+Check(qs.Fields.Where(f => f.Name is not ("file" or "file_format")).Select(f => f.Name + "=" + f.Value).SequenceEqual(ordinary),
+      "every other field is the ordinary request's, in the same order");
+Check(qs.Fields.Count > 0 && qs.Fields[^1].Name == "file", "the audio is still the last part");
+Check(((ITranscriptCoverage)te).LastWordEndSeconds == 3.4, "the word timing is read from a streamed response too");
+
+int before = RequestCount();
+var s2 = te.BeginStreamedTranscription(Array.Empty<string>());
+Feed(s2, speechPcm[..^1600]);   // one buffer short of the WAV
+var o2 = await s2.FinishAsync(speechPcmLen, CancellationToken.None);
+s2.Dispose();
+await Task.Delay(300);
+Check(o2.FallBack && o2.Reason.Contains("carried"), $"a stream missing audio -> send the file instead ({o2.Reason})");
+Check(RequestCount() == before, "... and the short stream is cancelled before the server ever has a complete request");
+
+before = RequestCount();
+var s3 = te.BeginStreamedTranscription(Array.Empty<string>());
+s3.Append(speechPcm, 0, 16000);
+await Task.Delay(100);
+s3.Dispose();                   // a tap or a silent take
+await Task.Delay(300);
+Check(RequestCount() == before, "a discarded take's stream never reaches the server as a complete request (nothing to bill)");
+Check(Logged(@"\[stream\] elevenlabs: upload cancelled"), "the cancellation is logged");
+
+replyStatus = 500;
+var s4 = te.BeginStreamedTranscription(Array.Empty<string>());
+Feed(s4, speechPcm);
+var o4 = await s4.FinishAsync(speechPcmLen, CancellationToken.None);
+s4.Dispose();
+replyStatus = 200;
+Check(o4.FallBack, $"an HTTP error on the stream -> send the file instead ({o4.Reason})");
+
+replyDelayMs = 3000;
+var s5 = te.BeginStreamedTranscription(Array.Empty<string>());
+Feed(s5, speechPcm);
+var sw5 = Stopwatch.StartNew();
+using (var cts5 = new CancellationTokenSource(500))
+{
+    var o5 = await s5.FinishAsync(speechPcmLen, cts5.Token);
+    Check(!o5.FallBack && o5.Text == null && sw5.ElapsedMilliseconds < 2500,
+          $"the take's deadline ends a streamed take with no second attempt ({sw5.ElapsedMilliseconds} ms)");
+}
+s5.Dispose();
+replyDelayMs = 0;
+
+var s6 = te.BeginStreamedTranscription(Array.Empty<string>());
+var minute = new byte[60 * 32000];
+for (int i = 0; i < 6; i++) s6.Append(minute, 0, minute.Length);   // six minutes
+var o6 = await s6.FinishAsync(s6.BytesStreamed, CancellationToken.None);
+s6.Dispose();
+Check(o6.FallBack && o6.Reason.Contains("min"), $"past {StreamedTranscription.MaxStreamedAudio.TotalMinutes} min the stream is given up for the file ({o6.Reason})");
+
 listener.Stop();
 
 // ════════════════════════════════════════════════════════════════════════
@@ -391,11 +542,27 @@ static byte[] Concat(params byte[][] wavs)
     return ms.ToArray();
 }
 
-static List<(string Name, string Value)> ParseMultipart(string contentType, byte[] body)
+// The PCM in a WAV's data chunk (the TTS WAV's fmt chunk is 18 bytes, so
+// the header isn't always 44).
+static byte[] PcmOf(byte[] wav)
+{
+    int at = 12;
+    while (at + 8 <= wav.Length)
+    {
+        string id = Encoding.ASCII.GetString(wav, at, 4);
+        int size = BitConverter.ToInt32(wav, at + 4);
+        if (id == "data") return wav.Skip(at + 8).Take(size).ToArray();
+        at += 8 + size + (size & 1);
+    }
+    return Array.Empty<byte>();
+}
+
+static (List<(string Name, string Value)> Fields, byte[]? File) ParseMultipart(string contentType, byte[] body)
 {
     var result = new List<(string Name, string Value)>();
+    byte[]? file = null;
     var m = Regex.Match(contentType, "boundary=\"?([^\";]+)\"?");
-    if (!m.Success) return result;
+    if (!m.Success) return (result, file);
     string text = Encoding.Latin1.GetString(body);   // byte-preserving
     foreach (var part in text.Split("--" + m.Groups[1].Value))
     {
@@ -406,15 +573,17 @@ static List<(string Name, string Value)> ParseMultipart(string contentType, byte
         if (!nm.Success) continue;
         string value = part[(headerEnd + 4)..];
         if (value.EndsWith("\r\n")) value = value[..^2];
+        if (headers.Contains("filename")) file = Encoding.Latin1.GetBytes(value);
         value = headers.Contains("filename")
             ? $"<{value.Length} bytes>"
             : Encoding.UTF8.GetString(Encoding.Latin1.GetBytes(value));
         result.Add((nm.Groups[1].Value, value));
     }
-    return result;
+    return (result, file);
 }
 
-record FakeRequest(string Path, string? XiApiKey, string? XApiKey, string? Authorization, List<(string Name, string Value)> Fields)
+record FakeRequest(string Path, string? XiApiKey, string? XApiKey, string? Authorization,
+                   List<(string Name, string Value)> Fields, byte[]? File, bool Chunked)
 {
     public string? Get(string name) => Fields.FirstOrDefault(f => f.Name == name).Value;
 }

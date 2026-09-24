@@ -109,8 +109,10 @@ namespace WhisperInk
 
         // Per-term hotword boost for the CrispASR Parakeet trie (CTC/TDT/RNNT).
         // null → server default (2.0, effectively inert); ~10 nudges rare terms
-        // without heavy collateral. Only meaningful on a Parakeet backend; ignored
-        // by Cohere/Voxtral/Granite GGUF backends (their hotwords are accepted but no-op).
+        // without heavy collateral. Only meaningful on a Parakeet backend. The
+        // speech-LLM backends (Qwen3-ASR, Voxtral 3B, Granite) read hotwords as
+        // prompt text, where there is nothing to boost; Cohere and Voxtral 4B
+        // don't read hotwords at all.
         public double? HotwordsBoost { get; set; } = null;
 
         // ── ElevenLabs Scribe v2 keyterms ────────────────────────────────
@@ -274,12 +276,24 @@ namespace WhisperInk
                 ? TranscriptionEndpoint.TrimEnd('/')
                 : $"{BaseUrl.TrimEnd('/')}/v1/audio/transcriptions";
 
-        /// <summary>Resolved model field name — defaults to "model" if blank.</summary>
+        /// <summary>Resolved model field name — "model" if blank, except on
+        /// ElevenLabs, which only accepts "model_id".</summary>
         public string ResolvedModelField =>
-            !string.IsNullOrWhiteSpace(ModelFieldName) ? ModelFieldName : "model";
+            !string.IsNullOrWhiteSpace(ModelFieldName) ? ModelFieldName
+            : IsElevenLabs ? "model_id" : "model";
+
+        /// <summary>The header the API key is sent in; blank means
+        /// "Authorization: Bearer". A blank field on an ElevenLabs host resolves
+        /// to xi-api-key, the only scheme ElevenLabs accepts: a hand-added
+        /// Scribe entry that left the field empty used to send Bearer and fail
+        /// every dictation with 401 "Provided authorization header was
+        /// invalid" (seen 2026-09-23 on a user-added Scribe Medical entry).</summary>
+        public string ResolvedAuthHeaderName =>
+            !string.IsNullOrWhiteSpace(AuthHeaderName) ? AuthHeaderName.Trim()
+            : IsElevenLabsHost ? "xi-api-key" : "";
 
         /// <summary>True when auth should use a custom header instead of Authorization: Bearer.</summary>
-        public bool UsesCustomAuthHeader => !string.IsNullOrWhiteSpace(AuthHeaderName);
+        public bool UsesCustomAuthHeader => !string.IsNullOrWhiteSpace(ResolvedAuthHeaderName);
 
         /// <summary>True for ElevenLabs Scribe — the provider HttpTranscriber
         /// sends its extra fields to (language_code, keyterms, word
@@ -289,22 +303,89 @@ namespace WhisperInk
         /// user-added provider that authenticates with, say, X-API-Key.</summary>
         public bool IsElevenLabs =>
             string.Equals(AuthHeaderName?.Trim(), "xi-api-key", StringComparison.OrdinalIgnoreCase)
-            || (Uri.TryCreate(ResolvedTranscriptionUrl, UriKind.Absolute, out var u)
-                && u.Host.EndsWith("elevenlabs.io", StringComparison.OrdinalIgnoreCase));
+            || IsElevenLabsHost;
+
+        private bool IsElevenLabsHost =>
+            Uri.TryCreate(ResolvedTranscriptionUrl, UriKind.Absolute, out var u)
+            && (u.Host.Equals("elevenlabs.io", StringComparison.OrdinalIgnoreCase)
+                || u.Host.EndsWith(".elevenlabs.io", StringComparison.OrdinalIgnoreCase));
 
         /// <summary>The effective biasing mechanism for this provider: the baked
         /// <see cref="BiasMechanism"/> when set, otherwise derived from the legacy
         /// <see cref="ContextBiasMode"/> so older configs and user-added providers
         /// still route sensibly. Cohere's old "cohere_terms" maps to "none" — Cohere
-        /// Transcribe v2 has no biasing field, so it was always a silent no-op.</summary>
+        /// Transcribe v2 has no biasing field, so it was always a silent no-op.
+        /// A user-added ElevenLabs entry gets keyterms, Scribe's native field;
+        /// through the legacy fallback it would have sent no vocabulary at all.</summary>
         public string ResolvedBiasMechanism
         {
             get
             {
                 if (!string.IsNullOrWhiteSpace(BiasMechanism) && BiasMechanism != "auto")
                     return BiasMechanism;
+                if (IsElevenLabs) return "elevenlabs_keyterms";
                 return ContextBiasMode == "whisper_prompt" ? "whisper_prompt" : "none";
             }
+        }
+
+        /// <summary>A preset added to an existing config for a service the user
+        /// already has set up — Scribe Medical beside Scribe, a new Deepgram model
+        /// beside Deepgram — takes that service's API key and, between ElevenLabs
+        /// entries, the Scribe-only keyterm list and output switches. Without this
+        /// it starts keyless and every dictation fails until the key is pasted
+        /// in again. The sibling is a provider of the same kind on the same host
+        /// that has a key, preferring the one whose id prefixes the new one
+        /// ("elevenlabs" for "elevenlabs-medical"). This copies the values rather
+        /// than linking them, so later edits to one entry don't reach the other.
+        /// Returns the sibling, or null when nothing was inherited.</summary>
+        public static ApiProvider? InheritFromSibling(ApiProvider added, IEnumerable<ApiProvider> existing)
+        {
+            if (!added.RequiresApiKey || !string.IsNullOrWhiteSpace(added.ApiKey)) return null;
+            string? host = HostOf(added);
+            if (host == null) return null;
+
+            var sibling = existing
+                .Where(p => !ReferenceEquals(p, added)
+                            && p.TranscriberKind == added.TranscriberKind
+                            && !string.IsNullOrWhiteSpace(p.ApiKey)
+                            && string.Equals(HostOf(p), host, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(p => added.Id.StartsWith(p.Id + "-", StringComparison.Ordinal) ? 0 : 1)
+                .FirstOrDefault();
+            if (sibling == null) return null;
+
+            added.ApiKey = sibling.ApiKey;
+            if (added.IsElevenLabs && sibling.IsElevenLabs)
+            {
+                added.ScribeKeytermsRaw = sibling.ScribeKeytermsRaw;
+                added.TagAudioEvents = sibling.TagAudioEvents;
+                added.NoVerbatim = sibling.NoVerbatim;
+            }
+            return sibling;
+        }
+
+        private static string? HostOf(ApiProvider p) =>
+            Uri.TryCreate(p.ResolvedTranscriptionUrl, UriKind.Absolute, out var u) ? u.Host : null;
+
+        /// <summary>Pinned to the plain 4.1 2B model. The first shipped glob,
+        /// "granite-speech-*.gguf", also matched the 2b-plus GGUF, and
+        /// EnumerateFiles returns "…-2b-plus-…" first, so from the day that file
+        /// was downloaded the preset ran a different model than the one it was
+        /// built and named for.</summary>
+        public const string GraniteLocalGlob = "granite-speech-4.1-2b-q*.gguf";
+
+        /// <summary>Repairs a value this app once shipped in CreateDefaults that
+        /// turned out to be wrong. Only an exact match on the old shipped value
+        /// is rewritten, so anything the user set by hand is left alone. The
+        /// default-merge in LoadConfig never overwrites existing fields, which is
+        /// why this has to be a separate step. Returns what changed, or null.</summary>
+        public static string? RepairSupersededDefault(ApiProvider p)
+        {
+            if (p.Id == "granite-local" && p.LocalModelGlob == "granite-speech-*.gguf")
+            {
+                p.LocalModelGlob = GraniteLocalGlob;
+                return $"LocalModelGlob granite-speech-*.gguf -> {GraniteLocalGlob} (the old glob loaded the 2b-plus model)";
+            }
+            return null;
         }
 
         /// <summary>True when the provider runs locally (no cloud HTTP roundtrip).</summary>
@@ -378,6 +459,37 @@ namespace WhisperInk
             },
             new ApiProvider
             {
+                // ElevenLabs Scribe v2 MEDICAL. Same endpoint, auth, request
+                // shape and keyterms as the entry above, differing only by
+                // model_id. GA 2026-09-11, billed the same as Scribe v2, batch
+                // only; ElevenLabs claims 35% fewer transcription errors on
+                // clinical audio. Measured live 2026-09-23 against scribe_v2
+                // (warm connection, same keyterms): 88-129 ms faster, 6/6 on the
+                // clinical clips in _scratch/biasing/clips even with no keyterms
+                // (scribe_v2 without them inserted a stray "your"), and it
+                // returns the word timing TranscriptCoverage needs. Watch item:
+                // it ended fewer takes with a period (0/6 clips vs 2/6).
+                // When this preset first appears in an existing config it takes
+                // the key, the Scribe-only keyterms and the output switches from
+                // the "elevenlabs" entry (ApiProvider.InheritFromSibling).
+                Id = "elevenlabs-medical",
+                BiasMechanism = "elevenlabs_keyterms",
+                Name = "ElevenLabs Scribe Medical",
+                BaseUrl = "https://api.elevenlabs.io",
+                TranscriptionEndpoint = "https://api.elevenlabs.io/v1/speech-to-text",
+                AuthHeaderName = "xi-api-key",
+                ModelFieldName = "model_id",
+                TranscriptionModel = "scribe_v2_medical",
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Http,
+                TagAudioEvents = false,
+                NoVerbatim = true,
+            },
+            new ApiProvider
+            {
                 Id = "cohere-api",
                 // Cohere Transcribe v2 has NO vocabulary-biasing field — terms
                 // are silently dropped server-side. Don't pretend otherwise.
@@ -435,20 +547,23 @@ namespace WhisperInk
                 // above, 8110 is the canary example in CLAUDE.md and 8111 was
                 // the retired lfm2-audio trial, so 8112 is the first clean one.
                 Id = "qwen3-asr-1.7b-local",
-                // hotwords is REAL here and it is the only local preset where
-                // that is true. The qwen3 backend splices the term list into
-                // the decoder's ChatML prompt ("...may appear in the audio: ")
-                // rather than into a CTC/TDT trie, so it steers a speech-LLM
-                // instead of re-weighting lattice arcs. Measured 2026-08-29 on
-                // the clinical clips in _scratch/biasing/clips: baseline missed
-                // hematochezia twice (-> "hematuria" / "hematemesis") and
-                // mangled ureterolithiasis (-> "bursitis with edema"); with the
-                // terms supplied all three came back exactly right, 3/3
-                // reproducible, and the controls were untouched. No boost knob
-                // is set: unlike Parakeet's trie there is nothing to over-boost,
-                // and a long list dilutes rather than garbles (a 40-term list
-                // still fixed 5 of 6, softening only ureterolithiasis into
-                // "ureteral lithiasis").
+                // hotwords is REAL here, and this is the only local preset where
+                // it is also safe: granite-local now biases too, but it rewrote
+                // a correctly heard term (see that preset). The qwen3 backend
+                // splices the term list into the decoder's ChatML prompt
+                // ("...may appear in the audio: ") rather than into a CTC/TDT
+                // trie, so it steers a speech-LLM instead of re-weighting
+                // lattice arcs. Measured 2026-08-29 on the clinical clips in
+                // _scratch/biasing/clips: baseline missed hematochezia twice
+                // (-> "hematuria" / "hematemesis") and mangled ureterolithiasis
+                // (-> "bursitis with edema"); with the terms supplied all three
+                // came back exactly right, 3/3 reproducible, and the controls
+                // were untouched. Re-measured 2026-09-23 with the real 21-term
+                // shared list: the same 3/3, controls untouched, ~160-290 ms a
+                // clip on CUDA. No boost knob is set: unlike Parakeet's trie
+                // there is nothing to over-boost, and a long list dilutes rather
+                // than garbles (a 40-term list still fixed 5 of 6, softening
+                // only ureterolithiasis into "ureteral lithiasis").
                 BiasMechanism = "hotwords",
                 Name = "Qwen3-ASR 1.7B Local (CrispASR)",
                 BaseUrl = "http://localhost:8112",
@@ -591,9 +706,17 @@ namespace WhisperInk
             },
             new ApiProvider
             {
-                // IBM Granite Speech 4.1 2B speech-LLM. Sent the "hotwords" field
-                // like the others, but the granite backend has no biasing splice —
-                // accepted and ignored (no-op).
+                // IBM Granite Speech 4.1 2B speech-LLM. hotwords is REAL here, but
+                // not safe for charting. Since upstream 8fad1cb9 (2026-06-30,
+                // already in the v0.8.30 deploy) the granite backend appends
+                // " Keywords: <list>" to its instruction. Measured 2026-09-23 on
+                // the clinical clips with the 21-term shared list: it fixed all
+                // three hard terms (hematochezia x2, ureterolithiasis), but it
+                // also turned a correctly heard "ureteral colic" into
+                // "ureterolithiasis" (2/2 runs), and this model emits
+                // all-lowercase text. Qwen3-ASR fixes the same terms with no
+                // collateral. See ApiProvider.GraniteLocalGlob for why the glob
+                // is pinned.
                 Id = "granite-local",
                 BiasMechanism = "hotwords",
                 Name = "Granite Speech 4.1 Local (CrispASR, auto-spawn)",
@@ -605,7 +728,7 @@ namespace WhisperInk
                 Language = "en",
                 TranscriberKind = TranscriberKind.LocalCrispAsrServer,
                 LocalServerPort = 8107,
-                LocalModelGlob = "granite-speech-*.gguf",
+                LocalModelGlob = GraniteLocalGlob,
                 LocalBackendHint = "granite",
             },
             new ApiProvider

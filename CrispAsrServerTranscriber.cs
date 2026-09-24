@@ -197,10 +197,12 @@ namespace WhisperInk
 
             // CrispASR v0.7+ accepts a "hotwords" form field (comma-separated) for
             // real contextual biasing: a CTC/TDT/RNNT phrase-boost trie on Parakeet,
-            // prompt injection on Voxtral/Qwen3-style LLM decoders, accepted-but-no-op
-            // on Cohere/Granite/Voxtral-4B. Sent whenever bias terms exist — older
-            // servers ignore unknown fields. The OpenAI "prompt" field is NOT sent:
-            // no CrispASR backend reads it (verified against the backend sources).
+            // prompt text on the speech-LLMs (Qwen3-ASR, Voxtral 3B, and Granite
+            // since upstream 8fad1cb9), accepted-but-no-op on Cohere/Voxtral-4B.
+            // Sent whenever bias terms exist — older servers ignore unknown fields.
+            // The OpenAI "prompt" field is NOT sent: of the backends WhisperInk
+            // ships presets for, none reads it (whisper does, as its initial
+            // prompt, but there is no whisper preset).
             string? hotwords = biasTerms is { Count: > 0 } ? string.Join(",", biasTerms) : null;
 
             try

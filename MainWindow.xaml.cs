@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -76,7 +77,106 @@ namespace WhisperInk
         // backstop, longer than any deadline. It used to be a flat 15 s, which
         // was a length limit in disguise: any take whose upload + inference
         // ran past 15 s failed, however healthy the service.
-        private readonly HttpClient _httpClient = new() { Timeout = TranscriptionDeadline.HttpBackstop };
+        private readonly HttpClient _httpClient = CreateCloudHttpClient();
+
+        /// <summary>The connection handling behind every cloud dictation.
+        ///
+        /// Idle connections are kept for 9 minutes instead of .NET's 1-minute
+        /// default. Measured 2026-09-23 against ElevenLabs: a fresh connection
+        /// (DNS + TCP + TLS + a cold congestion window) added a median 166 ms
+        /// to a 4 s take, and with the default most real dictations paid it:
+        /// anything more than a minute after the previous one (9 of 14 in
+        /// that evening's log). ElevenLabs' side (a Google front end) still
+        /// accepted a connection that had been idle for 5 and 9 minutes, so the
+        /// client retires one before the server does. PrewarmConnection covers
+        /// longer gaps.
+        ///
+        /// TCP keep-alive makes the long idle safe. A NAT or firewall that
+        /// silently forgets an idle connection would otherwise leave the next
+        /// request writing into nothing until the take's deadline; the probes
+        /// keep the mapping alive and let a dead connection be noticed and
+        /// dropped instead of reused. Each new connection is logged, which
+        /// shows in debug.log whether a take reused one.</summary>
+        private static HttpClient CreateCloudHttpClient()
+        {
+            var handler = new SocketsHttpHandler
+            {
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(9),
+                ConnectCallback = async (context, ct) =>
+                {
+                    // Same as the default connect (dual-mode socket, Nagle
+                    // off), plus keep-alive.
+                    var socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                    try
+                    {
+                        EnableTcpKeepAlive(socket);
+                        var sw = Stopwatch.StartNew();
+                        await socket.ConnectAsync(context.DnsEndPoint, ct).ConfigureAwait(false);
+                        Log($"[net] new connection to {context.DnsEndPoint.Host}:{context.DnsEndPoint.Port} ({sw.ElapsedMilliseconds} ms to connect)");
+                        return new NetworkStream(socket, ownsSocket: true);
+                    }
+                    catch
+                    {
+                        socket.Dispose();
+                        throw;
+                    }
+                },
+            };
+            return new HttpClient(handler) { Timeout = TranscriptionDeadline.HttpBackstop };
+        }
+
+        /// <summary>First probe after 45 s idle, then every 5 s; three misses
+        /// and the OS fails the socket. Best effort: keep-alive is an
+        /// optimization, so an OS that rejects an option still connects.</summary>
+        private static void EnableTcpKeepAlive(Socket socket)
+        {
+            try
+            {
+                socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 45);
+                socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
+                socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
+            }
+            catch (Exception ex) { Log($"[net] TCP keep-alive not fully applied: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Opens, or re-checks, the pooled connection to the active
+        /// cloud provider while the user is still talking, so the release
+        /// doesn't wait on DNS + TCP + TLS. Measured 2026-09-23 against
+        /// ElevenLabs: this recovered ~90 of the 166 ms a fresh connection
+        /// costs. The rest is TCP slow start on the upload, which only a
+        /// streamed upload removes. A HEAD to the host's root is enough to open
+        /// the connection; the status doesn't matter. Fire-and-forget: if it
+        /// fails, the dictation opens its own connection exactly as before.
+        /// Skips local servers and Google Chirp 3, which keeps its own
+        /// HttpClient.</summary>
+        private void PrewarmConnection(ApiProvider? provider)
+        {
+            if (provider == null || provider.IsLocalProvider || provider.IsLocalHttp
+                || provider.TranscriberKind == TranscriberKind.GoogleChirp3)
+                return;
+            if (!Uri.TryCreate(provider.ResolvedTranscriptionUrl, UriKind.Absolute, out var url)
+                || url.Scheme != Uri.UriSchemeHttps)
+                return;
+
+            var origin = new Uri(url.GetLeftPart(UriPartial.Authority) + "/");
+            var client = _httpClient;
+            _ = Task.Run(async () =>
+            {
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    using var request = new HttpRequestMessage(HttpMethod.Head, origin);
+                    using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
+                    Log($"[net] pre-warmed {origin.Host} ({(int)response.StatusCode}) in {sw.ElapsedMilliseconds} ms");
+                }
+                catch (Exception ex)
+                {
+                    Log($"[net] pre-warm of {origin.Host} failed after {sw.ElapsedMilliseconds} ms ({ex.GetType().Name}); the dictation connects on its own");
+                }
+            });
+        }
 
         // One transcriber instance per provider, lazily constructed by the
         // factory on first use. Replaces the old fan-out of 12 per-provider
@@ -141,6 +241,14 @@ namespace WhisperInk
         // Also the floor that separates "silent take" from "real sound that
         // came back as no text" when the gate itself is disabled (0).
         private const double DefaultSilenceThreshold = 0.003;
+        // Upload an ElevenLabs take while it is being spoken, so the release
+        // waits only for the transcript (StreamedTranscription). Off = every
+        // take is uploaded as a WAV after release, as before 2026-09.
+        private bool _streamUpload = true;
+
+        // The take currently being streamed, if any. UI thread only: set when
+        // a take starts, taken over (finished or cancelled) when it stops.
+        private StreamedTranscription? _streamedTake;
 
         private static readonly string LogFile = Path.Combine(ConfigFolder, "debug.log");
         // The previous session's log, kept across one restart (see MainWindow_Loaded).
@@ -317,7 +425,7 @@ namespace WhisperInk
                 provider = _providers[0];
             }
 
-            Log($"Active provider: {provider.Name} → STT={provider.ResolvedTranscriptionUrl}  (auth={(string.IsNullOrEmpty(provider.AuthHeaderName) ? "Bearer" : provider.AuthHeaderName)}, modelField={provider.ResolvedModelField})");
+            Log($"Active provider: {provider.Name} → STT={provider.ResolvedTranscriptionUrl}  (auth={(provider.UsesCustomAuthHeader ? provider.ResolvedAuthHeaderName : "Bearer")}, modelField={provider.ResolvedModelField})");
         }
 
         private void SwitchProvider(string providerId)
@@ -483,6 +591,8 @@ namespace WhisperInk
                     // Clamped, not trusted: a hand-edited 0 ms pre-roll or a
                     // 5 s min-hold would quietly break dictation.
                     if (root.TryGetProperty("WarmMicEnabled", out var wm)) _warmMicEnabled = wm.GetBoolean();
+                    if (root.TryGetProperty("StreamUpload", out var su) && su.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                        _streamUpload = su.GetBoolean();
                     if (root.TryGetProperty("WarmMicIdleSeconds", out var wmi)) _warmMicIdleSeconds = Math.Max(0, wmi.GetInt32());
                     if (root.TryGetProperty("PreRollMs", out var pr)) _preRollMs = Math.Clamp(pr.GetInt32(), 0, 3000);
                     if (root.TryGetProperty("PostRollMs", out var po)) _postRollMs = Math.Clamp(po.GetInt32(), 0, 1000);
@@ -631,13 +741,25 @@ namespace WhisperInk
                         // the user has edited, never removes anything.
                         var defaults = ApiProvider.CreateDefaults();
                         var existingIds = new HashSet<string>(_providers.Select(p => p.Id));
+                        var configured = _providers.ToList();
                         foreach (var def in defaults)
                         {
                             if (!existingIds.Contains(def.Id))
                             {
+                                // A new preset for a service already set up here
+                                // (Scribe Medical beside Scribe) starts with its
+                                // key instead of failing every take until the key
+                                // is pasted in again.
+                                var sibling = ApiProvider.InheritFromSibling(def, configured);
                                 _providers.Add(def);
-                                Log($"Added new default provider: {def.Name}");
+                                Log($"Added new default provider: {def.Name}"
+                                    + (sibling == null ? "" : $" (API key{(def.IsElevenLabs ? ", Scribe keyterms and output switches" : "")} taken from {sibling.Name})"));
                             }
+                        }
+                        foreach (var p in _providers)
+                        {
+                            string? repaired = ApiProvider.RepairSupersededDefault(p);
+                            if (repaired != null) Log($"Repaired {p.Id}: {repaired}");
                         }
 
                         // Backfill Local* fields for known-id providers whose
@@ -700,7 +822,8 @@ namespace WhisperInk
                     PreRollMs          = _preRollMs,
                     PostRollMs         = _postRollMs,
                     MinHoldMs          = _minHoldMs,
-                    SilenceThreshold   = _silenceThreshold
+                    SilenceThreshold   = _silenceThreshold,
+                    StreamUpload       = _streamUpload
                 };
                 // Serialize the TranscriberKind enum as a string so config.json
                 // both stays human-readable AND round-trips through LoadConfig
@@ -772,13 +895,18 @@ namespace WhisperInk
             HistogramPanel.Visibility = Visibility.Visible;
             _animationTimer.Start();
 
+            // An ElevenLabs take starts uploading now, its audio following as it
+            // is captured, so the release waits only for the transcript.
+            var streamed = BeginStreamedTake(startProvider);
+
             // No device open, no file created: the mic is already streaming into
             // the pre-roll ring, so this just attaches a writer and seeds it with
             // audio from before the keypress. On a cold device it falls back to
             // opening one (the old ~130 ms path) and preRoll comes back 0.
-            int preRoll = _mic?.BeginCapture() ?? -1;
+            int preRoll = _mic?.BeginCapture(streamed == null ? null : streamed.Append) ?? -1;
             if (preRoll < 0)
             {
+                streamed?.Dispose();
                 Log("[mic] capture could not start — no usable input device");
                 Volatile.Write(ref _recState, 0);
                 ResetUi();
@@ -787,12 +915,44 @@ namespace WhisperInk
                 return;
             }
 
-            Log($"[diag] StartBatchDictation: capturing (pre-roll {preRoll}ms, mic was {(preRoll > 0 ? "warm" : "cold")})");
+            _streamedTake = streamed;
+
+            Log($"[diag] StartBatchDictation: capturing (pre-roll {preRoll}ms, mic was {(preRoll > 0 ? "warm" : "cold")}{(streamed != null ? ", upload streaming" : "")})");
+
+            // Otherwise the connection is at least opened while the user talks.
+            if (streamed == null) PrewarmConnection(startProvider);
+        }
+
+        /// <summary>Opens the take's upload at the key-press when the active
+        /// provider can take one (ElevenLabs) and StreamUpload is on. Null
+        /// otherwise, or if starting it fails; the take then goes out as a WAV
+        /// at release exactly as before.</summary>
+        private StreamedTranscription? BeginStreamedTake(ApiProvider? provider)
+        {
+            if (!_streamUpload || _transcribers == null || provider == null
+                || provider.TranscriberKind != TranscriberKind.Http || !provider.IsElevenLabs)
+                return null;
+            try
+            {
+                return _transcribers.GetOrCreate(provider) is HttpTranscriber { CanStream: true } http
+                    ? http.BeginStreamedTranscription(_contextBiasTerms)
+                    : null;
+            }
+            catch (Exception ex)
+            {
+                Log($"[stream] could not open the upload ({ex.GetType().Name}: {ex.Message}); the take will go out as a file");
+                return null;
+            }
         }
 
         private async Task StopBatchDictationAsync()
         {
             if (Interlocked.CompareExchange(ref _recState, 2, 1) != 1) return;
+
+            // Taken over here so that every way out of this method either
+            // finishes the take's upload stream or cancels it (the finally).
+            var streamed = _streamedTake;
+            _streamedTake = null;
 
             // Press-to-release duration is the intent signal. A brush against
             // the key is well under 250 ms; deliberate dictation never is.
@@ -950,7 +1110,7 @@ namespace WhisperInk
                 take = _unsent?.Begin(wav, provider, audioMs / 1000.0);
 
                 Log("[diag] StopBatchDictation: pre-transcribe");
-                var result = await TranscribeTakeAsync(provider, wav, audioMs);
+                var result = await TranscribeTakeAsync(provider, wav, audioMs, streamed);
                 string? text = result.Text;
                 tTranscribe = swBatch.ElapsedMilliseconds;
                 Log($"[diag] StopBatchDictation: post-transcribe, text.Length={text?.Length ?? -1}");
@@ -1049,6 +1209,11 @@ namespace WhisperInk
             }
             finally
             {
+                // A take that was discarded (tap, silence, no signal) never
+                // finished its stream: cancelling it mid-body means the service
+                // never gets a complete request to transcribe or bill.
+                streamed?.Dispose();
+
                 // Release on EVERY exit path. A thrown transcription/paste (e.g.
                 // an HTTP timeout, or a network error) used to skip this,
                 // stranding Ctrl "down" — the keyboard hook swallows the user's
@@ -1168,7 +1333,8 @@ namespace WhisperInk
             double? LastWordEndSeconds,
             double? DecodedAudioSeconds);
 
-        private async Task<TakeTranscription> TranscribeTakeAsync(ApiProvider provider, byte[] wavBytes, double audioMs)
+        private async Task<TakeTranscription> TranscribeTakeAsync(ApiProvider provider, byte[] wavBytes, double audioMs,
+                                                                 StreamedTranscription? streamed = null)
         {
             static TakeTranscription Fail(string name, string reason) => new(null, name, false, reason, null, null);
             if (_transcribers == null) return Fail(provider.Name, "WhisperInk was still starting");
@@ -1194,12 +1360,42 @@ namespace WhisperInk
             Log($"[diag] {transcriber.DisplayName}: deadline {deadline.TotalSeconds:F0}s for {audioMs / 1000.0:F1}s of audio");
 
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            string? result = await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms, cts.Token);
+            string? result;
+            string how = "";
+            // A take streamed while it was spoken is finished through the
+            // transcriber that opened it, only if that is still this
+            // provider's (a provider switch or a settings save during the hold
+            // replaces it). Anything else about the stream that is off, it
+            // falls back to sending the WAV, under the same deadline.
+            if (streamed != null && ReferenceEquals(streamed.Transcriber, transcriber))
+            {
+                var outcome = await streamed.FinishAsync(StreamedTranscription.PcmLength(wavBytes), cts.Token);
+                if (outcome.FallBack)
+                {
+                    Log($"[stream] {provider.Id}: sending the take as a file instead ({outcome.Reason})");
+                    result = await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms, cts.Token);
+                    how = " (stream unusable, sent as a file)";
+                }
+                else
+                {
+                    result = outcome.Text;
+                    how = " after release (streamed)";
+                }
+            }
+            else
+            {
+                if (streamed != null)
+                {
+                    Log($"[stream] {provider.Id}: the provider changed during the take; sending it as a file");
+                    streamed.Dispose();
+                }
+                result = await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms, cts.Token);
+            }
             sw.Stop();
 
             double rtfx    = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
             string preview = result == null ? "(null)" : result[..Math.Min(200, result.Length)];
-            Log($"{transcriber.DisplayName} took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x -- result: {preview}");
+            Log($"{transcriber.DisplayName} took {sw.ElapsedMilliseconds}ms{how} on {audioMs:F0}ms audio = RTFx {rtfx:F2}x -- result: {preview}");
 
             bool deadlineHit = result == null && cts.IsCancellationRequested;
             if (deadlineHit)

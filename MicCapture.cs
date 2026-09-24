@@ -59,6 +59,12 @@ namespace WhisperInk
 
         private MemoryStream? _memStream;
         private WaveFileWriter? _writer;
+        // Gets every byte written to the take's WAV, in the same order — the
+        // pre-roll seed, then each buffer — for a take streamed to its
+        // provider while it is still being recorded. Called under _gate, so it
+        // must not block (StreamedTranscription.Append copies and queues). A
+        // sink that throws is dropped; the WAV never depends on it.
+        private Action<byte[], int, int>? _sink;
         private bool _capturing;
         private bool _captureInterrupted;
         private ManualResetEventSlim? _drainSignal;
@@ -143,8 +149,9 @@ namespace WhisperInk
         /// audio recovered (0 on a cold device). The device open, the writer
         /// creation and the pre-roll copy all happen under one lock, so a
         /// buffer arriving mid-setup cannot slip through the gap between
-        /// "seeded the ring" and "started capturing".</summary>
-        public int BeginCapture()
+        /// "seeded the ring" and "started capturing". <paramref name="sink"/>,
+        /// if given, gets the same bytes as the WAV until EndCapture.</summary>
+        public int BeginCapture(Action<byte[], int, int>? sink = null)
         {
             if (!EnsureOpen()) return -1;
 
@@ -155,11 +162,16 @@ namespace WhisperInk
                 DisposeWriterLocked();
                 _memStream = new MemoryStream();
                 _writer = new WaveFileWriter(new IgnoreDisposeStream(_memStream), Format);
+                _sink = sink;
 
                 var writer = _writer;
                 int preRollBytes = _ring.CopyNewest(
                     _preRollMs() * BytesPerMs,
-                    (buf, offset, count) => writer.Write(buf, offset, count));
+                    (buf, offset, count) =>
+                    {
+                        writer.Write(buf, offset, count);
+                        FeedSinkLocked(buf, offset, count);
+                    });
 
                 _captureInterrupted = false;
                 _capturing = true;
@@ -194,6 +206,7 @@ namespace WhisperInk
             {
                 _drainSignal = null;
                 _capturing = false;
+                _sink = null;
                 LastCaptureInterrupted = _captureInterrupted;
                 _captureInterrupted = false;
                 try
@@ -224,10 +237,24 @@ namespace WhisperInk
                 if (_capturing)
                 {
                     try { _writer?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
+                    FeedSinkLocked(a.Buffer, 0, a.BytesRecorded);
                 }
                 _ring.Write(a.Buffer, a.BytesRecorded);
                 // Signals EndCapture that the in-flight tail has landed.
                 _drainSignal?.Set();
+            }
+        }
+
+        private void FeedSinkLocked(byte[] buffer, int offset, int count)
+        {
+            if (_sink == null) return;
+            try { _sink(buffer, offset, count); }
+            catch (Exception ex)
+            {
+                // The stream then comes up short at release and the take goes
+                // out as its WAV instead.
+                _sink = null;
+                _log($"[mic] the take's upload stream failed and was detached ({ex.GetType().Name}: {ex.Message}); the recording is unaffected");
             }
         }
 
@@ -256,6 +283,7 @@ namespace WhisperInk
 
         private void DisposeWriterLocked()
         {
+            _sink = null;
             try { _writer?.Dispose(); } catch { }
             _writer = null;
             try { _memStream?.Dispose(); } catch { }

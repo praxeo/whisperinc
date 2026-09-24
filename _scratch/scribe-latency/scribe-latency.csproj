@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Live latency probe for ElevenLabs Scribe (see Program.cs). Links the
+       SHIPPING HttpTranscriber so the baseline is exactly what WhisperInk
+       sends. Every run bills real audio against the configured key. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <PropertyGroup>
+    <Repo>$(MSBuildThisFileDirectory)..\..</Repo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(Repo)\HttpTranscriber.cs" />
+    <Compile Include="$(Repo)\StreamedTranscription.cs" />
+    <Compile Include="$(Repo)\TranscriptionDeadline.cs" />
+    <Compile Include="$(Repo)\TranscriptCoverage.cs" />
+    <Compile Include="$(Repo)\AppConfig.cs" />
+    <Compile Include="$(Repo)\ITranscriber.cs" />
+    <Compile Include="$(Repo)\ModulateTranscriber.cs" />
+    <Compile Include="$(Repo)\SmallestTranscriber.cs" />
+    <Compile Include="$(Repo)\Reson8Transcriber.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="NAudio.Core" Version="2.2.1" />
+    <!-- Only for the streamed-upload experiment (a pipe feeding the request). -->
+    <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+  </ItemGroup>
+</Project>
