@@ -1,7 +1,8 @@
 // Exercises the shipping transcription code without the app, asserting on
 // results and on what reaches the log:
 //   0. pure logic: TranscriptionDeadline, the ElevenLabs text cleanup,
-//      TranscriptCoverage, UnsentTakes
+//      TranscriptCoverage, UnsentTakes, SpeechDetector, and the drop-in
+//      model discovery (GGUF headers, LocalModels, LocalModelScanner)
 //   1. HttpTranscriber against a local fake server: the ElevenLabs request
 //      shape, response parsing, and the per-take deadline
 //   2. CrispAsrServerTranscriber against the REAL crispasr.exe (CPU only,
@@ -252,6 +253,180 @@ Check(ApiProvider.RepairSupersededDefault(oldGranite) != null && oldGranite.Loca
 var handGranite = new ApiProvider { Id = "granite-local", LocalModelGlob = "granite-speech-4.1-2b-plus-q4_k.gguf" };
 Check(ApiProvider.RepairSupersededDefault(handGranite) == null && handGranite.LocalModelGlob == "granite-speech-4.1-2b-plus-q4_k.gguf",
       "a glob the user set by hand is left alone");
+
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0h. Drop-in local models: GGUF headers, providers, the folder scanner ==");
+// Vocabularies as the real files have them (read 2026-09-24): Parakeet RNNT
+// 1.1b's 1024 tokens hold no capital at all; TDT 0.6b v3's hold "▁De", "▁In"
+// and 429 more; Granite Speech 5.0's byte-level vocabulary has "A".."Z" and
+// "." as single characters but no capital in any word piece. Special and
+// byte-fallback tokens say nothing about what a model writes.
+string[] lowerVocab = { "<unk>", "<0x41>", "[INST]", "▁the", "▁a", "s", "ing", "'", "▁S", "A", ".", "▁." };
+string[] casedVocab = { "<unk>", "▁the", "▁The", "." };
+var lowerInfo = GgufHeader.Read(new MemoryStream(Gguf(3, ("general.architecture", "parakeet"), ("parakeet.n_mels", 80u), ("tokenizer.ggml.tokens", lowerVocab))));
+Check(lowerInfo is { Version: 3, Architecture: "parakeet", VocabHasCasedWords: false },
+      $"no capital in any word piece (single letters, marks, special and byte tokens aside) -> writes lowercase ({lowerInfo})");
+Check(GgufHeader.Read(new MemoryStream(Gguf(3, ("general.architecture", "parakeet"), ("tokenizer.ggml.tokens", casedVocab)))).VocabHasCasedWords == true,
+      "a vocabulary with \"▁The\" -> writes capitals");
+Check(GgufHeader.Read(new MemoryStream(Gguf(3, ("general.architecture", "x"), ("tokenizer.ggml.tokens", new[] { "Ġthe", "ĠThe" })))).VocabHasCasedWords == true,
+      "byte-level BPE word pieces (Ġ) are read the same way");
+Check(GgufHeader.Read(new MemoryStream(Gguf(3, ("general.architecture", "x"), ("tokenizer.ggml.tokens", new[] { "Ġthe", "St" })))).VocabHasCasedWords == true,
+      "... with or without a word-boundary marker");
+Check(GgufHeader.Read(new MemoryStream(Gguf(3, ("general.architecture", "granite_speech5_ctc"), ("tokenizer.ggml.tokens", new[] { "!", ",", "A", "B", "Z", "Ġthe", "ing" })))).VocabHasCasedWords == false,
+      "Granite Speech 5.0's case: an alphabet with capitals, but none in a word piece -> lowercase");
+var late = GgufHeader.Read(new MemoryStream(Gguf(2, ("tokenizer.ggml.tokens", casedVocab), ("general.name", "Late Arch"), ("general.architecture", "granite_nle"))));
+Check(late is { Version: 2, Architecture: "granite_nle", Name: "Late Arch", VocabHasCasedWords: true },
+      $"GGUF v2, with the architecture after the token list ({late})");
+var mixed = GgufHeader.Read(new MemoryStream(Gguf(3, ("general.architecture", "voxtral4b"), ("voxtral4b.n", 3u), ("x.f", 1.5f), ("x.b", true),
+                                                 ("x.ints", new[] { 1, 2, 3 }), ("x.nested", new[] { new[] { "a" }, new[] { "b", "c" } }))));
+Check(mixed is { Architecture: "voxtral4b", VocabHasCasedWords: null }, "scalars, number arrays and nested arrays are stepped over; no token list -> unknown");
+Check(Throws<InvalidDataException>(() => GgufHeader.Read(new MemoryStream(Gguf(1, ("general.architecture", "parakeet"))))), "GGUF v1 is refused (CrispASR no longer loads it)");
+Check(Throws<InvalidDataException>(() => GgufHeader.Read(new MemoryStream("RIFF\0\0\0\0WAVEfmt "u8.ToArray()))), "a file that isn't GGUF is refused");
+var hugeLength = Gguf(3, ("general.architecture", "parakeet"));
+BitConverter.GetBytes(1UL << 40).CopyTo(hugeLength, 24);   // the first key's length -> 1 TB
+Check(Throws<InvalidDataException>(() => GgufHeader.Read(new MemoryStream(hugeLength))), "an absurd length is refused without allocating it");
+
+string mdir = Path.Combine(dir, "model-scan-test");
+if (Directory.Exists(mdir)) Directory.Delete(mdir, true);
+Directory.CreateDirectory(mdir);
+byte[] parakeetHeader = Gguf(3, ("general.architecture", "parakeet"), ("tokenizer.ggml.tokens", casedVocab));
+string truncated = Path.Combine(mdir, "truncated.gguf");
+File.WriteAllBytes(truncated, parakeetHeader[..40]);
+Check(GgufHeader.TryRead(truncated, out var truncProblem) == null && truncProblem!.Contains("ends inside its header"),
+      $"a file cut off inside its header is not offered ({truncProblem})");
+File.Delete(truncated);
+string busy = Path.Combine(mdir, "busy.gguf");
+using (var writer = new FileStream(busy, FileMode.Create, FileAccess.Write, FileShare.Read))
+{
+    writer.Write(parakeetHeader);
+    writer.Flush();
+    Check(GgufHeader.TryRead(busy, out var busyProblem) == null && busyProblem == GgufHeader.StillWriting,
+          "a file still open for writing (a copy in progress) -> \"still being written\"");
+}
+Check(GgufHeader.TryRead(busy, out _)?.Architecture == "parakeet", "... and readable once the writer closes it");
+File.Delete(busy);
+
+(string? Arch, ModelUse Want)[] uses =
+{
+    ("parakeet", ModelUse.SpeechToText), ("granite_nle", ModelUse.SpeechToText), ("qwen3asr", ModelUse.SpeechToText),
+    ("gemma4e2b", ModelUse.SpeechToText), ("kokoro", ModelUse.NotSpeechToText), ("fireredpunc", ModelUse.NotSpeechToText),
+    ("firered-lid", ModelUse.NotSpeechToText), ("qwen3-tts", ModelUse.NotSpeechToText), ("vibevoice-tts", ModelUse.NotSpeechToText),
+    ("m2m100", ModelUse.NotSpeechToText), ("htdemucs", ModelUse.NotSpeechToText), ("xasr", ModelUse.Unrecognized), (null, ModelUse.Unrecognized),
+};
+foreach (var (arch, want) in uses)
+    Check(LocalModels.UseOf(arch) == want, $"architecture {arch ?? "(none)"} -> {LocalModels.UseOf(arch)}");
+
+(string File, string Want)[] displayNames =
+{
+    ("orukeet-q4_k.gguf", "Orukeet Q4_K"),
+    ("granite-speech-4.1-2b-nar-q4_k.gguf", "Granite Speech 4.1 2B NAR Q4_K"),
+    ("parakeet-tdt-0.6b-v3-q4_k.gguf", "Parakeet TDT 0.6B v3 Q4_K"),
+    ("parakeet-tdt_ctc-110m-q8_0.gguf", "Parakeet TDT-CTC 110M Q8_0"),
+    ("qwen3-asr-1.7b-q4_k.gguf", "Qwen3 ASR 1.7B Q4_K"),
+    ("gemma4-e2b-it-q8_0.gguf", "Gemma4 E2B IT Q8_0"),
+};
+foreach (var (file, want) in displayNames)
+    Check(LocalModels.DisplayName(file) == want, $"{file} is shown as \"{LocalModels.DisplayName(file)}\"");
+
+LocalModelFile Fake(string name, string arch, bool? vocab) =>
+    new(Path.Combine(mdir, name), 402_000_000, DateTime.UtcNow, new GgufInfo(3, arch, null, vocab), null);
+var shipped = ApiProvider.CreateDefaults();
+var noListeners = new HashSet<int>();
+var oru = LocalModels.CreateProvider(Fake("orukeet-q4_k.gguf", "parakeet", true), shipped, noListeners);
+Check(oru is { Id: "local-orukeet-q4_k", Name: "Orukeet Q4_K (local)", TranscriberKind: TranscriberKind.LocalCrispAsrServer,
+               LocalServerPort: 8200, BaseUrl: "http://localhost:8200", LocalModelGlob: "orukeet-q4_k.gguf",
+               LocalBackendHint: "", LocalPuncModel: "", BiasMechanism: "hotwords", Language: "en" },
+      $"orukeet-q4_k.gguf -> a local provider for exactly that file, on 8200, CrispASR choosing the backend ({oru.Id}, \"{oru.Name}\", :{oru.LocalServerPort})");
+Check(!oru.RequiresApiKey && oru.ResolvedTranscriptionUrl == "http://localhost:8200/v1/audio/transcriptions",
+      "it needs no API key, and the URL agrees with the port");
+Check(LocalModels.CreateProvider(Fake("orukeet-q4_k.gguf", "parakeet", true), shipped, new HashSet<int> { 8200 }).LocalServerPort == 8201,
+      "a port something already listens on is skipped");
+var oru2 = LocalModels.CreateProvider(Fake("orukeet-q4_k.gguf", "parakeet", true), shipped.Append(oru).ToList(), noListeners);
+Check(oru2.Id == "local-orukeet-q4_k-2" && oru2.LocalServerPort == 8201, $"a second one gets its own id and port ({oru2.Id}, :{oru2.LocalServerPort})");
+Check(LocalModels.CreateProvider(Fake("parakeet-rnnt-0.6b-q4_k.gguf", "parakeet", false), shipped, noListeners).LocalPuncModel == "fullstop",
+      "a model whose vocabulary can't punctuate gets --punc-model fullstop");
+Check(LocalModels.CreateProvider(Fake("cohere-transcribe-q4_k.gguf", "cohere-transcribe", true), shipped, noListeners).BiasMechanism == "none",
+      "a family measured to ignore hotwords is labelled \"none\"");
+Check(Throws<ArgumentException>(() => LocalModels.CreateProvider(new LocalModelFile(Path.Combine(mdir, "x.gguf"), 1, DateTime.UtcNow, null, "not a GGUF file"), shipped, noListeners)),
+      "an unreadable file can't become a provider");
+var jsonOptions = new System.Text.Json.JsonSerializerOptions { WriteIndented = true };
+jsonOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+using (var saved = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new { Providers = new[] { oru } }, jsonOptions)))
+{
+    var pj = saved.RootElement.GetProperty("Providers")[0];
+    Check(pj.GetProperty("TranscriberKind").GetString() == "LocalCrispAsrServer"
+          && pj.GetProperty("LocalServerPort").ValueKind == System.Text.Json.JsonValueKind.Number
+          && pj.GetProperty("LocalModelGlob").GetString() == "orukeet-q4_k.gguf",
+          "saved the way SaveConfig writes it, in the types LoadConfig reads back");
+}
+
+// A model folder like the desktop's: the shipped presets' files, two no
+// preset loads (Orukeet, the 2b-plus Granite) and a voice.
+(string Name, string Arch)[] folderFiles =
+{
+    ("parakeet-tdt-0.6b-v3-q4_k.gguf", "parakeet"), ("parakeet-rnnt-1.1b-q4_k.gguf", "parakeet"),
+    ("qwen3-asr-1.7b-q4_k.gguf", "qwen3asr"), ("granite-speech-4.1-2b-q4_k.gguf", "granite_speech"),
+    ("granite-speech-4.1-2b-plus-q4_k.gguf", "granite_speech"), ("cohere-transcribe-q6_k.gguf", "cohere-transcribe"),
+    ("voxtral-mini-4b-realtime-q4_k.gguf", "voxtral4b"), ("orukeet-q4_k.gguf", "parakeet"), ("kokoro-82m-q8_0.gguf", "kokoro"),
+};
+foreach (var (name, arch) in folderFiles)
+    File.WriteAllBytes(Path.Combine(mdir, name), Gguf(3, ("general.architecture", arch), ("tokenizer.ggml.tokens", casedVocab)));
+using (var scanner = new LocalModelScanner(mdir, Log))
+{
+    var scanned = scanner.Scan();
+    Check(scanned.Count == folderFiles.Length && scanned.All(f => f.Info != null), $"the scanner reads every file's header ({scanned.Count} files)");
+    string TestFolder(ApiProvider _) => mdir;
+    var offered = LocalModels.NewModels(scanned, shipped, TestFolder).Select(f => f.FileName).OrderBy(n => n).ToList();
+    Check(offered.SequenceEqual(new[] { "granite-speech-4.1-2b-plus-q4_k.gguf", "orukeet-q4_k.gguf" }),
+          $"offered: only the models no provider loads, and not the voice ({string.Join(", ", offered)})");
+    var added = LocalModels.CreateProvider(scanned.Single(f => f.FileName == "orukeet-q4_k.gguf"), shipped, noListeners);
+    var offeredAfter = LocalModels.NewModels(scanned, shipped.Append(added), TestFolder).Select(f => f.FileName).ToList();
+    Check(offeredAfter.SequenceEqual(new[] { "granite-speech-4.1-2b-plus-q4_k.gguf" }), "once added, it is no longer offered");
+    Check(!Logged(@"\[models\] new model file"), "the files already there at startup aren't announced in the log");
+
+    string copying = Path.Combine(mdir, "zz-copying-q4_k.gguf");
+    using (var w = new FileStream(copying, FileMode.Create, FileAccess.Write, FileShare.Read))
+    {
+        w.Write(parakeetHeader);
+        w.Flush();
+        var during = scanner.Scan().Single(f => f.FileName == "zz-copying-q4_k.gguf");
+        Check(during.StillWriting && LocalModels.NewModels(new[] { during }, shipped, TestFolder).Count == 1,
+              "a file mid-copy is listed as still copying, not offered to add");
+    }
+    Check(scanner.Scan().Single(f => f.FileName == "zz-copying-q4_k.gguf").Info?.Architecture == "parakeet",
+          "... and becomes an offer when the copy finishes");
+
+    File.WriteAllBytes(Path.Combine(mdir, "granite-speech-4.1-2b-nar-q4_k.gguf"),
+                       Gguf(3, ("general.architecture", "granite_nle"), ("tokenizer.ggml.tokens", casedVocab)));
+    Check(await WaitFor(() => scanner.Snapshot.Any(f => f.FileName == "granite-speech-4.1-2b-nar-q4_k.gguf"), 5000),
+          "a model copied in while running is found with no menu open (the folder is watched)");
+    Check(Logged(@"\[models\] new model file: granite-speech-4\.1-2b-nar-q4_k\.gguf .*Granite Speech NAR \(granite_nle\)"),
+          "... and announced in the log, saying what it is");
+}
+Directory.Delete(mdir, true);
+
+// The real model folder, where there is one: each header read the way the
+// menu reads it, and fast.
+string realModelDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk", "cohere-gguf");
+(string File, string Arch, bool? Vocab)[] realModels =
+{
+    ("parakeet-rnnt-1.1b-q4_k.gguf", "parakeet", false),
+    ("parakeet-tdt-0.6b-v3-q4_k.gguf", "parakeet", true),
+    ("qwen3-asr-1.7b-q4_k.gguf", "qwen3asr", true),
+    ("granite-speech-4.1-2b-q4_k.gguf", "granite_speech", true),
+    ("cohere-transcribe-q6_k.gguf", "cohere-transcribe", true),
+    ("voxtral-mini-4b-realtime-q4_k.gguf", "voxtral4b", null),
+};
+foreach (var (file, arch, vocab) in realModels)
+{
+    string p = Path.Combine(realModelDir, file);
+    if (!File.Exists(p)) { Console.WriteLine($"   ({file} is not on this machine; skipped)"); continue; }
+    var swr = Stopwatch.StartNew();
+    var ri = GgufHeader.TryRead(p, out var rp);
+    swr.Stop();
+    Check(ri?.Architecture == arch && ri.VocabHasCasedWords == vocab && swr.ElapsedMilliseconds < 500,
+          $"the real {file}: {ri?.Architecture ?? rp}, cased words in its vocabulary: {ri?.VocabHasCasedWords?.ToString() ?? "no token list"}, read in {swr.ElapsedMilliseconds} ms");
+}
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");
@@ -536,6 +711,32 @@ if (!fast)
     int restartLines; lock (log) restartLines = log.Count(l => l.Contains("harness-parakeet): previous server"));
     Check(restartLines == 1, $"the exit is reported exactly once (got {restartLines})");
     t2p.Dispose();
+
+    // ── 2e. A provider made the drop-in way: exact file, no --backend ──
+    Console.WriteLine("\n== 2e. crispasr: a provider added from the model folder ==");
+    string v3Path = Path.Combine(realModelDir, "parakeet-tdt-0.6b-v3-q4_k.gguf");
+    var v3 = new LocalModelFile(v3Path, new FileInfo(v3Path).Length, DateTime.UtcNow, GgufHeader.TryRead(v3Path, out _), null);
+    var dropIn = LocalModels.CreateProvider(v3, ApiProvider.CreateDefaults(), LocalModels.ListeningPorts());
+    Check(dropIn is { LocalModelGlob: "parakeet-tdt-0.6b-v3-q4_k.gguf", LocalBackendHint: "" } && dropIn.LocalServerPort >= LocalModels.FirstAutoPort,
+          $"made for the real file, with no backend hint, on :{dropIn.LocalServerPort}");
+    // Moved to a harness port so it can never meet a server the app runs.
+    dropIn.Id = "harness-dropin";
+    dropIn.LocalServerPort = 18996;
+    dropIn.BaseUrl = "http://localhost:18996";
+    dropIn.TranscriptionEndpoint = "http://localhost:18996/v1/audio/transcriptions";
+    dropIn.LocalGpuBackend = "cpu";
+    using (var td = new CrispAsrServerTranscriber(dropIn, () => "cpu", Log))
+    {
+        Check(await td.WarmUpAsync(), "WarmUpAsync starts the server before any dictation");
+        Check(Logged(@"harness-dropin\): healthy on port 18996 \(backend parakeet\)"), "the log names the backend CrispASR chose by itself");
+        string? rdrop = await td.TranscribeAsync(speech, Array.Empty<string>());
+        Check(rdrop != null && rdrop.Contains("chest pain", StringComparison.OrdinalIgnoreCase), $"... and it transcribes (\"{rdrop}\")");
+    }
+    var gone = new ApiProvider { Id = "harness-gone", Name = "harness gone", TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+        LocalServerPort = 18995, LocalModelGlob = "no-such-model.gguf", LocalGpuBackend = "cpu" };
+    using (var tg = new CrispAsrServerTranscriber(gone, () => "cpu", Log))
+        Check(!await tg.WarmUpAsync() && Logged(@"harness-gone\): can't start: Model GGUF 'no-such-model\.gguf' not found"),
+              "a provider whose file is gone fails the warm-up and names the file");
 }
 else
 {
@@ -548,6 +749,45 @@ return failures == 0 ? 0 : 1;
 // ── helpers ─────────────────────────────────────────────────────────────
 
 static string Esc(string s) => s.Replace("\r", "\\r").Replace("\n", "\\n");
+
+static bool Throws<T>(Action action) where T : Exception
+{
+    try { action(); return false; }
+    catch (T) { return true; }
+    catch { return false; }
+}
+
+// The start of a GGUF file: magic, version, no tensors, and the given
+// metadata. Values: string, uint, float, bool, string[] and int[] arrays, and
+// string[][] for an array of arrays.
+static byte[] Gguf(uint version, params (string Key, object Value)[] kvs)
+{
+    var ms = new MemoryStream();
+    using (var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: true))
+    {
+        void Str(string s) { var b = Encoding.UTF8.GetBytes(s); bw.Write((ulong)b.Length); bw.Write(b); }
+        bw.Write(0x46554747u); bw.Write(version); bw.Write(0UL); bw.Write((ulong)kvs.Length);
+        foreach (var (key, value) in kvs)
+        {
+            Str(key);
+            switch (value)
+            {
+                case string s: bw.Write(8u); Str(s); break;
+                case uint u: bw.Write(4u); bw.Write(u); break;
+                case float f: bw.Write(6u); bw.Write(f); break;
+                case bool b: bw.Write(7u); bw.Write(b); break;
+                case string[] arr: bw.Write(9u); bw.Write(8u); bw.Write((ulong)arr.Length); foreach (var a in arr) Str(a); break;
+                case int[] ints: bw.Write(9u); bw.Write(5u); bw.Write((ulong)ints.Length); foreach (var i in ints) bw.Write(i); break;
+                case string[][] nested:
+                    bw.Write(9u); bw.Write(9u); bw.Write((ulong)nested.Length);
+                    foreach (var inner in nested) { bw.Write(8u); bw.Write((ulong)inner.Length); foreach (var a in inner) Str(a); }
+                    break;
+                default: throw new ArgumentException($"no GGUF encoding for {value.GetType().Name}");
+            }
+        }
+    }
+    return ms.ToArray();
+}
 
 static async Task<bool> WaitFor(Func<bool> cond, int ms = 3000)
 {

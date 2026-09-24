@@ -183,6 +183,14 @@ namespace WhisperInk
         // fields plus their disposal boilerplate.
         private TranscriberFactory? _transcribers;
 
+        // Where crispasr.exe and the shipped presets' GGUFs live.
+        private static readonly string DefaultModelFolder = Path.Combine(ConfigFolder, "cohere-gguf");
+
+        // Keeps the list of .gguf files in the model folder current, so a
+        // model copied in shows in 🔌 Provider as "➕ <name>", one click from
+        // being a provider. See LocalModelDiscovery.cs.
+        private LocalModelScanner? _modelScanner;
+
         // ── Audio capture ────────────────────────────────────────────
         // Owns the microphone: held open between dictations with a pre-roll
         // ring buffer, so pressing the hotkey starts a recording that already
@@ -338,6 +346,7 @@ namespace WhisperInk
             try { _sounds?.Dispose(); } catch { }
             try { _hook?.Dispose(); } catch { }
             try { _transcribers?.Dispose(); } catch { }
+            try { _modelScanner?.Dispose(); } catch { }
             try { _healthProbe?.Dispose(); } catch { }
             try { _tray?.Dispose(); } catch { }
         }
@@ -394,6 +403,10 @@ namespace WhisperInk
             // delegate lets it pick up live edits from the settings dialog
             // without needing to drop and recreate every CrispASR server.
             _transcribers = new TranscriberFactory(_httpClient, () => _crispGpuBackend, Log);
+
+            // Scans on the thread pool; the menu reads its last result.
+            _modelScanner = new LocalModelScanner(DefaultModelFolder, Log);
+            _modelScanner.Refresh();
 
             UpdateStatusLabel();
 
@@ -1784,7 +1797,7 @@ namespace WhisperInk
             MenuNode.Separator(),
             new MenuNode { Header = "📂 Open config folder", ToolTip = ConfigFile, Action = () => OpenExplorerSelect(ConfigFile) },
             new MenuNode { Header = "Open debug log", Action = () => OpenPath(LogFile) },
-            new MenuNode { Header = "Open model folder", Action = () => OpenFolder(Path.Combine(ConfigFolder, "cohere-gguf")) },
+            new MenuNode { Header = "Open model folder", Action = () => OpenFolder(DefaultModelFolder) },
             new MenuNode { Header = "Copy support bundle", Action = CopySupportBundle },
             new MenuNode { Header = "Diagnose active provider", Action = DiagnoseActiveProvider },
             MenuNode.Separator(),
@@ -1821,9 +1834,130 @@ namespace WhisperInk
                     Action = () => SwitchProvider(pid),
                 });
             }
+
+            var newModels = BuildNewModelItems();
+            if (newModels.Count > 0)
+            {
+                children.Add(MenuNode.Separator());
+                children.AddRange(newModels);
+            }
+
             children.Add(MenuNode.Separator());
+            children.Add(new MenuNode
+            {
+                Header = "📂 Open model folder",
+                ToolTip = "Copy a CrispASR model (.gguf) into this folder and it's listed in this menu, one click from being a provider.",
+                Action = () => OpenFolder(DefaultModelFolder),
+            });
             children.Add(new MenuNode { Header = "⚙ Configure Providers...", Action = OpenProviderSettingsDialog });
             return new MenuNode { Header = $"🔌 Provider: {GetActiveProvider()?.Name ?? "?"}", Children = children };
+        }
+
+        /// <summary>"➕" items for the .gguf files in the model folder that no
+        /// provider loads yet. Built from the scanner's last result, so opening
+        /// the menu never opens a model file; each open also asks for a rescan,
+        /// so a file copied in a moment ago is there the next time.</summary>
+        private List<MenuNode> BuildNewModelItems()
+        {
+            var items = new List<MenuNode>();
+            if (_modelScanner == null) return items;
+            _modelScanner.Refresh();
+            var fresh = LocalModels.NewModels(_modelScanner.Snapshot, _providers);
+            if (fresh.Count == 0) return items;
+
+            items.Add(new MenuNode { Header = "New in the model folder:", IsEnabled = false });
+            foreach (var model in fresh)
+            {
+                var file = model; // capture for the closure
+                if (file.Info == null)
+                {
+                    items.Add(new MenuNode
+                    {
+                        Header = file.StillWriting ? $"⏳ {file.FileName} (still copying)" : $"⚠ {file.FileName} (can't be used)",
+                        ToolTip = LocalModels.Describe(file),
+                        IsEnabled = false,
+                    });
+                    continue;
+                }
+                items.Add(new MenuNode
+                {
+                    Header = $"➕ {LocalModels.DisplayName(file.FileName)}  ({LocalModels.FormatSize(file.Bytes)})",
+                    ToolTip = LocalModels.Describe(file) + "\nAdds it as a local provider and switches to it.",
+                    Action = () => AddLocalModel(file),
+                });
+            }
+            return items;
+        }
+
+        /// <summary>Makes a provider of a model file from the model folder and
+        /// switches to it, then loads it straight away: a model this CrispASR
+        /// can't run says so now, not at the next dictation, and one it can is
+        /// warm by the time the next dictation needs it.</summary>
+        private void AddLocalModel(LocalModelFile file)
+        {
+            // The menu may have been open a while.
+            if (LocalModels.UsedModelFiles(_providers).Contains(Path.GetFullPath(file.Path)))
+            {
+                FlashStatus("Already added");
+                return;
+            }
+
+            ApiProvider provider;
+            try { provider = LocalModels.CreateProvider(file, _providers, LocalModels.ListeningPorts()); }
+            catch (Exception ex)
+            {
+                Log($"[error] could not add {file.FileName}: {ex.Message}");
+                PlayUiSound(UiSound.Error);
+                FlashStatus("⚠ Couldn't add it", 4000);
+                return;
+            }
+
+            string previousId = _activeProviderId;
+            _providers.Add(provider);
+            Log($"[models] added provider {provider.Id} on port {provider.LocalServerPort}: {LocalModels.Describe(file)}");
+            SwitchProvider(provider.Id);
+            FlashStatus("⏳ Loading model…", 3000);
+            RunSafe(() => LoadAddedModelAsync(provider, previousId), "LoadAddedModel");
+        }
+
+        private async Task LoadAddedModelAsync(ApiProvider provider, string previousId)
+        {
+            if (_transcribers?.GetOrCreate(provider) is not CrispAsrServerTranscriber transcriber) return;
+            var sw = Stopwatch.StartNew();
+            // On the thread pool: launching crispasr.exe is not something the
+            // UI thread, and with it the keyboard hook, should wait on.
+            bool loaded = await Task.Run(() => transcriber.WarmUpAsync());
+            sw.Stop();
+
+            // Dropped while it loaded (a provider switch, a settings save):
+            // stopped on purpose, so it neither passed nor failed.
+            if (transcriber.IsDisposed || _activeProviderId != provider.Id)
+            {
+                Log($"[models] {provider.Id}: another provider was chosen while it was loading");
+                return;
+            }
+            if (loaded)
+            {
+                Log($"[models] {provider.Id} loaded in {sw.ElapsedMilliseconds} ms");
+                _tray?.ShowBalloon($"{provider.Name} is ready",
+                    $"Loaded in {sw.Elapsed.TotalSeconds:F1} s and selected. Dictate as usual; switch back any time under 🔌 Provider.");
+            }
+            else
+            {
+                // A provider that can't load would fail the next dictation, so
+                // the one that worked a moment ago takes over again.
+                var previous = _providers.FirstOrDefault(p => p.Id == previousId);
+                Log($"[error] {provider.Id} did not load (the CrispAsr({provider.Id}) lines above say why); " +
+                    (previous != null ? $"switched back to {previous.Id}" : "left selected") + ". It stays in the provider list.");
+                if (previous != null) SwitchProvider(previous.Id);
+                PlayUiSound(UiSound.Error);
+                FlashStatus("⚠ Model didn't load", 4000);
+                _tray?.ShowBalloon($"{provider.Name} didn't load",
+                    "CrispASR couldn't start it; debug.log has its output. " +
+                    (previous != null ? $"Switched back to {previous.Name}." : "Pick another provider under 🔌 Provider before dictating."),
+                    warning: true);
+            }
+            _healthProbe?.RequestProbe();
         }
 
         private MenuNode BuildMicMenu()

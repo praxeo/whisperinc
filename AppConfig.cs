@@ -156,10 +156,12 @@ namespace WhisperInk
         // filename (no wildcard) is matched as-is.
         public string LocalModelGlob { get; set; } = "";
 
-        // Optional --backend hint for crispasr.exe. Needed when GGUF metadata
-        // doesn't carry enough info for auto-detect: Cohere → "cohere",
-        // Voxtral → "voxtral", Granite → "granite". Parakeet/Canary auto-detect;
-        // leave blank.
+        // Optional --backend hint for crispasr.exe. Blank lets crispasr pick the
+        // backend from the file (its name, then its general.architecture).
+        // Older builds needed a hint for Cohere, Voxtral and Granite; the
+        // v0.8.30 deploy detected every model on disk without one (checked
+        // 2026-09-24: cohere q6_k, granite 2b-plus, voxtral 4b, qwen3,
+        // gemma4-e2b, parakeet), so the shipped presets' hints only pin a choice.
         public string LocalBackendHint { get; set; } = "";
 
         // Per-provider GPU backend override ("auto" | "cuda" | "vulkan" | "metal" | "cpu").

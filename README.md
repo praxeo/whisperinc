@@ -326,31 +326,42 @@ In WhisperInk → **Providers…** → pick **`Cohere Local Q6_K (CrispASR)`** �
 
 ### Adding your own local model
 
-**Every local preset auto-spawns.** `CrispAsrServerTranscriber` is generic — it starts `crispasr.exe --server` on first use, keeps the model resident, and shuts it down when you switch away. Adding a model is **config only**: no rebuild, no C#, and nothing to start by hand.
+**Copy the model in, then pick it from the menu.** No config file, no rebuild, nothing to start by hand.
 
-Three steps.
-
-**1. Check the backend is compiled in.** One command, and it settles whether the model is usable at all:
+**1. Put the GGUF in the model folder**, `%APPDATA%\.WhisperInk\cohere-gguf\` (right-click → 🔌 Provider → 📂 Open model folder). The helper script is the safe way to download one: the file only lands in the folder once its size and SHA-256 match what Hugging Face publishes, and an interrupted download resumes.
 
 ```powershell
-& "$env:APPDATA\.WhisperInk\cohere-gguf\crispasr.exe" --list-backends
+scripts\get-model.ps1 cstr/orukeet-GGUF                      # list the repo's .gguf files and sizes
+scripts\get-model.ps1 cstr/orukeet-GGUF orukeet-q4_k.gguf    # download one
 ```
 
-The `--backend` names are the left column. A name here works today; a name that appears only in CrispASR's online docs may not be in your binary yet — update it first (see [Updating CrispASR](#build--publish)).
+**2. Right-click the bar or the tray icon → 🔌 Provider.** Models no provider uses yet are listed under *New in the model folder* as **➕ name (size)**. Click one and WhisperInk adds a local provider for exactly that file, gives it a port of its own (8200 and up), switches to it and loads it straight away. A balloon says when it's ready. If your CrispASR can't run it, the balloon says so and WhisperInk switches back to the provider you had.
 
-**2. Download the GGUF** into `%APPDATA%\.WhisperInk\cohere-gguf\`:
+WhisperInk reads what it needs from the file's own header:
+
+- **What it is.** CrispASR picks its engine (`--backend`) from the file, so there's nothing to set. Files that aren't speech-to-text (voices, punctuation models) aren't offered.
+- **Whether it punctuates.** A model with no capitalised words in its vocabulary (Parakeet RNNT 1.1b) writes lowercase with no punctuation, so its provider gets `LocalPuncModel: "fullstop"` automatically.
+
+A file that is still being copied shows as ⏳ until the copy finishes. To remove a model, delete its provider in ⚙ Configure Providers (and the file, if you want the space back).
+
+**Can your CrispASR run it?** `crispasr.exe --list-backends` lists the engines your binary has (left column), and CrispASR's README lists which models each engine runs. A model newer than your CrispASR needs a CrispASR update first (see CLAUDE.md 5.2, and A/B the new release before you rely on it).
+
+Some models, all from the CrispASR author's Hugging Face repos:
 
 | Model | HuggingFace repo | Good for |
 |-------|------------------|----------|
-| `parakeet-tdt-0.6b-v3-q4_k.gguf` | `cstr/parakeet-tdt-0.6b-v3-GGUF` | Multilingual (25 EU), fast, word timestamps |
-| `parakeet-rnnt-1.1b-q4_k.gguf` | `cstr/parakeet-rnnt-1.1b-GGUF` | Stronger English than TDT; needs `LocalPuncModel` |
+| `parakeet-tdt-0.6b-v3-q4_k.gguf` | `cstr/parakeet-tdt-0.6b-v3-GGUF` | Multilingual (25 EU), fast, word timestamps; **shipped preset** |
+| `orukeet-q4_k.gguf` | `cstr/orukeet-GGUF` | A Parakeet TDT 0.6b v3 fine-tune, 402 MB; same engine (CC-BY-SA-4.0) |
+| `parakeet-rnnt-1.1b-q4_k.gguf` | `cstr/parakeet-rnnt-1.1b-GGUF` | Stronger English than TDT; lowercase, so punctuation is restored |
 | `canary-1b-v2-q5_0.gguf` | `cstr/canary-1b-v2-GGUF` | Explicit-language control + speech translation |
 | `qwen3-asr-1.7b-q4_k.gguf` | `cstr/qwen3-asr-1.7b-GGUF` | 30 languages + Chinese dialects; **shipped preset** (port 8112), biasing that works |
-| `qwen3-asr-0.6b-q4_k.gguf` | `cstr/qwen3-asr-0.6b-GGUF` | Smaller sibling (~500 MB); needs its own preset + glob |
+| `granite-speech-4.1-2b-nar-q4_k.gguf` | `cstr/granite-speech-4.1-2b-nar-GGUF` | IBM Granite 4.1, non-autoregressive (one pass), 3.4 GB |
 | `voxtral-mini-3b-2507-q4_k.gguf` | `cstr/voxtral-mini-3b-2507-GGUF` | Speech-LLM, audio Q&A |
-| `cohere-transcribe-q6_k.gguf` | `cstr/cohere-transcribe-03-2026-GGUF` | Strong English, near-F16 at Q6_K |
+| `cohere-transcribe-q6_k.gguf` | `cstr/cohere-transcribe-03-2026-GGUF` | Strong English, near-F16 at Q6_K; **shipped preset** |
 
-**3. Add a provider entry** to `%APPDATA%\.WhisperInk\config.json` (with WhisperInk closed — it rewrites the file when you change settings), then restart. It shows up under 🔌 Provider.
+#### By hand, in config.json
+
+The menu covers the usual case. To set something it doesn't (a pinned `--backend`, CPU only, a glob that follows new quants), add an entry to `%APPDATA%\.WhisperInk\config.json` with WhisperInk closed (it rewrites the file when you change settings), then restart. It shows up under 🔌 Provider.
 
 ```json
 {
@@ -367,16 +378,16 @@ The `--backend` names are the left column. A name here works today; a name that 
 }
 ```
 
-**Pick a free port.** Each local preset spawns its own server, so ports can't be shared. Taken: **8103, 8105–8109, 8112, 8766**. Retired but still claimed by old configs: 8102, 8104, 8110, 8111, 8767, 8768. **Next free: 8113.**
+**Pick a free port.** Each local preset spawns its own server, so ports can't be shared. Taken by shipped presets: **8103, 8105–8109, 8112, 8766**. Retired but still claimed by old configs: 8102, 8104, 8110, 8111, 8767, 8768. **Next free: 8113.** Models added from the menu take 8200 and up.
 
-**Make `LocalModelGlob` specific.** All presets share one folder and the first filename match wins, so a loose glob will quietly load a *different* model — which looks like bad accuracy, not a config error. `parakeet-*.gguf` matches both Parakeet models, hence the pinned `parakeet-tdt-*` and `parakeet-rnnt-1.1b-*`.
+**Make `LocalModelGlob` specific.** All presets share one folder and the first filename match wins, so a loose glob will quietly load a *different* model — which looks like bad accuracy, not a config error. `parakeet-*.gguf` matches both Parakeet models, hence the pinned `parakeet-tdt-*` and `parakeet-rnnt-1.1b-*`. The menu always uses the exact file name.
 
 **Optional fields worth knowing:**
 
-- `LocalBackendHint` — only if the GGUF doesn't auto-detect. Cohere needs `"cohere"`, Voxtral 3B `"voxtral"`, Voxtral 4B `"voxtral4b"`, Granite `"granite"`. Harmless to set anyway.
+- `LocalBackendHint` — not needed: CrispASR v0.8.30 picks the right engine for every model tested, Cohere, Granite and Voxtral included. Set it only to pin a choice.
 - `LocalPuncModel: "fullstop"` — restores punctuation on models that emit none (Parakeet RNNT/CTC). Skip it for speech-LLM models like Qwen3-ASR, which punctuate themselves.
 - `LocalGpuBackend` — blank inherits the global setting; set `"cpu"` to pin one preset to CPU.
-- `BiasMechanism: "hotwords"` — enables Context Bias terms. Genuinely effective on Qwen3-ASR and Voxtral 3B (the terms go into the model's prompt); weak on Parakeet; ignored by Cohere, Granite and Voxtral 4B.
+- `BiasMechanism: "hotwords"` — a label: the Context Bias terms go to every local model as hotwords either way. They genuinely help Qwen3-ASR and Voxtral 3B (the terms go into the model's prompt), help Granite but can rewrite a correct word, are weak on Parakeet, and are ignored by Cohere and Voxtral 4B.
 
 **Test it before relying on it** — run the same command WhisperInk will, so a problem is clearly the model's and not your config:
 

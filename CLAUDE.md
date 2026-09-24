@@ -28,12 +28,12 @@ WhisperInk is a push-to-talk dictation tool for Windows: hold **Ctrl+Space**, ta
 
 Its main use is **clinical dictation**: exam findings and notes pasted straight into an EHR. That sets the engineering bar. A wrong word can be a wrong finding, a lost dictation is lost clinical work, and a paste into the wrong window can land in the wrong chart. Every design decision below follows from that. When in doubt, choose the behaviour that loses nothing and says so out loud.
 
-## 1.2 Current state (2026-09-23)
+## 1.2 Current state (2026-09-24)
 
 | | |
 |---|---|
-| `main` | Pushed to `origin` (`praxeo/whisperinc`, **public**). The last app-code commit is the quiet-speech fix (`SpeechDetector`), the commit right after `8c0a52d` |
-| Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of that commit. Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
+| `main` | `origin` (`praxeo/whisperinc`, **public**) has everything up to `0411c65`. The drop-in local models commit (2026-09-24) is on `main` locally, **not pushed**: the owner asked for commit and deploy, not push |
+| Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of the drop-in local models commit. Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
 | Active provider (desktop) | `elevenlabs-medical` (Scribe v2 Medical), with the upload streamed while you talk. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
 | Vocabulary | 21 terms in the shared Context Bias list and 228 Scribe-only keyterms, so 249 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
 | Local ASR | CrispASR **v0.8.30** CUDA (prebuilt release) in `%APPDATA%\.WhisperInk\cohere-gguf\`. v0.8.36 is out, not deployed. Best local preset: `qwen3-asr-1.7b-local` |
@@ -105,6 +105,7 @@ Start in `%APPDATA%\.WhisperInk\`:
 | A take is "lost" | ↻ Unsent first, then History, then the log around its time. `[unsent] kept …` gives the reason, with the transcriber's `HTTP` or error line just before it. A failed request logs no `[error]` |
 | A local model returns empty text | `CrispAsr(` lines. Exit code `-1073741515` means a missing DLL |
 | A local model transcribes badly | Which GGUF `LocalModelGlob` actually picked up (see [6.1](#61-add-a-provider)) |
+| A model copied into the model folder isn't offered in 🔌 Provider | `[models]` lines: still being copied, not a readable GGUF, not speech-to-text, or a provider already loads it (a loose glob counts). See [8.3](#83-local-asr) |
 | Slow cloud takes | `[net] new connection` (the connection wasn't reused) and `took …ms` lines |
 
 ## 1.6 Working with the owner
@@ -220,13 +221,13 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 - The debug copy of the last take, `Documents\MyRecordings\temp_audio.wav`. It **is** OneDrive-synced on the desktop.
 - Support bundles, which land on the **Desktop**, also synced.
 
-**Source files** (line counts as of 2026-09-23):
+**Source files** (line counts as of 2026-09-24):
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `MainWindow.xaml(.cs)` | 79 / 2234 | The floating bar and all orchestration: press/stop paths, dispatch, delivery, retries, config load/save, `BuildAppMenu`, tray and health wiring, the shared cloud `HttpClient`, pre-warm and stream hand-off |
+| `MainWindow.xaml(.cs)` | 79 / 2368 | The floating bar and all orchestration: press/stop paths, dispatch, delivery, retries, config load/save, `BuildAppMenu`, adding a model from the model folder, tray and health wiring, the shared cloud `HttpClient`, pre-warm and stream hand-off |
 | `App.xaml(.cs)` | 9 / 63 | Startup, plus three crash handlers (UI-thread, AppDomain and unobserved-task) that write `Exception.ToString()` to `debug.log`. UI-thread exceptions are marked handled, so the app keeps running |
-| `AppConfig.cs` | 1084 | The `TranscriberKind` enum, the `ApiProvider` model (settable fields, `Resolved*` helpers, `InheritFromSibling`, `RepairSupersededDefault`), `CreateDefaults()` and `InferKindFromLegacyId`. Its `AppConfig` class is **never instantiated**: config is read by hand in `LoadConfig` and written as an anonymous object |
+| `AppConfig.cs` | 1086 | The `TranscriberKind` enum, the `ApiProvider` model (settable fields, `Resolved*` helpers, `InheritFromSibling`, `RepairSupersededDefault`), `CreateDefaults()` and `InferKindFromLegacyId`. Its `AppConfig` class is **never instantiated**: config is read by hand in `LoadConfig` and written as an anonymous object |
 | `KeyboardHookService.cs` | 251 | The `WH_KEYBOARD_LL` hook: the Ctrl+Space state machine, suppression, the synthetic-event filter, the watchdog |
 | `MicCapture.cs` | 383 | The warm mic, `PreRollRing`, the stream sink, mic-failure flags |
 | `SpeechDetector.cs` | 135 | The silence gate's measurement: peak, RMS, the take's own noise floor, and sustained speech in 30 ms frames ([3.4](#34-capture-pipeline-miccapturecs)) |
@@ -236,7 +237,8 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 | `TranscriberFactory.cs` | 91 | Caches one transcriber per provider id; `Drop(id)` and `DropAll()` |
 | `HttpTranscriber.cs` | 315 | OpenAI-style multipart (Mistral, OpenAI, Cohere v2, ElevenLabs, user-run local servers), the ElevenLabs extras and cleanup, the only `ITranscriptCoverage`, and `BeginStreamedTranscription` |
 | `StreamedTranscription.cs` | 263 | The ElevenLabs upload streamed from key-press ([3.6](#36-cloud-connections-and-the-streamed-upload)) |
-| `CrispAsrServerTranscriber.cs` | 539 | Spawns and supervises one `crispasr.exe --server` per local preset ([5.3](#53-how-whisperink-runs-it-crispasrservertranscriber)) |
+| `CrispAsrServerTranscriber.cs` | 592 | Spawns and supervises one `crispasr.exe --server` per local preset ([5.3](#53-how-whisperink-runs-it-crispasrservertranscriber)); `WarmUpAsync` starts one without a dictation |
+| `LocalModelDiscovery.cs` | 678 | Drop-in local models ([6.1](#61-add-a-provider)): `GgufHeader` (a GGUF's architecture, name, and whether its vocabulary has cased words, read from the header), `LocalModels` (which files to offer, the provider a file becomes, its port), `LocalModelScanner` (keeps the model folder's list current off the UI thread, with a `FileSystemWatcher`) |
 | `DeepgramTranscriber.cs`, `SonioxTranscriber.cs`, `GoogleChirp3Transcriber.cs`, `ModulateTranscriber.cs`, `SmallestTranscriber.cs`, `Reson8Transcriber.cs` | 214–443 | The protocol-specific cloud clients ([Part 4](#part-4--providers)) |
 | `TranscriptionDeadline.cs` | 72 | Per-take deadlines, and `HttpBackstop` |
 | `TranscriptCoverage.cs` | 115 | The incomplete-transcript check |
@@ -260,7 +262,8 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 | `scripts\install-shortcuts.ps1`, `scripts\uninstall.ps1 [-RemoveBinaries]` | Shortcuts; removal of shortcuts and the Run key. `%APPDATA%` is never touched | Yes |
 | `scripts\update-crispasr.ps1 [-Tag] [-Asset]` | Deploys a prebuilt CrispASR release ([5.2](#52-updating-prebuilt-releases-the-normal-path)). **Always pass `-Tag`**: the default is v0.7.1 | Yes |
 | `scripts\build-crispasr.ps1` | Source build ([5.6](#56-building-from-source-rarely-needed)) | Risky; see there |
-| `scripts\download-cohere-{gguf,q4,q6k}.ps1` | Hugging Face downloads into `cohere-gguf\` | q4 and q5 would hijack `cohere-gguf-server`'s loose glob |
+| `scripts\get-model.ps1 <repo> [file]` | Downloads a GGUF from Hugging Face into `cohere-gguf\` as `<file>.part`, and renames it only once its size and SHA-256 match what Hugging Face publishes; resumes; never overwrites. With no file name it lists the repo's GGUFs. Accepts a pasted link. Pure ASCII (PowerShell 5.1) | Yes |
+| `scripts\download-cohere-{gguf,q4,q6k}.ps1` | Hugging Face downloads into `cohere-gguf\`. Superseded by `get-model.ps1` | q4 and q5 would hijack `cohere-gguf-server`'s loose glob |
 | `scripts\generate-icon.ps1` | Regenerates `Assets\icon.ico` | Yes |
 | `_scratch\…` | Test harnesses and measurement tools ([Part 7](#part-7--testing)) | Yes |
 | `README.md` | User-facing setup and features | **Stale** in many places; see [Part 10](#part-10--roadmap-and-open-questions) |
@@ -483,6 +486,8 @@ Safety rules:
 | Header "{dot} Active provider: {name}", tooltip = health summary | Tray only | Disabled; information only |
 | Show Window | Tray only | Shows and restores the bar. Tray left-click and double-click do the same |
 | 🔌 Provider: {name} ▸ one item per provider | Both | `SwitchProvider`: drops the old transcriber, saves, re-probes health |
+| 🔌 Provider ▸ *New in the model folder:* ➕ {name} ({size}) | Both | One per `.gguf` in `cohere-gguf` that no provider loads and that is speech-to-text, from `LocalModelScanner`'s last scan (the menu never opens a model file; each open asks for a rescan). A click adds a `local-…` provider for that exact file ([6.1](#61-add-a-provider)), switches to it and loads it at once (`WarmUpAsync`, on the thread pool): a balloon when it's ready; Error tone, balloon and a switch back to the previous provider if it won't load. ⏳ = still being copied; ⚠ = unreadable, the tooltip says why |
+| 🔌 Provider ▸ 📂 Open model folder | Both | Tooltip: copy a `.gguf` in and it's listed above |
 | 🔌 Provider ▸ ⚙ Configure Providers... | Both | Settings dialog; on save, `DropAll()` and save |
 | 🎙 Microphone ▸ one item per device | Both | Re-listed on every open; selecting one reopens the mic |
 | 🎙 Microphone ▸ ⚡ Instant start | Both | Toggles the warm mic |
@@ -527,7 +532,7 @@ Safety rules:
 3. Install the hook and its watchdog.
 4. `LoadConfig`. On a first launch this can show a modal message.
 5. Create the sound player, then open the mic (warm).
-6. Create the take journal, then the transcriber factory.
+6. Create the take journal, the transcriber factory, and the model-folder scanner (its first scan runs on the thread pool).
 7. Tray, health probe, GPU probe, local-model banner.
 8. Sync `LaunchAtStartup` from the registry.
 9. First-run balloon.
@@ -540,19 +545,20 @@ Safety rules:
 | Prefix | Meaning | Example |
 |---|---|---|
 | `[diag]` | Pipeline tracing | `[diag] captured 6950ms, RMS 0.00856, peak 0.1051, floor 0.00031, speech 5130ms` |
-| `[error]` | A loud failure: a deadline, no text for real sound, or a mic failure. **A failed request logs none**; its evidence is the transcriber's `HTTP` or error line, then `[unsent] kept … (<reason>)`. Mic failures are never journaled | `[error] … did not finish within its 21s deadline …` |
+| `[error]` | A loud failure: a deadline, no text for real sound, a mic failure, or a model added from the menu that won't load. **A failed request logs none**; its evidence is the transcriber's `HTTP` or error line, then `[unsent] kept … (<reason>)`. Mic failures are never journaled | `[error] … did not finish within its 21s deadline …` |
 | `[warn]` | Delivered, but check it | `[warn] not pasted: the window … (0x…) is not in front …` |
 | `[skip]` | A deliberate discard | `[skip] held 180ms < 250ms — discarded`, `[skip] 2450ms of audio, RMS 0.00043 < 0.00300 and no sustained speech (…) — nothing said, no transcription; kept under ↻ Unsent → Judged silent` |
 | `[net]` | Cloud connections | `[net] new connection to api.elevenlabs.io:443 (20 ms to connect)`, `[net] pre-warmed … (404) in 45 ms` |
 | `[stream]` | The streamed upload | `[stream] elevenlabs-medical: 110400 bytes streamed (3.5 s); waiting for the transcript` |
 | `[mic]` | The capture device | `[mic] released after 180s idle` |
 | `[unsent]`, `[retry]` | The journal and retries | `[unsent] kept take-… (1.0s, …) for a retry: …` |
+| `[models]` | The model folder and models added from it. Files already there at startup are only mentioned if something is wrong with them | `[models] new model file: orukeet-q4_k.gguf · 384 MB · Parakeet (parakeet)`, `[models] added provider local-orukeet-q4_k on port 8200: …`, `[models] local-orukeet-q4_k loaded in 2100 ms` |
 | `[keyterms]`, `[scribe]` | The ElevenLabs request | `[keyterms] sending 249 terms`, `[scribe] last word ends at 10.5 s; decoded 11.0 s of audio` |
 | `[hook-watchdog]` | Hook reinstalled | Some after quiet periods are false positives ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) |
 | `[unhandled]` | A fault caught by `RunSafe`, with its stack | |
 | `[sound]`, `[deepgram]`, `[soniox]`, `[modulate]`, `[smallest]`, `[reson8]`, `[chirp3]` | Subsystem and provider notes | |
 | `[<providerId>] HTTP <code>: <first 500 chars>` | **Every** Http-kind response, **including 200s, which carry the transcript** | |
-| `CrispAsr(<id>): …` | Local-server lifecycle and failures, with the last 20 output lines | |
+| `CrispAsr(<id>): …` | Local-server lifecycle and failures, with the last 20 output lines. `healthy on port N (backend X)` names the backend crispasr chose | `CrispAsr(parakeet-local): healthy on port 8103 (backend parakeet)` |
 | `<Name> took Nms[ after release (streamed)] on Mms audio = RTFx … -- result: <first 200 chars>` | Per-take timing, **with the transcript's start** | |
 | `Batch pipeline: capture=… transcribe=… paste=… TOTAL=…` | The end-to-end split | |
 | `Active provider: <name> → STT=<url> (auth=…, modelField=…)` | At start and on switch. Check the auth scheme here | |
@@ -610,11 +616,13 @@ The shipped presets (`ApiProvider.CreateDefaults()`). "Status" is the desktop as
 
 GGUFs on the desktop, in `cohere-gguf\`:
 - cohere-transcribe q6_k;
-- granite-speech-4.1-2b q4_k and 2b-plus q4_k (no preset uses plus);
+- granite-speech-4.1-2b q4_k and 2b-plus q4_k (no preset uses plus, so it's offered under ➕; unlike the plain 2B it writes cased, punctuated text);
 - parakeet-rnnt-1.1b q4_k and parakeet-tdt-0.6b-v3 q4_k;
 - qwen3-asr-1.7b q4_k;
 - voxtral-mini-4b-realtime q4_k;
-- gemma4-e2b-it q8_0 (not a WhisperInk model).
+- gemma4-e2b-it q8_0 (a general model; crispasr runs it as `gemma4-e2b`, so it's offered under ➕ too).
+
+**Providers added from the model folder** have ids `local-<file name>` and ports from 8200 ([6.1](#61-add-a-provider)). They live in that machine's `config.json` only, not in `CreateDefaults()`, so they never appear on another machine and the default-merge never re-adds one you delete.
 
 ## 4.2 Which provider for what
 
@@ -874,7 +882,7 @@ Compare numbers from the same harness only: an older 317–352 ms figure came fr
 
 ## 5.3 How WhisperInk runs it (`CrispAsrServerTranscriber`)
 
-The first take on a local preset lazily spawns:
+The first take on a local preset lazily spawns the server below. A model just added from the model folder is spawned straight away instead (`WarmUpAsync`), so a model that won't load says so before anyone dictates.
 
 ```
 crispasr.exe --server --host 127.0.0.1 --port <port> -m <model> -t <min(8, cores)> -np
@@ -882,6 +890,8 @@ crispasr.exe --server --host 127.0.0.1 --port <port> -m <model> -t <min(8, cores
              [-ng  when the effective GPU backend is cpu | --gpu-backend X  when it's a named GPU]
              [--punc-model X] [--truecase-model X]
 ```
+
+**Backend.** With no `LocalBackendHint`, crispasr picks the backend from the model file: its name first, then its `general.architecture` (one table in upstream's `src/core/arch_backend_map.h`). Checked 2026-09-24 on the v0.8.30 deploy, no hint, CUDA, `jfk.wav`: granite 2b-plus → `granite`, cohere q6_k → `cohere`, voxtral 4b → `voxtral4b`, qwen3-asr → `qwen3`, gemma4-e2b → `gemma4-e2b`, parakeet v3 → `parakeet`, each transcribing correctly. The old need for hints on Cohere, Voxtral and Granite is gone; the shipped hints now only pin a choice. `CrispAsr(<id>): healthy on port N (backend X)` records what it picked.
 
 **Port.** `LocalServerPort`, then the port in the URL, then 8103. Health checks prefer the `BaseUrl` port, which agrees for every shipped preset.
 
@@ -968,8 +978,8 @@ Work out which of four cases you're in **before editing anything**. Only one of 
 
 | You want to add… | Work |
 |---|---|
-| **A.** Another GGUF that CrispASR already supports | **No new class.** A hand-written `config.json` entry (no rebuild) for one machine, or a `CreateDefaults()` entry (C#, rebuild) to ship it to every install |
-| **B.** A cloud API that speaks OpenAI-style multipart | **No new class.** Same as A, with `TranscriberKind` left at `Http` |
+| **A.** Another GGUF that CrispASR already supports | **No code and no config edit.** Put the file in the model folder (`scripts\get-model.ps1`) and click ➕ in 🔌 Provider. A `CreateDefaults()` entry (C#, rebuild) only to ship it to every install |
+| **B.** A cloud API that speaks OpenAI-style multipart | **No new class.** A hand-written `config.json` entry (see A, by hand), with `TranscriberKind` left at `Http` |
 | **C.** A cloud API with its own protocol (Deepgram, Soniox, Chirp 3, Modulate, Smallest, Reson8) | Four edits: an enum value, an `ITranscriber` class, one factory arm, a preset |
 | **D.** A new *knob* on existing providers | Three **mandatory** edits ([6.2](#62-add-a-field-to-apiprovider)). Independent of A–C |
 
@@ -979,9 +989,27 @@ Work out which of four cases you're in **before editing anything**. Only one of 
 
 ### A. Another CrispASR GGUF
 
-1. **Check the deployed binary has the backend.** Run `& "$env:APPDATA\.WhisperInk\cohere-gguf\crispasr.exe" --list-backends`. A name in the left column runs today; a name only in upstream's docs doesn't.
-2. Put the GGUF in `%APPDATA%\.WhisperInk\cohere-gguf\`, or in a sibling folder and set `LocalModelFolder`.
-3. Pick the next free port from the table below and add the entry:
+**The drop-in way (one machine, no code):**
+
+1. **Check the deployed binary runs it.** `& "$env:APPDATA\.WhisperInk\cohere-gguf\crispasr.exe" --list-backends` lists its backends (left column), and upstream's README says which models each runs. A model added upstream after the deployed release may need a CrispASR update first ([5.2](#52-updating-prebuilt-releases-the-normal-path)); one that only adds a registry entry for an existing runtime, like Orukeet (v0.8.36, the Parakeet runtime), doesn't.
+2. **Get the file:** `scripts\get-model.ps1 <owner/repo>` lists a repo's GGUFs with sizes; `scripts\get-model.ps1 <owner/repo> <file>` downloads one. It only lands in `cohere-gguf\` once its size and SHA-256 match Hugging Face's, so the app never sees a partial file. Downloading needs the owner's go-ahead: say the file, the source and the size.
+3. **Add it:** 🔌 Provider ▸ ➕ *name*. `LocalModels.CreateProvider` makes:
+   - `Id` `local-<file stem>` (`-2`, `-3` … if taken), `Name` from the file name ("Orukeet Q4_K (local)");
+   - `LocalModelGlob` = the exact file name, so no later download can hijack it;
+   - the first port from **8200** that no provider uses and nothing listens on (`LocalModels.FirstAutoPort`; shipped presets keep 8103 up);
+   - no `LocalBackendHint`: crispasr detects the backend from the file ([5.3](#53-how-whisperink-runs-it-crispasrservertranscriber));
+   - `LocalPuncModel` `fullstop` when the vocabulary has **no cased word piece** (a capital inside a token of two or more characters). A model trained on lowercase text has none: Parakeet RNNT 1.1b's 1,024 tokens and Granite Speech 5.0's 16,384 don't, while Parakeet TDT v2 has 38, v3 431, and the speech-LLMs thousands (checked 2026-09-24). Single capitals don't count, because a byte-level vocabulary carries the whole alphabet regardless;
+   - `BiasMechanism` `none` for the families measured to ignore hotwords (Cohere, Voxtral Realtime), `hotwords` otherwise; `Language` `en`.
+
+   It's switched to and loaded at once. If it won't load, the previous provider is switched back and the added one stays in the list.
+4. **Measure it before trusting it:** the six clips through `_scratch\biasing\_local_bias_ab.ps1` (add it to `$runs`), with and without the bias list ([6.7](#67-measure-latency-or-accuracy)).
+
+Files that aren't speech-to-text (a `general.architecture` matching the voice, punctuation, language-ID, translation or music patterns in `LocalModels`) aren't offered. An architecture WhisperInk doesn't know is offered anyway, because crispasr is the judge of what it can run, and the load check catches the rest.
+
+**By hand, or to ship it to every install:**
+
+1. Put the GGUF in `%APPDATA%\.WhisperInk\cohere-gguf\`, or in a sibling folder and set `LocalModelFolder`.
+2. Pick the next free port from the table below and add the entry (to `config.json` with WhisperInk closed, or to `CreateDefaults()` to ship it):
    ```json
    { "Id": "canary-local", "Name": "Canary Local (CrispASR)",
      "BaseUrl": "http://localhost:8113", "TranscriptionEndpoint": "http://localhost:8113/v1/audio/transcriptions",
@@ -989,8 +1017,8 @@ Work out which of four cases you're in **before editing anything**. Only one of 
      "LocalModelGlob": "canary-1b-*.gguf", "LocalBackendHint": "canary",
      "BiasMechanism": "none", "Language": "en" }
    ```
-4. Restart WhisperInk. The server spawns on the first take.
-5. **Verify by hand first**, using the exact command WhisperInk will run, so any failure belongs to the model and not the plumbing:
+3. Restart WhisperInk. The server spawns on the first take.
+4. **Verify by hand first**, using the exact command WhisperInk will run, so any failure belongs to the model and not the plumbing:
    ```bash
    crispasr.exe --server --host 127.0.0.1 --port <PORT> -m <MODEL.gguf> -t 8 -np --backend <HINT> --gpu-backend cuda
    curl -s http://127.0.0.1:<PORT>/health
@@ -1001,12 +1029,12 @@ Work out which of four cases you're in **before editing anything**. Only one of 
 
 **The fields that bite:**
 - **`LocalModelGlob`: pin it to the model, not the family.** Presets share one folder, and the first `EnumerateFiles` match wins, so this fails *silently* and looks like poor model quality. `parakeet-*` matches both Parakeet GGUFs; `granite-speech-*` loaded 2b-plus for four months. When a shipped glob turns out wrong, also add a line to `ApiProvider.RepairSupersededDefault` ([6.3](#63-change-a-shipped-default)).
-- **`LocalBackendHint`**: needed when GGUF metadata doesn't auto-detect: `cohere`, `voxtral`, `voxtral4b`, `granite`. Pin it anyway when unsure; it costs nothing.
+- **`LocalBackendHint`**: not needed on v0.8.30, which detected every model on disk without one ([5.3](#53-how-whisperink-runs-it-crispasrservertranscriber)). Set it only to pin a choice, and check the name against `--list-backends`: a wrong hint is worse than none.
 - **`BiasMechanism`** is **informational for local presets**: the transcriber sends `hotwords` whenever the shared list is non-empty, whatever this says. Use `hotwords` for a backend that reads the terms. Every shipped local preset says `hotwords`, including Cohere and Voxtral 4B, whose backends ignore them, so the label doesn't tell you whether biasing works; the table in [4.3](#43-context-biasing) does. **Measure before trusting a no-op claim**: Granite's prompt splice went unnoticed for three months.
 - **`LocalPuncModel`**: only for backends with no native punctuation (Parakeet RNNT/CTC → `fullstop`). Leave `LocalTruecaseModel` unset.
 - **`LocalGpuBackend`**: blank inherits the global setting. Pin `cpu` only for a deliberate CPU-fallback preset.
 
-**Ports.** Each local preset owns one. **Next free: 8113.**
+**Ports.** Each local preset owns one. **Next free for a shipped preset: 8113.** Models added from the model folder take 8200 and up.
 
 | Port | Preset |
 |---|---|
@@ -1017,12 +1045,13 @@ Work out which of four cases you're in **before editing anything**. Only one of 
 | 8108 | `voxtral4b-local` |
 | 8109 | `parakeet-rnnt-local` |
 | 8112 | `qwen3-asr-1.7b-local` |
+| 8200+ | Models added from the model folder (`local-…`), per machine |
 | 8766 | `cohere-gguf-server` |
 | 8001, 8880 | The owner's own crispasr servers. **Not WhisperInk's** |
 
 Retired: 8102 (the old hand-run `qwen3-asr` Http preset), 8104/8767/8768 (the Q4, CUDA and CUDA-Q8 Cohere presets), 8110 (was the Canary example), 8111 (the LFM2-audio trial). The retired Cohere ids still resolve in `InferKindFromLegacyId`, so an old config entry without a `TranscriberKind` keeps working. `qwen3-asr` falls through to `Http`, which is what it was; `lfm2-audio-local` isn't listed.
 
-**Removing a preset for real** means deleting it from `CreateDefaults()` *and* from `config.json`. The additive default-merge re-adds any shipped default the config lacks, on every launch.
+**Removing a preset for real** means deleting it from `CreateDefaults()` *and* from `config.json`. The additive default-merge re-adds any shipped default the config lacks, on every launch. A provider added from the model folder is only in `config.json`: delete it in ⚙ Configure Providers, and its file is offered under ➕ again.
 
 ### B. Cloud API on OpenAI-style multipart
 
@@ -1133,8 +1162,8 @@ The harnesses compile the **shipping source files directly** (each csproj `Compi
 ```powershell
 cd _scratch\crisp-harness
 .\make-speech.ps1               # once per machine: writes speech.wav (TTS). It's git-ignored, and every run reads it, even `fast`
-dotnet run -c Release -- fast   # 110 checks, ~30 s, no API calls, no crispasr
-dotnet run -c Release           # full: ~123 checks, adds the real crispasr.exe on CPU and a 16 s slow-server check
+dotnet run -c Release -- fast   # 164 checks, ~30 s, no API calls, no crispasr
+dotnet run -c Release           # full: 183 checks, adds the real crispasr.exe on CPU and a 16 s slow-server check
 ```
 
 | Section | Checks | Covers |
@@ -1146,9 +1175,11 @@ dotnet run -c Release           # full: ~123 checks, adds the real crispasr.exe 
 | 0e | 18 | Provider resolution (ElevenLabs auth, model field, bias), `InheritFromSibling`, the Granite glob and its repair |
 | 0f | 12 | `SpeechDetector` on synthetic audio over a noise floor. Dropped as silent: the 2026-09-23 silent take, a fan, clicks. Sent: quiet speech at that evening's level (RMS under 0.003), a cold-mic take with no pre-roll, a short phrase in a 30 s hold, and loud steady noise. Also fail-open, digital zero, and a disabled gate |
 | 0g | 4 | Takes judged silent: only the newest 5 kept, never pushing out a real failure, and left out of the startup count |
+| 0h | 54 | Drop-in local models. GGUF headers (built in memory): v2 and v3, cased word pieces vs single capitals and marks (Granite 5.0's case), the architecture after the token list, other value types stepped over; v1, not-GGUF, an absurd length, a truncated file and a file still open for writing refused. Architecture → speech-to-text or not; display names; the provider a file becomes (id, port 8200 skipping used and listening ports, exact-file glob, no hint, `fullstop`, bias label, the JSON `SaveConfig` writes); `LocalModelScanner` on a test folder (what's offered, the watcher, the log); the real model folder's headers, each read in under 500 ms |
 | 1 | 21 (+1 full) | `HttpTranscriber` against a fake server on `127.0.0.1:18999`: the ElevenLabs field set and order, keyterm merging and validation, word timing, `auto` language, a non-ElevenLabs provider getting no Scribe fields, the deadline |
 | 1b | 16 | `StreamedTranscription` against the fake server: chunked, byte-exact PCM, field parity, and the short-stream / discarded-take / HTTP-error / deadline / 5-minute paths |
-| 2a–2d | ~13 (full only) | Real `crispasr.exe` on CPU (ports 18997/18998, needs a `parakeet-tdt-*.gguf`): startup failure, empty text, deadline mid-inference then restart, server killed between takes |
+| 2a–2d | 13 (full only) | Real `crispasr.exe` on CPU (ports 18997/18998, needs a `parakeet-tdt-*.gguf`): startup failure, empty text, deadline mid-inference then restart, server killed between takes |
+| 2e | 5 (full only) | A provider made the drop-in way for the real Parakeet v3 file (port 18996, no hint): `WarmUpAsync` starts it, the log names the backend crispasr chose, it transcribes; a provider whose file is gone fails the warm-up and names the file |
 
 The fake server runs on loopback, so providers pointed at it get the **local** deadline budget. Use a cloud provider object for cloud budgets.
 
@@ -1231,6 +1262,8 @@ After touching any of these, deploy ([1.4](#14-build-test-deploy)) and have the 
   - an empty result: the last output lines, without an exit code (the server is still running);
   - a missed health check: the output, without an exit code;
   - a non-2xx answer: a body preview.
+- **A model copied into the model folder isn't offered under ➕.** The `[models]` lines say why: still being copied (⏳ in the menu, and offered once the copy ends), not a readable GGUF (⚠; a truncated download says "ends inside its header"), not speech-to-text (a voice, a punctuation or language-ID model), or a provider already loads it. That last one includes a loose glob: `cohere-gguf-server`'s `cohere-transcribe-*.gguf` takes any Cohere quant ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)). The menu shows the scanner's last result and asks for a new scan each time it opens, so reopening it helps.
+- **A model added from the menu didn't load.** Its `CrispAsr(local-…)` lines carry crispasr's own output; the usual cause is a model newer than the deployed CrispASR. WhisperInk switched back to the provider before it and kept the added one in the list; delete it in ⚙ Configure Providers, or update CrispASR ([5.2](#52-updating-prebuilt-releases-the-normal-path)) and switch to it again.
 
 ## 8.4 Config and settings
 
@@ -1283,7 +1316,8 @@ All 59 commits (as of `8c0a52d`) are linear on `main`; feature branches are fast
 | 09-23 | `fef3ba2`, `a16352c` | **Never lose a dictation**: deadlines, the journal, loud failures, ElevenLabs request parity (ported from elevenlabs-web) |
 | 09-23 | `a9e288a` | **Scribe Medical preset**, ElevenLabs auth resolution, sibling key inheritance, the Granite glob fix, a 9-min pool + keep-alive + pre-warm, **the streamed upload** |
 | 09-23 | `8c0a52d` | This file rewritten and audited against the code |
-| 09-23 | the commit after `8c0a52d` | **Quiet speech no longer dropped as silence** (`SpeechDetector`), takes judged silent kept, a 1 s clipboard restore that never clobbers a newer copy. The desktop ran `SilenceThreshold` 0.001 for a few hours before it, as a stopgap |
+| 09-23 | `82fbe2c` | **Quiet speech no longer dropped as silence** (`SpeechDetector`), takes judged silent kept, a 1 s clipboard restore that never clobbers a newer copy. The desktop ran `SilenceThreshold` 0.001 for a few hours before it, as a stopgap |
+| 09-24 | the commit after `0411c65` | **Drop-in local models**: a GGUF copied into the model folder is offered under 🔌 Provider ▸ ➕ and becomes a provider in one click, loaded at once (`LocalModelDiscovery.cs`, `WarmUpAsync`); `scripts\get-model.ps1`; crispasr's backend detection checked for every model on disk, so added models pass no `--backend` |
 
 ## 9.2 Decided against: don't re-propose without new evidence
 
@@ -1318,6 +1352,11 @@ All 59 commits (as of `8c0a52d`) are linear on `main`; feature branches are fast
   - They sit in `debug.log` (`result:` and HTTP-preview lines), `history.json`, `unsent\`, the Desktop support bundle, and `MyRecordings\temp_audio.wav`. The last two are OneDrive-synced.
   - The options: a "no transcripts in the log" switch, redaction at bundle time, and moving the debug WAV out of OneDrive.
 - **A local model as the primary?** `qwen3-asr-1.7b-local` is the candidate. Measure it against ElevenLabs on real recordings first.
+- **Granite Speech 5.0 TurboCTC** (IBM, released 2026-08-25: 470M, English only, a CTC Conformer with no LLM head, 1.33% WER on LibriSpeech test-clean). The owner asked for it on 2026-09-24, and it **can't be a drop-in yet**:
+  - CrispASR has no backend for its `general.architecture`, `granite_speech5_ctc`, in v0.8.36 or upstream `main`, and no issue asks for one.
+  - [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) runs it (GGUFs at `handy-computer/granite-speech-5.0-470m-turboctc-gguf`, prebuilt Windows CUDA binaries) but has no server mode, so using it would mean a second local engine in WhisperInk.
+  - Recommended: ask CrispASR upstream for it. It already runs the Granite 4.1 NAR, whose encoder is a close relative (a self-conditioned Conformer with a BPE CTC head). Once it's there it's a CrispASR update plus a ➕. Filing the issue is public, so it needs the owner's go-ahead.
+  - Expect lowercase with no punctuation: its vocabulary has capitals only as single base characters, none in its 16,127 merges, so as a drop-in it would get `fullstop`. It has no vocabulary-biasing surface.
 - **Phone link**: WhisperInk as a listener on elevenlabs-web's existing worker endpoints. **CapsLock-hold** as a second hotkey?
 - **Public-repo hygiene.**
   - `plans/packaging-polish-prompt.md` contains the owner's full name in a path, and `_scratch/biasing/_routeb_gate.ps1` a hardcoded username.
@@ -1340,7 +1379,7 @@ Each was inferred from reading the code; none was reproduced. Line numbers are a
 | **The settings dialog breaks Smallest.ai and `auto`** | `ProviderSettingsWindow.xaml.cs:67–72, 106–108, 121` | Strips the required trailing `/` and saves `auto` or multi-code languages as `en`, on every provider shown in the dialog |
 | **`update-crispasr.ps1` with no `-Tag` downgrades** | Its default is `v0.7.1` | Below the v0.8.30 floor. Its `.old-*` backups (~1.15 GB) and temp folders are never pruned |
 | **A GGUF added after a failed take isn't found** | `CrispAsrServerTranscriber` resolves the glob once | Needs a provider switch, settings save or restart |
-| **`cohere-gguf-server`'s loose glob** | `cohere-transcribe-*.gguf` | Downloading the q4 or q5 model (`scripts\download-cohere-*`) would silently change the CPU preset's model |
+| **`cohere-gguf-server`'s loose glob** | `cohere-transcribe-*.gguf` | Downloading the q4 or q5 model (`scripts\get-model.ps1` or `download-cohere-*`) would silently change the CPU preset's model, and that file would never be offered under ➕, because the preset already "uses" it |
 | **Stale diagnostics** | `ProviderDiagnostics.cs:77`, `CrispGpuProbe.cs:10–12` | Checks for `cohere.dll`/`parakeet.dll`; the GPU probe's comment claims it runs crispasr |
 | **Computed properties saved to config.json** | `ApiProvider` has no `[JsonIgnore]` | Nine dead fields per provider (`IsElevenLabs`, `Resolved*`, …) |
 | **`HttpTranscriber` has no separate client-timeout arm** | `HttpTranscriber.cs:87–97` | A client timeout logs as a generic `TaskCanceledException` (only reachable after the 2 h 10 min backstop) |
@@ -1360,7 +1399,9 @@ Each was inferred from reading the code; none was reproduced. Line numbers are a
 - **Pull the batch pipeline out of `MainWindow`** into its own state machine.
 - **A `-dev N` GPU-index knob.**
 - **CrispASR `/load` hot-swap** instead of one port per preset.
-- **Update `README.md`.** It describes deleted Cohere classes and a removed "mode = Batch", says Granite ignores hotwords, and its provider and file tables are months out of date. Also update `docs/TRANSCRIPTION_ACCURACY_GUIDE.md`, which has no Scribe Medical or streaming. There is also no `LICENSE` file, though README links to one.
+- **Update `README.md`.** It describes deleted Cohere classes and a removed "mode = Batch", and its provider and file tables are months out of date; only "Adding your own local model" was rewritten (2026-09-24). Also update `docs/TRANSCRIPTION_ACCURACY_GUIDE.md`, which has no Scribe Medical or streaming. There is also no `LICENSE` file, though README links to one.
+- **Retire `scripts\download-cohere-*.ps1`** for `get-model.ps1`, which checks the download and never leaves a partial file where the app looks.
+- **Settings dialog fields for local presets.** It shows only beam size and hotword boost; the glob, port, backend hint and punctuation model need a config.json edit. Less pressing now that ➕ fills them in.
 - **Housekeeping.**
   - Delete the merged remote branches `feat/reson8-provider` and `fix/step0-reliability`. `origin/parameter-optimization` is an abandoned April fork.
   - Old worktrees under `.claude\worktrees\` hold stale copies of the source. **Exclude `.claude` from repo-wide searches.**
@@ -1377,7 +1418,7 @@ This file is how the next session picks the project up, so a stale sentence here
 - a Chirp 3 logging gotcha that had long been fixed.
 
 - **Update it in the same commit as the change it describes.** New behaviour goes in the matching Part. Don't append dated narrative at the end.
-- **Keep [1.2 Current state](#12-current-state-2026-09-23) true.** It is the first thing a session reads.
+- **Keep [1.2 Current state](#12-current-state-2026-09-24) true.** It is the first thing a session reads.
 - **Date every measurement and name the method and sample size.** Numbers from different harnesses or days aren't comparable. Put the comparison in one table from one run.
 - **Record decisions *and rejections*** in [Part 9](#part-9--history-and-decisions) with the reason, so they aren't re-proposed without new evidence.
 - **Check names, counts and constants with grep before writing them.**

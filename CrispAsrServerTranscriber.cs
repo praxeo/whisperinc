@@ -15,11 +15,11 @@ namespace WhisperInk
     /// resident, and posts WAV audio to its OpenAI-compatible
     /// <c>/v1/audio/transcriptions</c> endpoint.
     ///
-    /// Backend-agnostic: CrispASR auto-detects Parakeet / Canary / Voxtral /
-    /// Granite / Cohere from the GGUF metadata. Backends whose metadata
-    /// doesn't carry that marker (Cohere, Voxtral, Granite) set
-    /// <see cref="ApiProvider.LocalBackendHint"/> so we pass <c>--backend</c>
-    /// explicitly.
+    /// Backend-agnostic: crispasr picks the backend from the model file (its
+    /// name, then its general.architecture), and the v0.8.30 deploy does so
+    /// for every model on disk (checked 2026-09-24). A preset can still pin
+    /// one with <see cref="ApiProvider.LocalBackendHint"/>, passed as
+    /// <c>--backend</c>; a model added from the model folder never does.
     /// </summary>
     public sealed class CrispAsrServerTranscriber : ITranscriber
     {
@@ -102,6 +102,21 @@ namespace WhisperInk
                         : "\n    " + string.Join("\n    ", _lines);
                 }
             }
+
+            /// <summary>The backend the server says it loaded ("crispasr-server:
+            /// backend 'parakeet' loaded, model '…'"), or null.</summary>
+            public string? LoadedBackend()
+            {
+                lock (_lines)
+                {
+                    foreach (var line in _lines)
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(line, @"backend '([^']+)' loaded");
+                        if (m.Success) return m.Groups[1].Value;
+                    }
+                    return null;
+                }
+            }
         }
 
         private static string DescribeExit(Process p)
@@ -146,6 +161,8 @@ namespace WhisperInk
             { "language", "hotwords", "hotwords_boost", "beam_size", "response_format", "file" };
 
         public string DisplayName => _provider.Name;
+        /// <summary>Dropped by the factory (a provider switch, a settings save).</summary>
+        public bool IsDisposed => _disposed;
         public int Port => _port;
         public string ModelPath => _modelPath;
         public string ExeFolder => _modelFolder;
@@ -188,6 +205,33 @@ namespace WhisperInk
             }
             diagnostic = null;
             return true;
+        }
+
+        /// <summary>Starts the server now rather than at the first dictation,
+        /// which is how a model added from the menu is checked the moment it's
+        /// added: true once it answers /health. A server that won't start logs
+        /// why, as it would for a dictation.</summary>
+        public async Task<bool> WarmUpAsync(CancellationToken ct = default)
+        {
+            if (_disposed) return false;
+            if (!IsReady(out var diagnostic))
+            {
+                _log($"CrispAsr({_provider.Id}): can't start: {diagnostic}");
+                return false;
+            }
+            try
+            {
+                return await EnsureServerRunningAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                _log($"CrispAsr({_provider.Id}): start failed: {ex.GetType().Name}: {ex.Message}");
+                return false;
+            }
         }
 
         public async Task<string?> TranscribeAsync(byte[] wavBytes, IReadOnlyList<string> biasTerms, CancellationToken ct = default)
@@ -413,6 +457,9 @@ namespace WhisperInk
                 while (DateTime.UtcNow < deadline)
                 {
                     if (ct.IsCancellationRequested) return false;
+                    // Dropped while starting (a provider switch): the kill was
+                    // deliberate, so it isn't reported as a crash.
+                    if (_disposed) return false;
                     if (!IsProcessAlive(proc))
                     {
                         // The common startup failures all land here, and crispasr
@@ -431,7 +478,10 @@ namespace WhisperInk
                         if (resp.IsSuccessStatusCode)
                         {
                             _serverReady = true;
-                            _log($"CrispAsr({_provider.Id}): healthy on port {_port}");
+                            // Which backend crispasr chose matters most for a
+                            // model it detected on its own (no --backend).
+                            string? backend = tail.LoadedBackend();
+                            _log($"CrispAsr({_provider.Id}): healthy on port {_port}{(backend == null ? "" : $" (backend {backend})")}");
                             return true;
                         }
                     }
@@ -482,7 +532,9 @@ namespace WhisperInk
             return 8103; // matches the Parakeet preset; arbitrary but stable.
         }
 
-        private static string ResolveModelFolder(ApiProvider provider)
+        /// <summary>The folder a provider's GGUF and crispasr.exe live in:
+        /// %APPDATA%\.WhisperInk\ plus LocalModelFolder, or cohere-gguf.</summary>
+        public static string ResolveModelFolder(ApiProvider provider)
         {
             string sub = string.IsNullOrWhiteSpace(provider.LocalModelFolder)
                 ? DefaultModelFolder
@@ -495,8 +547,9 @@ namespace WhisperInk
         /// <summary>Resolves a literal filename or glob against the model
         /// folder, picking the first match. Returns a stable path even when
         /// nothing exists, so <see cref="IsReady"/> can report which file is
-        /// missing by name.</summary>
-        private static string ResolveModel(string folder, string glob)
+        /// missing by name. LocalModels uses it too, to tell which files in the
+        /// folder a provider already loads.</summary>
+        public static string ResolveModel(string folder, string glob)
         {
             if (string.IsNullOrWhiteSpace(glob))
                 return Path.Combine(folder, "model.gguf");
