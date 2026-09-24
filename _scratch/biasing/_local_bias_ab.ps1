@@ -12,7 +12,8 @@
 
   Produced the 2026-09-23 table in CLAUDE.md: Qwen3-ASR 3/3 with no
   collateral; Granite 3/3 but it rewrote a correct "ureteral colic". And
-  the 2026-09-24 Orukeet rows, against its base model, Parakeet TDT v3.
+  the 2026-09-24 Orukeet and Parakeet Ultra rows, against their base
+  model, Parakeet TDT v3, all three in one back-to-back run.
 
   A run with Backend = '' passes no --backend, as a model added from the
   model folder does (crispasr detects it from the file).
@@ -39,7 +40,8 @@ $runs = @(
   @{ Name = 'granite 4.1 2b-plus'; Model = 'granite-speech-4.1-2b-plus-q4_k.gguf'; Backend = 'granite';    Port = 18208 },
   @{ Name = 'qwen3-asr 1.7b';      Model = 'qwen3-asr-1.7b-q4_k.gguf';             Backend = 'qwen3-1.7b'; Port = 18212 },
   @{ Name = 'parakeet tdt 0.6b v3'; Model = 'parakeet-tdt-0.6b-v3-q4_k.gguf';      Backend = '';           Port = 18213 },
-  @{ Name = 'orukeet';             Model = 'orukeet-q4_k.gguf';                    Backend = '';           Port = 18214 }
+  @{ Name = 'orukeet';             Model = 'orukeet-q4_k.gguf';                    Backend = '';           Port = 18214 },
+  @{ Name = 'parakeet ultra';      Model = 'parakeet-ultra-q4_k.gguf';             Backend = '';           Port = 18215 }
 )
 # `pwsh -File` hands "orukeet,tdt" over as one string, so split it here.
 $Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
