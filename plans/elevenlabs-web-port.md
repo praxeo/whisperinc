@@ -23,20 +23,19 @@ bundler's escaping. Both repos are public.
 
 ## Where things stand
 
-- Branch **`fix/step0-reliability`** (local only), created from
-  `feat/reson8-provider` (b0476ca, pushed but unmerged — the installed config
-  already uses those providers, so a build from `main` would lose them).
-  **Nothing is committed.** `main` on GitHub is `176d4a6`, the base of the
-  everyday `_publish` build.
-- Everyday build: `_publish\WhisperInk.exe` (`1.0.0+176d4a6`, Aug 29) — the
-  rollback. **Never run `publish.ps1` while WhisperInk is running**: it deletes
-  `_publish\` first.
-- Test builds, outside the repo: `%USERPROFILE%\WhisperInk-step0\` (step 0 only)
-  and **`%USERPROFILE%\WhisperInk-step1\`** (everything below, published
-  2026-09-23 19:18). Quit one copy before starting another — two copies both
-  answer Ctrl+Space.
+- **Merged.** Everything below is commit `fef3ba2` (on top of the Reson8 commit
+  `b0476ca`), fast-forwarded onto `main` on GitHub 2026-09-23; PR #1 (Reson8)
+  was marked merged by that push. The branches `feat/reson8-provider` and
+  `fix/step0-reliability` are still on GitHub and can be deleted.
+- **Running now: the test build `%USERPROFILE%\WhisperInk-step1\WhisperInk.exe`**
+  (= `fef3ba2`), started 2026-09-23 19:22 in place of `_publish`.
+- `_publish\WhisperInk.exe` (`1.0.0+176d4a6`, Aug 29) is the rollback and is
+  now OLDER than `main`. To make `main` the everyday build: quit WhisperInk,
+  then run `publish.ps1`. **Never run `publish.ps1` while WhisperInk is
+  running** — it deletes `_publish\` first. (`WhisperInk-step0\` is the
+  step-0-only build.) Two copies both answer Ctrl+Space — run one at a time.
 
-### Done (all uncommitted)
+### Done
 
 **Step 0 (first session):** hook watchdog sweeps keyboard vkeys only; empty
 text above the speech floor is a loud failure; CrispASR failures logged with
@@ -54,7 +53,12 @@ unless configured, `diarize=false` + `num_speakers=1`,
 `timestamps_granularity=word`; elevenlabs-web's `cleanTranscript`; word timing
 exposed via `ITranscriptCoverage`. Gated on the new `ApiProvider.IsElevenLabs`
 (xi-api-key or elevenlabs.io host), not "has a custom auth header".
-Keyterm lists: **not seeded yet** — see "Waiting on the user".
+Keyterm lists: seeded 2026-09-23 into the `elevenlabs` provider's
+`ScribeKeytermsRaw` (local config.json only) — all three elevenlabs-web presets,
+`standard` + `er` + `wound`, 228 terms after dedupe (backup:
+`config.json.bak-keyterms-2026-09-24T00-21-52`). The wound list holds names and
+common words (Greene, Kelly, Triad, Prisma); if ordinary words start coming out
+as those, trim them in Providers → ElevenLabs.
 
 **2. Never lose a dictation:** `UnsentTakes.cs` journals every take to
 `%APPDATA%\.WhisperInk\unsent\` before the send; delivered → deleted; failed /
@@ -87,28 +91,35 @@ README, docs/TRANSCRIPTION_ACCURACY_GUIDE.md, the settings dialog's keyterm text
   (deliver/keep/crash recovery/orphan WAV/retention); crispasr (CPU, ports
   18997/18998): startup failure, empty text, deadline mid-inference + restart,
   server killed between takes.
-- **Not exercised live yet:** anything that needs the app itself — the paste
-  target check, Warn/mic-loss cues, the ↻ menu and retry, startup recovery,
-  and a real ElevenLabs call with the new fields (the watchdog fix and the
-  "No text!" cue from step 0 are still unexercised too).
+- **Live, first take on the test build (19:24):** ElevenLabs answered HTTP 200
+  to the new field set (`language_code`, `temperature`, `diarize`,
+  `num_speakers`, `timestamps_granularity`); 249 keyterms sent, none dropped;
+  word timing read (`last word ends at 6.4 s; decoded 11.1 s`), no false
+  coverage warning on a 10.7 s hold; deadline 24 s; pasted into the verified
+  target; the journaled take was deleted on delivery.
+- **Not exercised live yet:** the failure paths — a deadline firing, text left
+  on the clipboard, Warn/mic-loss cues, the ↻ menu and a retry, startup
+  recovery of an interrupted take (and step 0's watchdog fix and "No text!"
+  cue). They only show when something actually goes wrong.
 
-### Waiting on the user
+### Transcript audit (2026-09-23)
 
-1. **Switch to the test build** (quit `_publish`, start `WhisperInk-step1`) and
-   dictate normally for a while; roll back by quitting it and starting
-   `_publish\WhisperInk.exe`.
-2. **Keyterm lists → ElevenLabs only.** Seed with the scratch script (it reads
-   `C:\elevenlabs-web\keyterms.js` at run time, so no names land in this public
-   repo; refuses while WhisperInk runs; backs up config.json first). Default
-   presets `standard` + `er` (85 new terms); `wound` adds 143 more and contains
-   people's names and common words ("Greene", "Kelly", "Triad", "Prisma") that
-   can override ordinary words in ED dictation — opt-in only. The script lived
-   in the session scratchpad; if it's gone, the logic is: parse
-   `KEYTERM_PRESETS`, dedupe against existing `ScribeKeytermsRaw` and
-   `ContextBiasTerms`, write newline-joined into the `elevenlabs` provider's
-   `ScribeKeytermsRaw`.
-3. **Commit / push decision** — public repo. Nothing sensitive is in the diff
-   (no keys, no keyterm names, no audio: `_scratch/**/*.wav` is ignored).
+Checked for clinical transcripts on GitHub, read-only: every commit on every
+branch of both public repos (whisperinc: 57 commits; elevenlabs-web: 162),
+plus all PR/issue bodies and comments. **None found.** The only clinical-sounding
+text is scripted test sentences (`_scratch/biasing/RECORD_THESE.md` prompts,
+the TTS line in `make-speech.ps1`, synthetic harness/test strings); voice clips
+and result folders were always gitignored. Where transcripts DO exist: locally
+in `%APPDATA%\.WhisperInk\` (`debug.log`, `debug.previous.log`, `history.json`,
+`unsent\`), and in the cloud via OneDrive — `Documents\MyRecordings\temp_audio.wav`
+(the latest take's audio) is OneDrive-synced, as is anything on the Desktop
+(e.g. a support bundle, which carries a `debug.log` tail).
+
+The keyterm seeding script lived in the session scratchpad. If needed again,
+the logic: evaluate `C:\elevenlabs-web\keyterms.js` (`KEYTERM_PRESETS`), dedupe
+against the existing `ScribeKeytermsRaw` and `ContextBiasTerms`, write the rest
+newline-joined into the `elevenlabs` provider's `ScribeKeytermsRaw` — with
+WhisperInk NOT running (it rewrites config.json from memory), after a backup.
 
 ## Open questions for the user
 
