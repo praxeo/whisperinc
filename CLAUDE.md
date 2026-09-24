@@ -68,7 +68,7 @@ dotnet run -c Release -- fast
 
 **Deploying to the desktop's running copy.** `publish.ps1` deletes `_publish\` and republishes, and it can't while WhisperInk runs, because the exe is locked. The procedure used on 2026-09-23 costs about 6 s of downtime and never interrupts a take:
 
-1. Publish to a staging folder outside the repo with the same flags `publish.ps1` uses:
+1. **Commit first**, then publish. The version stamp (About box, support bundle) is git HEAD at publish time, so a build from uncommitted changes carries the previous commit's hash: the `a9e288a` deploy was stamped `a16352c`. Publish to a staging folder outside the repo with the same flags `publish.ps1` uses:
    `dotnet publish WhisperInk.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:PublishReadyToRun=true -o <stage>`
 2. Check `debug.log` for a take in flight. The last `StartBatchDictation: capturing` line must be followed by a line that ends the take:
    - `Batch pipeline:`;
