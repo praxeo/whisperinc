@@ -139,7 +139,7 @@ bool printedHeaders = false;
 async Task<(long Ms, string Text, bool NewConn)> Pcm(HttpClient http, ApiProvider p, IReadOnlyList<string> bias, byte[] pcm)
 {
     using var req = new HttpRequestMessage(HttpMethod.Post, p.ResolvedTranscriptionUrl);
-    req.Headers.Add(p.AuthHeaderName, p.ApiKey);
+    req.Headers.Add(p.ResolvedAuthHeaderName, p.ApiKey);
     using var content = new MultipartFormDataContent();
     content.Add(new StringContent(p.TranscriptionModel), p.ResolvedModelField);
     content.Add(new StringContent(p.Language), "language_code");
@@ -195,7 +195,7 @@ async Task<(long Ms, string Text, bool NewConn)> Streamed(HttpClient http, ApiPr
 {
     var pipe = new System.IO.Pipelines.Pipe();
     using var req = new HttpRequestMessage(HttpMethod.Post, p.ResolvedTranscriptionUrl);
-    req.Headers.Add(p.AuthHeaderName, p.ApiKey);
+    req.Headers.Add(p.ResolvedAuthHeaderName, p.ApiKey);
     using var content = new MultipartFormDataContent();
     content.Add(new StringContent(p.TranscriptionModel), p.ResolvedModelField);
     content.Add(new StringContent(p.Language), "language_code");
