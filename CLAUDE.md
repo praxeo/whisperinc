@@ -36,8 +36,8 @@ Its main use is **clinical dictation**: exam findings and notes pasted straight 
 | Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of the drop-in local models commit. Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
 | Active provider (desktop) | `elevenlabs-medical` (Scribe v2 Medical), with the upload streamed while you talk. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
 | Vocabulary | 21 terms in the shared Context Bias list and 228 Scribe-only keyterms, so 249 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
-| Local ASR | CrispASR **v0.8.30** CUDA (prebuilt release) in `%APPDATA%\.WhisperInk\cohere-gguf\`. v0.8.36 is out, not deployed. Best local preset: `qwen3-asr-1.7b-local` |
-| Machines | Desktop: 2× RTX 3090 + RTX 3080, CUDA. Laptop: 8-core Ryzen 5825U on CPU, still a pre-v0.7 CrispASR. `config.json` is per machine |
+| Local ASR | CrispASR **v0.8.30** CUDA (prebuilt release) in `%APPDATA%\.WhisperInk\cohere-gguf\`. v0.8.36 is out, not deployed. Best local preset: `qwen3-asr-1.7b-local`. New models are added by dropping the GGUF in that folder and clicking ➕ ([6.1](#61-add-a-provider)); Orukeet is there, offered but not added (it tested worse than its base) |
+| Machines | Desktop: 2× RTX 3090 (`nvidia-smi` on 2026-09-24 listed only these two; the RTX 3080 noted earlier didn't show), CUDA. Laptop: 8-core Ryzen 5825U on CPU, still a pre-v0.7 CrispASR. `config.json` is per machine |
 | Open work | [Part 10](#part-10--roadmap-and-open-questions) |
 
 ## 1.3 The rules that don't bend
@@ -620,7 +620,8 @@ GGUFs on the desktop, in `cohere-gguf\`:
 - parakeet-rnnt-1.1b q4_k and parakeet-tdt-0.6b-v3 q4_k;
 - qwen3-asr-1.7b q4_k;
 - voxtral-mini-4b-realtime q4_k;
-- gemma4-e2b-it q8_0 (a general model; crispasr runs it as `gemma4-e2b`, so it's offered under ➕ too).
+- gemma4-e2b-it q8_0 (a general model; crispasr runs it as `gemma4-e2b`, so it's offered under ➕ too);
+- orukeet q4_k (downloaded 2026-09-24 with `get-model.ps1`, 402 MB, from `cstr/orukeet-GGUF`; a Parakeet TDT 0.6b v3 fine-tune, CC-BY-SA-4.0). Offered under ➕, not added. On the clinical clips it's no better than its base on the hard terms and breaks a control ([4.3](#43-context-biasing)).
 
 **Providers added from the model folder** have ids `local-<file name>` and ports from 8200 ([6.1](#61-add-a-provider)). They live in that machine's `config.json` only, not in `CreateDefaults()`, so they never appear on another machine and the default-merge never re-adds one you delete.
 
@@ -676,6 +677,8 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 | `deepgram-medical` (06-14) | Not recorded ("strictly better" than general Nova-3 overall) | ✓, the only June provider to get it (general Nova-3 mangled it) | ✓, no hallucination on `neutral` |
 | `parakeet-rnnt-local` (06-14) | ✓ natively | ✗ | ✓ |
 | `parakeet-local` TDT 0.6b, boost ≤10 (06-14) | ✗ | ✗ | Garbles at boost ≥8 |
+| Parakeet TDT 0.6b v3, no hint, ± the 21-term list at the default boost (09-24, CUDA) | ✗ "hematochesia" / "hematocesia" | ✗ "ureter with ISIS" | ✓ (a stray "a" in one sentence); the list changed nothing |
+| **Orukeet** q4_k, the drop-in way, same run (09-24) | ✗ "hematochesia" ×2 | ✗ "uretero with ISIS" | ✗ **"ureteral colic" → "ureter alcolic"**, both reps, with or without the list: a control its base model gets right. Not for charting |
 | `cohere-local-q6k` (06-14) | ✗ "hematokesia" | ✗ "ureter with Isis" | ✓; biasing byte-identical |
 | `smallest-pulse-pro` (08-29) | ✗ **hematemesis** (clinically opposite) | ✗ | ✓ |
 | `smallest-pulse` (08-29) | ✗ "hematochesia" | ✗ "ureterithiasis" | ✓ |

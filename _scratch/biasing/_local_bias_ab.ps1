@@ -11,12 +11,18 @@
   to .\results\ (git-ignored).
 
   Produced the 2026-09-23 table in CLAUDE.md: Qwen3-ASR 3/3 with no
-  collateral; Granite 3/3 but it rewrote a correct "ureteral colic".
+  collateral; Granite 3/3 but it rewrote a correct "ureteral colic". And
+  the 2026-09-24 Orukeet rows, against its base model, Parakeet TDT v3.
 
-  USAGE    pwsh .\_local_bias_ab.ps1
+  A run with Backend = '' passes no --backend, as a model added from the
+  model folder does (crispasr detects it from the file).
+
+  USAGE    pwsh .\_local_bias_ab.ps1                    # every run
+           pwsh .\_local_bias_ab.ps1 -Only orukeet,tdt  # runs whose name contains one of these
   NEEDS    the user's own recordings in .\clips\ (see RECORD_THESE.md), and
            the listed GGUFs in %APPDATA%\.WhisperInk\cohere-gguf\
 #>
+param([string[]]$Only)
 $ErrorActionPreference = 'Stop'
 $dir   = Join-Path $env:APPDATA '.WhisperInk\cohere-gguf'
 $exe   = Join-Path $dir 'crispasr.exe'
@@ -31,13 +37,19 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $runs = @(
   @{ Name = 'granite 4.1 2b';      Model = 'granite-speech-4.1-2b-q4_k.gguf';      Backend = 'granite';    Port = 18207 },
   @{ Name = 'granite 4.1 2b-plus'; Model = 'granite-speech-4.1-2b-plus-q4_k.gguf'; Backend = 'granite';    Port = 18208 },
-  @{ Name = 'qwen3-asr 1.7b';      Model = 'qwen3-asr-1.7b-q4_k.gguf';             Backend = 'qwen3-1.7b'; Port = 18212 }
+  @{ Name = 'qwen3-asr 1.7b';      Model = 'qwen3-asr-1.7b-q4_k.gguf';             Backend = 'qwen3-1.7b'; Port = 18212 },
+  @{ Name = 'parakeet tdt 0.6b v3'; Model = 'parakeet-tdt-0.6b-v3-q4_k.gguf';      Backend = '';           Port = 18213 },
+  @{ Name = 'orukeet';             Model = 'orukeet-q4_k.gguf';                    Backend = '';           Port = 18214 }
 )
+# `pwsh -File` hands "orukeet,tdt" over as one string, so split it here.
+$Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+if ($Only) { $runs = @($runs | Where-Object { $n = $_.Name; @($Only | Where-Object { $n -like "*$_*" }).Count -gt 0 }) }
 
 foreach ($run in $runs) {
   $model = Join-Path $dir $run.Model
   if (-not (Test-Path $model)) { "`n=== $($run.Name): $($run.Model) not on disk, skipped"; continue }
-  $argList = @('--server','--host','127.0.0.1','--port',"$($run.Port)",'-m',$model,'-t','8','-np','--backend',$run.Backend,'--gpu-backend','cuda')
+  $argList = @('--server','--host','127.0.0.1','--port',"$($run.Port)",'-m',$model,'-t','8','-np','--gpu-backend','cuda')
+  if ($run.Backend) { $argList += @('--backend', $run.Backend) }
   $tag = $run.Model -replace '\.gguf$',''
   $p = Start-Process -FilePath $exe -ArgumentList $argList -PassThru -WindowStyle Hidden `
          -RedirectStandardOutput (Join-Path $out "$tag.out.txt") -RedirectStandardError (Join-Path $out "$tag.err.txt")
@@ -49,7 +61,9 @@ foreach ($run in $runs) {
       try { Invoke-RestMethod "http://127.0.0.1:$($run.Port)/health" -TimeoutSec 2 | Out-Null; $ok = $true; break } catch { Start-Sleep -Milliseconds 500 }
     }
     if (-not $ok) { throw "no /health within 180 s" }
-    "`n=== $($run.Name)  ($($run.Model), ready in $([int]$sw.Elapsed.TotalSeconds) s)"
+    $backend = (Select-String -Path (Join-Path $out "$tag.err.txt"), (Join-Path $out "$tag.out.txt") -Pattern "backend '([^']+)' loaded" |
+                Select-Object -First 1).Matches.Groups[1].Value
+    "`n=== $($run.Name)  ($($run.Model), backend $backend, ready in $([int]$sw.Elapsed.TotalSeconds) s)"
     foreach ($clip in $clips) {
       foreach ($bias in $false, $true) {
         foreach ($rep in 1, 2) {
