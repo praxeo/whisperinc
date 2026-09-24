@@ -122,6 +122,73 @@ foreach (var t in afterRestart) restarted.Remove(t);
 Check(restarted.List().Count == 0 && !Directory.EnumerateFiles(ufolder).Any(), "a retried take is removed with its sidecar");
 
 // ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0f. SpeechDetector (the silence gate) ==");
+// Levels from the 2026-09-23 log: a genuinely silent take measured RMS
+// 0.00022 / peak 0.0015; August's silent room 0.0006-0.00124 with 0.012 peaks
+// from single transients; the owner's quiet speech averaged 0.0017-0.0026 and
+// was dropped by the old RMS-only gate at 0.003.
+const double Gate = 0.003;
+void Gated(string what, byte[] wav, bool wantSilent, Func<SpeechDetector.Level, bool>? extra = null, string extraWhat = "")
+{
+    var lv = SpeechDetector.Measure(wav);
+    bool silent = SpeechDetector.IsSilent(lv, Gate);
+    Check(silent == wantSilent && (extra?.Invoke(lv) ?? true),
+          $"{what} -> {(silent ? "silent" : "sent")}{extraWhat} ({lv.Describe()})");
+}
+Gated("tonight's silent take (noise 0.00022 RMS)", NoisyWav(0.00022, (2.1, 0)), wantSilent: true);
+Gated("a fan-noise room (0.00124 RMS)", NoisyWav(0.00124, (2.0, 0)), wantSilent: true);
+Gated("clicks in a quiet room (three 10 ms transients)", NoisyWav(0.0006, (0.5, 0), (0.01, 0.012), (0.5, 0), (0.01, 0.012), (0.5, 0), (0.01, 0.012), (0.5, 0)), wantSilent: true);
+var syllables = new List<(double, double)> { (0.4, 0) };                       // the pre-roll
+for (int i = 0; i < 5; i++) { syllables.Add((0.2, 0.006)); syllables.Add((0.1, 0)); }
+syllables.Add((0.3, 0));
+var quietSpeech = NoisyWav(0.0003, syllables.ToArray());
+Gated("quiet speech at tonight's level", quietSpeech, wantSilent: false,
+      lv => lv.Rms < Gate && lv.SpeechMs >= 600, ", though its RMS is under 0.003 (the old gate dropped it)");
+// A cold mic has no pre-roll: speech from the first frame to the last, with
+// only the short gaps between syllables for the detector to find the floor in.
+var coldMic = new List<(double, double)>();
+for (int i = 0; i < 8; i++) { coldMic.Add((0.15, 0.004)); if (i < 7) coldMic.Add((0.06, 0)); }
+Gated("a cold-mic take: quiet speech from the first frame, no pre-roll, released on the last word", NoisyWav(0.0003, coldMic.ToArray()), wantSilent: false,
+      lv => lv.Rms < Gate, ", though its RMS is under 0.003");
+var diluted = new List<(double, double)> { (15, 0) };
+for (int i = 0; i < 2; i++) { diluted.Add((0.2, 0.006)); diluted.Add((0.1, 0)); }
+diluted.Add((15, 0));
+Gated("a short phrase in a 30 s hold", NoisyWav(0.0003, diluted.ToArray()), wantSilent: false,
+      lv => lv.Rms < 0.001, ", though the whole take averages under 0.001");
+Gated("loud steady noise (0.005 RMS), no speech", NoisyWav(0.005, (2.0, 0)), wantSilent: false,
+      lv => lv.SpeechMs == 0, ": no speech found, but too loud to call silent");
+Gated("normal speech", Wav((0.4, 0), (2.0, 0.05), (0.3, 0)), wantSilent: false, lv => lv.SpeechMs >= 1900, ", speech found");
+var digitalZero = SpeechDetector.Measure(Wav((2, 0)));
+Check(digitalZero.Peak == 0 && SpeechDetector.IsSilent(digitalZero, Gate), "digital zero: peak 0 (MainWindow's dead-input error) and silent");
+var tone = SpeechDetector.Measure(Wav((1, 0.5)));
+Check(Math.Abs(tone.Peak - 0.5) < 0.001 && Math.Abs(tone.Rms - 0.5 / Math.Sqrt(2)) < 0.001, $"peak and RMS are unchanged from the old meter ({tone.Peak:F4}, {tone.Rms:F4})");
+var garbage = SpeechDetector.Measure(new byte[] { 1, 2, 3, 4, 5 });
+Check(!garbage.Measured && garbage.Peak == 1.0 && !SpeechDetector.IsSilent(garbage, Gate), "unreadable audio fails open: full scale, never silent");
+Check(!SpeechDetector.IsSilent(SpeechDetector.Measure(NoisyWav(0.00022, (2.1, 0))), 0), "threshold 0 (gate disabled) never calls a take silent");
+
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0g. UnsentTakes: takes judged silent ==");
+string qfolder = Path.Combine(dir, "unsent-quiet-test");
+if (Directory.Exists(qfolder)) Directory.Delete(qfolder, true);
+var qstore = new UnsentTakes(qfolder, Log);
+var failedTake = qstore.Begin(speech, elevenStub, 4.3);
+qstore.Keep(failedTake, UnsentTakes.Failed, "the request failed");
+await WaitFor(() => qstore.List().Count == 1);
+var quietIds = new List<string>();
+for (int i = 0; i < UnsentTakes.MaxQuietCount + 2; i++)
+{
+    await Task.Delay(5);
+    quietIds.Add(qstore.KeepQuiet(quietSpeech, elevenStub, 2.2, "judged silent (RMS 0.0029)").Id);
+}
+Check(await WaitFor(() => qstore.List().Count(t => t.Status == UnsentTakes.Quiet) == UnsentTakes.MaxQuietCount),
+      $"only the newest {UnsentTakes.MaxQuietCount} takes judged silent are kept");
+var qlist = qstore.List();
+Check(quietIds.Skip(2).All(id => qlist.Any(t => t.Id == id)) && quietIds.Take(2).All(id => qlist.All(t => t.Id != id)),
+      "the oldest ones are the ones dropped");
+Check(qlist.Any(t => t.Id == failedTake.Id && t.Status == UnsentTakes.Failed), "a run of silent takes never pushes a real failure out");
+Check(new UnsentTakes(qfolder, Log).Recover() == 1, "the startup count of unsent dictations leaves out the ones judged silent");
+
+// ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 0e. Provider resolution, sibling inheritance, repaired defaults ==");
 const string ElevenUrl = "https://api.elevenlabs.io/v1/speech-to-text";
 // The entry the user added by hand on 2026-09-23: no auth header, no bias
@@ -503,6 +570,33 @@ static byte[] Wav(params (double Seconds, double Amp)[] segments)
         int n = (int)Math.Round(seconds * 16000);
         for (int i = 0; i < n; i++)
             samples.Add((short)(Math.Sin(2 * Math.PI * 220 * i / 16000.0) * amp * short.MaxValue));
+    }
+    var ms = new MemoryStream();
+    using (var bw = new BinaryWriter(ms, Encoding.ASCII, leaveOpen: true))
+    {
+        int bytes = samples.Count * 2;
+        bw.Write("RIFF"u8); bw.Write(36 + bytes); bw.Write("WAVE"u8); bw.Write("fmt "u8); bw.Write(16);
+        bw.Write((short)1); bw.Write((short)1); bw.Write(16000); bw.Write(32000); bw.Write((short)2); bw.Write((short)16);
+        bw.Write("data"u8); bw.Write(bytes);
+        foreach (var s in samples) bw.Write(s);
+    }
+    return ms.ToArray();
+}
+
+// Like Wav, over a noise floor: seeded white noise at noiseRms under every
+// segment, so each run of the same call is the same audio.
+static byte[] NoisyWav(double noiseRms, params (double Seconds, double Amp)[] segments)
+{
+    var rng = new Random(20260923);
+    var samples = new List<short>();
+    foreach (var (seconds, amp) in segments)
+    {
+        int n = (int)Math.Round(seconds * 16000);
+        for (int i = 0; i < n; i++)
+        {
+            double v = Math.Sin(2 * Math.PI * 220 * i / 16000.0) * amp + (rng.NextDouble() * 2 - 1) * noiseRms * Math.Sqrt(3);
+            samples.Add((short)Math.Clamp(v * short.MaxValue, short.MinValue, short.MaxValue));
+        }
     }
     var ms = new MemoryStream();
     using (var bw = new BinaryWriter(ms, Encoding.ASCII, leaveOpen: true))

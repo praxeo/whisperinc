@@ -38,9 +38,14 @@ namespace WhisperInk
         public const string Failed = "failed";
         public const string Incomplete = "incomplete";
         public const string Interrupted = "interrupted";
+        // Judged silent and never sent. Kept (the newest few) because that
+        // judgement was once wrong for real, quiet speech — and a take the
+        // gate drops is otherwise gone. Listed apart from real failures.
+        public const string Quiet = "quiet";
 
         public static readonly TimeSpan MaxAge = TimeSpan.FromDays(14);
         public const int MaxCount = 50;
+        public const int MaxQuietCount = 5;
 
         public sealed class Take
         {
@@ -150,6 +155,16 @@ namespace WhisperInk
             }, TaskScheduler.Default);
         }
 
+        /// <summary>Keeps a take the silence gate dropped without sending,
+        /// so a misjudged one can still be retried. Only the newest
+        /// <see cref="MaxQuietCount"/> are kept.</summary>
+        public Take KeepQuiet(byte[] wav, ApiProvider? provider, double audioSeconds, string reason)
+        {
+            var take = Begin(wav, provider, audioSeconds);
+            Keep(take, Quiet, reason);
+            return take;
+        }
+
         /// <summary>Kept takes, newest first. Takes still being transcribed
         /// are not listed.</summary>
         public List<Take> List()
@@ -187,7 +202,7 @@ namespace WhisperInk
         /// <summary>Startup: a take still marked pending was never finished
         /// (the app closed, crashed or the PC restarted mid-take). Marks those
         /// as interrupted, applies retention, and returns how many takes are
-        /// waiting.</summary>
+        /// waiting (not counting the ones judged silent).</summary>
         public int Recover()
         {
             lock (_gate)
@@ -207,7 +222,8 @@ namespace WhisperInk
                 if (interrupted > 0)
                     _log($"[unsent] {interrupted} take(s) were interrupted mid-transcription last session — kept for a retry");
                 PruneLocked();
-                return Directory.EnumerateFiles(Folder, "take-*.wav").Count();
+                return Directory.EnumerateFiles(Folder, "take-*.wav")
+                    .Count(w => ReadMeta(Path.GetFileNameWithoutExtension(w), w).Status != Quiet);
             }
         }
 
@@ -221,12 +237,17 @@ namespace WhisperInk
                     .Where(t => !_inFlight.Contains(t.Id))
                     .OrderByDescending(t => t.RecordedAt)
                     .ToList();
+                // Takes judged silent have their own small allowance, so a run
+                // of them can never push a real failure out of the list.
                 var cutoff = DateTime.Now - MaxAge;
-                for (int i = 0; i < takes.Count; i++)
+                int kept = 0, keptQuiet = 0;
+                foreach (var t in takes)
                 {
-                    if (i < MaxCount && takes[i].RecordedAt >= cutoff) continue;
-                    _log($"[unsent] retention: removing {takes[i].Id} ({takes[i].RecordedAt:yyyy-MM-dd HH:mm}, {takes[i].Reason})");
-                    DeleteFiles(takes[i].Id);
+                    bool keep = t.RecordedAt >= cutoff &&
+                                (t.Status == Quiet ? keptQuiet++ < MaxQuietCount : kept++ < MaxCount);
+                    if (keep) continue;
+                    _log($"[unsent] retention: removing {t.Id} ({t.RecordedAt:yyyy-MM-dd HH:mm}, {t.Reason})");
+                    DeleteFiles(t.Id);
                 }
                 // A sidecar whose audio is gone has nothing left to retry.
                 foreach (var json in Directory.EnumerateFiles(Folder, "take-*.json"))

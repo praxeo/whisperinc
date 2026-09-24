@@ -4,7 +4,8 @@
            %APPDATA%\.WhisperInk\cohere-gguf (CPU only, ports 18997/18998)
          - HttpTranscriber (ElevenLabs request shape, deadlines) against a
            local fake server on 127.0.0.1:18999
-         - TranscriptionDeadline, TranscriptCoverage, UnsentTakes as pure code
+         - TranscriptionDeadline, TranscriptCoverage, UnsentTakes and
+           SpeechDetector (the silence gate) as pure code
        and asserts on results and on what reaches the log.
        Run: make-speech.ps1, then `dotnet run`. Passing the argument "fast"
        skips the real crispasr runs and the slower-than-15s server check. -->
@@ -21,6 +22,7 @@
     <Compile Include="..\..\TranscriptionDeadline.cs" />
     <Compile Include="..\..\TranscriptCoverage.cs" />
     <Compile Include="..\..\UnsentTakes.cs" />
+    <Compile Include="..\..\SpeechDetector.cs" />
     <Compile Include="..\..\AppConfig.cs" />
     <Compile Include="..\..\ITranscriber.cs" />
     <Compile Include="..\..\ModulateTranscriber.cs" />

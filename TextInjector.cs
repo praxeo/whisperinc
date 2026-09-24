@@ -29,6 +29,11 @@ namespace WhisperInk
         [DllImport("user32.dll")]
         private static extern IntPtr PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+        // Bumped by every write to the clipboard (never by a read), so it tells
+        // whether anyone replaced our text before the restore runs.
+        [DllImport("user32.dll")]
+        private static extern uint GetClipboardSequenceNumber();
+
         private const uint WM_CHAR = 0x0102;
         private const byte VK_CONTROL = 0x11;
         private const byte VK_LMENU = 0xA4;
@@ -46,6 +51,18 @@ namespace WhisperInk
         // still ends with the *original* clipboard, not the previous transcript.
         private IDataObject? _pendingRestoreData;
         private CancellationTokenSource? _pendingRestoreCts;
+        // The clipboard sequence number right after that paste's own write, so
+        // a chained paste can tell whether anything was copied in between.
+        private uint _pendingRestoreSequence;
+
+        /// <summary>How long after the Ctrl+V the saved clipboard is put back.
+        /// The target app reads the clipboard whenever it gets round to
+        /// handling the keystroke, and anything that reads it AFTER the restore
+        /// pastes the old clipboard instead of the dictation. Was 250 ms; a
+        /// busy app (an Electron window mid-render, an EHR over Citrix) can
+        /// take longer than that, so the default is now 1 s
+        /// (config: ClipboardRestoreMs).</summary>
+        public int RestoreDelayMs { get; set; } = 1000;
 
         public TextInjector(Action<string> log)
         {
@@ -99,20 +116,31 @@ namespace WhisperInk
 
             // If a previous paste's restore is still pending, its saved data IS the
             // real prior clipboard (the current clipboard holds the previous transcript).
-            // Reuse it so chained dictations still restore the user's original copy.
+            // Reuse it so chained dictations still restore the user's original copy —
+            // unless something was copied since that paste, in which case the
+            // clipboard now holds the user's newer copy, and that is what to save.
             IDataObject? savedClipboard = _pendingRestoreData;
+            if (savedClipboard != null && _pendingRestoreSequence != 0 &&
+                GetClipboardSequenceNumber() != _pendingRestoreSequence)
+                savedClipboard = null;
             try { _pendingRestoreCts?.Cancel(); } catch { }
             _pendingRestoreCts = null;
             _pendingRestoreData = null;
+            _pendingRestoreSequence = 0;
 
             Exception? clipEx = null;
+            uint sequenceAfterSet = 0;
             var staThread = new Thread(() =>
             {
                 if (savedClipboard == null)
                 {
                     try { savedClipboard = CloneClipboardData(); } catch { }
                 }
-                try { Clipboard.SetText(text); }
+                try
+                {
+                    Clipboard.SetText(text);
+                    sequenceAfterSet = GetClipboardSequenceNumber();
+                }
                 catch (Exception ex) { clipEx = ex; }
             });
             staThread.SetApartmentState(ApartmentState.STA);
@@ -129,7 +157,8 @@ namespace WhisperInk
                 var cts = new CancellationTokenSource();
                 _pendingRestoreCts = cts;
                 _pendingRestoreData = savedClipboard;
-                _ = RestoreClipboardAfterDelay(savedClipboard, cts);
+                _pendingRestoreSequence = sequenceAfterSet;
+                _ = RestoreClipboardAfterDelay(savedClipboard, sequenceAfterSet, cts);
             }
             _log("[diag] Paste: exit");
         }
@@ -138,12 +167,13 @@ namespace WhisperInk
         /// Ctrl+V, no restore. Used when a transcript can't safely be pasted
         /// (the window it was dictated into is no longer in front) or comes
         /// from a retry. Cancels any pending restore of an earlier paste,
-        /// which would otherwise overwrite this text 250 ms later.</summary>
+        /// which would otherwise overwrite this text moments later.</summary>
         public bool CopyToClipboard(string text)
         {
             try { _pendingRestoreCts?.Cancel(); } catch { }
             _pendingRestoreCts = null;
             _pendingRestoreData = null;
+            _pendingRestoreSequence = 0;
 
             Exception? clipEx = null;
             var staThread = new Thread(() =>
@@ -183,10 +213,30 @@ namespace WhisperInk
         // Wait long enough for the target app to consume the simulated Ctrl+V,
         // then restore the saved clipboard. Cancellable so a fresh paste can
         // pre-empt this one without racing on Clipboard.SetDataObject.
-        private async Task RestoreClipboardAfterDelay(IDataObject data, CancellationTokenSource cts)
+        //
+        // Skipped when anything else has written the clipboard since our
+        // SetText (the sequence number moved): the user copied something new
+        // in the meantime, and the longer delay must not clobber it.
+        private async Task RestoreClipboardAfterDelay(IDataObject data, uint sequenceAfterSet, CancellationTokenSource cts)
         {
-            try { await Task.Delay(250, cts.Token); }
+            try { await Task.Delay(Math.Max(0, RestoreDelayMs), cts.Token); }
             catch (OperationCanceledException) { return; }
+            // A newer paste can land after the delay finished but before this
+            // continuation runs; it cancels this restore, which must then stand
+            // down rather than overwrite that paste's text.
+            if (cts.IsCancellationRequested) return;
+
+            if (sequenceAfterSet != 0 && GetClipboardSequenceNumber() != sequenceAfterSet)
+            {
+                if (ReferenceEquals(_pendingRestoreCts, cts))
+                {
+                    _pendingRestoreCts = null;
+                    _pendingRestoreData = null;
+                    _pendingRestoreSequence = 0;
+                }
+                _log("[diag] Paste: the clipboard changed after the paste — not restored");
+                return;
+            }
 
             var t = new Thread(() =>
             {
@@ -201,6 +251,7 @@ namespace WhisperInk
             {
                 _pendingRestoreCts = null;
                 _pendingRestoreData = null;
+                _pendingRestoreSequence = 0;
                 _log("[diag] Paste: clipboard restored");
             }
         }

@@ -32,7 +32,7 @@ Its main use is **clinical dictation**: exam findings and notes pasted straight 
 
 | | |
 |---|---|
-| `main` | Pushed to `origin` (`praxeo/whisperinc`, **public**). The last app-code commit is `a9e288a` "feat: Scribe Medical preset, warm connections, streamed ElevenLabs upload"; later commits are docs and `_scratch` tools |
+| `main` | Pushed to `origin` (`praxeo/whisperinc`, **public**). The last app-code commit is the quiet-speech fix (`SpeechDetector`), the commit right after `8c0a52d` |
 | Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of that commit. Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
 | Active provider (desktop) | `elevenlabs-medical` (Scribe v2 Medical), with the upload streamed while you talk. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
 | Vocabulary | 21 terms in the shared Context Bias list and 228 Scribe-only keyterms, so 249 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
@@ -42,7 +42,7 @@ Its main use is **clinical dictation**: exam findings and notes pasted straight 
 
 ## 1.3 The rules that don't bend
 
-1. **Never lose a dictation.** Every take that passes the guards is journaled to `%APPDATA%\.WhisperInk\unsent\` (the WAV and a sidecar, queued before transcription starts). It is deleted only once its text is delivered, and kept with a reason on every other outcome, including a crash (see [3.5](#35-reliability-never-lose-a-dictation)). A change to the stop path that can drop a take is a bug, even on an error path.
+1. **Never lose a dictation.** Every take that passes the guards is journaled to `%APPDATA%\.WhisperInk\unsent\` (the WAV and a sidecar, queued before transcription starts). It is deleted only once its text is delivered, and kept with a reason on every other outcome, including a crash (see [3.5](#35-reliability-never-lose-a-dictation)). The newest few takes the silence guard drops are kept too, in case one was quiet speech. A change to the stop path that can drop a take is a bug, even on an error path.
 2. **Never paste into the wrong place.** Text is pasted only when the window the take *started* in is verifiably in front. Otherwise it goes to the clipboard with a warning. Log window handles, never titles, because titles can carry patient names.
 3. **Fail loudly.** Every failure gets the Error tone, a status and a `debug.log` line. "Delivered, but check it" gets the Warn tone. `Success` means *all of it, pasted where you were typing* and nothing less. A silent failure, such as a backend returning empty text or a mic that quietly stopped, has been the worst bug class in this codebase.
 4. **Nothing slow on the hotkey path, or on the UI thread at all.**
@@ -101,6 +101,7 @@ Start in `%APPDATA%\.WhisperInk\`:
 |---|---|
 | Nothing happens on Ctrl+Space | `[hook-watchdog]` lines. Another app may own Ctrl+Space (PowerToys Peek did on 2026-08-28), or two WhisperInk copies are running |
 | Every take fails with 401 | The `Active provider: … (auth=…)` line. The key is sent in the wrong header, or it's missing |
+| A take vanishes with a quiet blip or "Too quiet?" | The silence gate judged it silent. It's under ↻ Unsent → 🔇 Judged silent; compare the `[skip]` line's RMS and speech values with [3.4](#34-capture-pipeline-miccapturecs) |
 | A take is "lost" | ↻ Unsent first, then History, then the log around its time. `[unsent] kept …` gives the reason, with the transcriber's `HTTP` or error line just before it. A failed request logs no `[error]` |
 | A local model returns empty text | `CrispAsr(` lines. Exit code `-1073741515` means a missing DLL |
 | A local model transcribes badly | Which GGUF `LocalModelGlob` actually picked up (see [6.1](#61-add-a-provider)) |
@@ -150,10 +151,10 @@ While recording, the hook swallows every physical Ctrl and Space event. The firs
    | No audio | Empty WAV | Dismissed, or Error "Mic lost!" if the device died |
    | Mic cut out | Device error mid-take, or capture ≥ 1 s shorter than the hold (a stall; the device is reopened) | Flagged; the take continues and is delivered with a warning |
    | Dead input | Peak exactly 0: privacy switch or hardware mute | Error "No mic signal!" |
-   | Silence | RMS < `SilenceThreshold` (0.003) | Dismissed "(silence)", or Error "Mic lost!" if the mic cut out. The levels are logged in the `[skip]` line |
+   | Silence | RMS < `SilenceThreshold` (0.003) **and** no sustained speech (`SpeechDetector`) | Dismissed "(silence)", or Warn "Too quiet? Saved ↻" after a hold of 1.5 s or more. The take is kept under ↻ Unsent → 🔇 Judged silent. Error "Mic lost!" if the mic cut out (kept the same way). The levels are logged in the `[skip]` line |
 
    The debug WAV (`Documents\MyRecordings\temp_audio.wav`) is written fire-and-forget *before* the silence gate, so a misjudged clip can be checked.
-3. **Journal.** Only for takes that passed every guard. `UnsentTakes.Begin` queues the WAV and sidecar write on the thread pool and returns at once. The transcription never waits for it, and a streamed take has been uploading since the press. From here on, every outcome either deletes the take or keeps it with a reason.
+3. **Journal.** Only for takes that passed every guard (the silence guard keeps its own separately). `UnsentTakes.Begin` queues the WAV and sidecar write on the thread pool and returns at once. The transcription never waits for it, and a streamed take has been uploading since the press. From here on, every outcome either deletes the take or keeps it with a reason.
 4. **Transcribe.** `TranscribeTakeAsync` calls the provider's transcriber from the factory under `TranscriptionDeadline.For(provider, seconds)`. A streamed take is finished, or falls back to the WAV upload ([3.6](#36-cloud-connections-and-the-streamed-upload)). It logs `{provider} took Nms … on Mms audio`.
 5. **Coverage.** For a provider that reports word timing (ElevenLabs), `TranscriptCoverage` checks whether the text stops well short of the last speech in the WAV.
 6. **Deliver.** `DeliverAsync` pastes only if `_targetWindow` is in front, allowing about 150 ms for a granted switch to land. Otherwise the text goes to the clipboard.
@@ -169,8 +170,9 @@ While recording, the hook swallows every physical Ctrl and Space event. The firs
 | Pasted, but the transcript may stop early | **Warn** (660 Hz ×2) | ⚠ Check the end! | Balloon; take kept as `incomplete` |
 | Pasted, but the mic cut out mid-take | Warn | ⚠ Mic cut out! | Balloon |
 | Not pasted (window no longer in front) | Warn | Copied — paste it | Text on the clipboard; balloon |
-| Tap, silence, or no text for a silent take | **Dismissed** (520 Hz, quiet) | (tap) / (silence) / (nothing heard) | — |
-| No text for real sound | **Error** (300 Hz) | No text! Saved ↻ | Take kept; `[error] … returned NO TEXT` |
+| Tap | **Dismissed** (520 Hz, quiet) | (tap) | — |
+| Judged silent | Dismissed; **Warn** after a hold of 1.5 s or more | (silence); after a long hold, Too quiet? Saved ↻ | Kept under ↻ Unsent → 🔇 Judged silent (the newest 5). "Mic lost!" (Error) instead if the mic cut out; kept the same way |
+| No text for a take with sound in it, even quiet speech | **Error** (300 Hz) | No text! Saved ↻ | Take kept; `[error] … returned NO TEXT` |
 | Deadline or request failed | Error | Timed out / Failed — saved ↻ | Take kept; balloon. Soniox, Deepgram, Chirp 3, Modulate, Smallest and Reson8 also land here on an *empty* transcript, instead of "No text!" ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) |
 | No API key | — (no tone) | No API key! | Nothing recorded, nothing logged |
 | Retry from ↻ (menu) | Success; Warn for a local fallback or a possibly incomplete result; Error on failure or missing audio | Recovered — copied / Fallback — copied / ⚠ Copied — check end / Retry failed / Audio missing! / Busy — try again (no tone) | Text goes to the **clipboard**, never pasted, with a balloon. A failure keeps the take as "retry failed: …" |
@@ -183,7 +185,7 @@ While recording, the hook swallows every physical Ctrl and Space event. The firs
 |---|---|
 | UI (dispatcher) | **The keyboard-hook callback.** A low-level hook calls back on the thread that installed it, and code comments calling it a separate "hook thread" are wrong. It only queues work, so it returns within `LowLevelHooksTimeout`. Also: start/stop orchestration and the stop path's `await` continuations (it never uses `ConfigureAwait(false)`; only two connection helpers do), delivery, retries, menus, config, every `DispatcherTimer` |
 | NAudio capture thread | `MicCapture.OnDataAvailable` and `OnRecordingStopped` under `_gate`: the WAV writer, the pre-roll ring, and the stream sink (`StreamedTranscription.Append`, which only copies and queues). A lost mic is reported back with `BeginInvoke` |
-| Thread pool | `EndCapture` (blocks up to `PostRollMs`), UI sounds, the debug WAV, journal writes and deletes, the health loop, the GPU probe, the pre-warm, the streamed upload's `SendAsync` (in `Task.Run`, so first-use proxy detection can't block the UI), transcriber internals, and CrispASR stdout/stderr handlers |
+| Thread pool | `EndCapture` (blocks up to `PostRollMs`), the silence measurement (`SpeechDetector.Measure`), UI sounds, the debug WAV, journal writes and deletes, the health loop, the GPU probe, the pre-warm, the streamed upload's `SendAsync` (in `Task.Run`, so first-use proxy detection can't block the UI), transcriber internals, and CrispASR stdout/stderr handlers |
 | Dedicated STA threads | Every clipboard operation, joined synchronously (`TextInjector`) |
 
 `_recState` changes only through `Interlocked.CompareExchange` (idle → recording at the press, recording → stopping at release, idle → stopping for a retry) and is reset with `Volatile.Write`. `Log()` appends with no lock, so two threads logging at once can occasionally drop a line.
@@ -218,17 +220,18 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 - The debug copy of the last take, `Documents\MyRecordings\temp_audio.wav`. It **is** OneDrive-synced on the desktop.
 - Support bundles, which land on the **Desktop**, also synced.
 
-**Source files** (line counts at `a9e288a`):
+**Source files** (line counts as of 2026-09-23):
 
 | File | Lines | Responsibility |
 |---|---|---|
-| `MainWindow.xaml(.cs)` | 79 / 2169 | The floating bar and all orchestration: press/stop paths, dispatch, delivery, retries, config load/save, `BuildAppMenu`, tray and health wiring, the shared cloud `HttpClient`, pre-warm and stream hand-off |
+| `MainWindow.xaml(.cs)` | 79 / 2234 | The floating bar and all orchestration: press/stop paths, dispatch, delivery, retries, config load/save, `BuildAppMenu`, tray and health wiring, the shared cloud `HttpClient`, pre-warm and stream hand-off |
 | `App.xaml(.cs)` | 9 / 63 | Startup, plus three crash handlers (UI-thread, AppDomain and unobserved-task) that write `Exception.ToString()` to `debug.log`. UI-thread exceptions are marked handled, so the app keeps running |
 | `AppConfig.cs` | 1084 | The `TranscriberKind` enum, the `ApiProvider` model (settable fields, `Resolved*` helpers, `InheritFromSibling`, `RepairSupersededDefault`), `CreateDefaults()` and `InferKindFromLegacyId`. Its `AppConfig` class is **never instantiated**: config is read by hand in `LoadConfig` and written as an anonymous object |
 | `KeyboardHookService.cs` | 251 | The `WH_KEYBOARD_LL` hook: the Ctrl+Space state machine, suppression, the synthetic-event filter, the watchdog |
-| `MicCapture.cs` | 421 | The warm mic, `PreRollRing`, the stream sink, mic-failure flags, `Measure()` (peak and RMS) |
+| `MicCapture.cs` | 383 | The warm mic, `PreRollRing`, the stream sink, mic-failure flags |
+| `SpeechDetector.cs` | 135 | The silence gate's measurement: peak, RMS, the take's own noise floor, and sustained speech in 30 ms frames ([3.4](#34-capture-pipeline-miccapturecs)) |
 | `UiSoundPlayer.cs` | 229 | The six synthesized tones on one persistent output, following the default device |
-| `TextInjector.cs` | 231 | Paste with clipboard restore, `CopyToClipboard`, `ReleaseAllModifierKeys`. `TypeTextTo` and `GetSelectedText` are **dead code** left over from the removed realtime mode |
+| `TextInjector.cs` | 282 | Paste with clipboard restore, `CopyToClipboard`, `ReleaseAllModifierKeys`. `TypeTextTo` and `GetSelectedText` are **dead code** left over from the removed realtime mode |
 | `ITranscriber.cs` | 64 | `ITranscriber` (`IsReady`, `TranscribeAsync(wav, biasTerms, ct)`) and `ITranscriptCoverage` (word timing) |
 | `TranscriberFactory.cs` | 91 | Caches one transcriber per provider id; `Drop(id)` and `DropAll()` |
 | `HttpTranscriber.cs` | 315 | OpenAI-style multipart (Mistral, OpenAI, Cohere v2, ElevenLabs, user-run local servers), the ElevenLabs extras and cleanup, the only `ITranscriptCoverage`, and `BeginStreamedTranscription` |
@@ -237,7 +240,7 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 | `DeepgramTranscriber.cs`, `SonioxTranscriber.cs`, `GoogleChirp3Transcriber.cs`, `ModulateTranscriber.cs`, `SmallestTranscriber.cs`, `Reson8Transcriber.cs` | 214–443 | The protocol-specific cloud clients ([Part 4](#part-4--providers)) |
 | `TranscriptionDeadline.cs` | 72 | Per-take deadlines, and `HttpBackstop` |
 | `TranscriptCoverage.cs` | 115 | The incomplete-transcript check |
-| `UnsentTakes.cs` | 277 | The take journal: begin, deliver, keep, recover, prune |
+| `UnsentTakes.cs` | 298 | The take journal: begin, deliver, keep, recover, prune, plus the takes judged silent |
 | `HistoryService.cs`, `HistoryWindow.xaml(.cs)` | 99 / 66 / 30 | Delivered-transcript history and its viewer |
 | `HealthProbe.cs`, `ProviderDiagnostics.cs` | 214 / 140 | The 60 s background health check (the dot and banner), and the on-demand "Diagnose" report |
 | `MenuModel.cs`, `TrayIcon.cs` | 83 / 138 | The shared `MenuNode` tree with its WPF renderer, and the tray icon with its WinForms renderer and balloons |
@@ -270,7 +273,7 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 
 `config.json` is read by hand in `MainWindow.LoadConfig` (`JsonDocument`, one try/catch around everything) and written by `SaveConfig`, whole-file, with enums as strings.
 
-**Root keys.** All 17 are read and written.
+**Root keys.** All 18 are read and written.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -284,7 +287,8 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 | `PreRollMs` | 400 | Clamped 0–3000; takes effect the next time the device opens |
 | `PostRollMs` | 80 | Clamped 0–1000 |
 | `MinHoldMs` | 250 | Clamped 0–2000 |
-| `SilenceThreshold` | 0.003 | Clamped 0–0.5; 0 disables the gate |
+| `SilenceThreshold` | 0.003 | Whole-take RMS under which a take *may* be silent: it's dropped only if `SpeechDetector` also finds no sustained speech. Clamped 0–0.5; 0 disables the gate |
+| `ClipboardRestoreMs` | 1000 | How long after a paste the old clipboard is put back ([3.7](#37-delivery-textinjectorcs-mainwindowdeliverasync)). Clamped 250–10000; read only if it's a JSON number |
 | `StreamUpload` | true | Read only if it's a JSON bool |
 | `CrispGpuBackend` | `auto` | Normalized to auto/cpu/vulkan/cuda/metal. The menu doesn't offer metal |
 | `QuitOnClose` | false | |
@@ -360,13 +364,24 @@ Opening a device on the hotkey path used to cost three measured latencies, all f
 - **Mic failure.**
   - A device error mid-take sets `LastCaptureInterrupted` and raises `onCaptureLost` immediately: Error tone and "🎙 MIC LOST" while the user is still talking.
   - A device that silently stops delivering shows up as a capture ≥ 1 s shorter than the hold. Normally a capture is *longer*, by the pre-roll. The device is then reopened, because a stalled one never recovers and its frozen pre-roll would seed the next take.
-- **`Measure()`** reports peak and RMS. **The silence gate uses RMS, not peak**, and that was measured:
-  - two silent-room captures peaked at 0.0123 and 0.0124 (a fan or a key transient) with RMS 0.00060 and 0.00124;
-  - speech RMS runs 0.01–0.1;
-  - so the 0.003 default sits 2.5–5× above the silence floor and 3–30× below speech, while a peak gate separated the two by only 1.2×.
-  - Where the levels are logged: `[diag] captured …ms, RMS …, peak …` for takes that pass; in the `[skip]`/`[error]` line for silent or zero-signal takes; not at all for taps.
-  - `Measure()` **fails open**: an unreadable WAV reports full scale, so the gates never drop audio they couldn't measure.
-- **"No text" is judged by the level.** Empty text for a take below the speech floor gets the quiet Dismissed blip. Above it, it's a failure (Error, "No text!", take kept). Real sound went in and nothing came out, which is how a broken backend presents.
+- **The silence gate (`SpeechDetector.cs`).** A take is dropped as silent only when **both** of these hold:
+  - its whole-take RMS is under `SilenceThreshold` (0.003). RMS, not peak: two silent-room captures peaked at 0.0123 and 0.0124 on a single fan or key transient, with RMS 0.00060 and 0.00124;
+  - it has **no sustained speech**: no run of three 30 ms frames (90 ms) that are each at least 3× the take's own noise floor (its 5th-percentile frame) and at least 0.002 RMS. Steady noise never makes a run however loud it is, and a click is a single frame.
+
+  **Why both.** On 2026-09-23 the RMS test alone dropped three takes of real, quiet speech (RMS 0.0017–0.0026, peaks 0.031–0.043), and they were lost. The 0.003 default had assumed speech averages 0.01–0.1 RMS. That evening the owner's accepted takes averaged 0.0032–0.030, most of them 0.003–0.007, on the VEC USB mic at 94% input level (+18.5 dB of a possible +22.5, so there's little gain left to add). An average also dilutes: a long hold with a short phrase in it averages down toward the noise.
+  - **Calibration (2026-09-23)**, on nine recordings of the owner's voice (three takes from that evening and the six clinical clips):
+    - found in all nine at full, half and quarter volume, and buried in 20 s of their own noise floor;
+    - found in all nine trimmed to just the speech, as a cold-mic take looks (no pre-roll, released on the last word), at a whole-take RMS of 0.003, 0.0026, 0.002 and 0.0015;
+    - found in 34 of 36 one-second windows cut from *inside* the speech. A 10th-percentile floor at 4× found 31, which is why it's the 5th at 3×;
+    - no speech found in steady noise up to 0.0025 RMS, noise swelling ±50%, or clicks. These negative cases are synthetic (harness section 0f).
+    
+    A voice with no quiet moments at all can't be told from steady noise this way; real speech has gaps.
+  - **The trade-off.** A hold with only a burst of 90 ms or more in it (a cough, a door) now reaches the provider. ElevenLabs bills it (at least 20 s with over 100 keyterms), and a local model could invent text for it. If that shows up in practice, require more speech (`SpeechMs`) before sending.
+  - **A take judged silent is kept**, the newest 5, under ↻ Unsent → 🔇 Judged silent. A hold of 1.5 s or more gets the Warn tone instead of the quiet blip, since nobody holds the key that long by accident.
+  - **Where the levels are logged:** `[diag] captured …ms, RMS …, peak …, floor …, speech …ms` for takes that pass; in the `[skip]`/`[error]` line for silent or zero-signal takes; not at all for taps.
+  - It **fails open**: an unreadable WAV measures as full scale and never silent, so the gate never drops audio it couldn't measure.
+  - It runs on the thread pool, not the UI thread.
+- **"No text" is judged by the same test.** Empty text is benign only for a take the detector itself calls silent, which can only reach a provider with the gate disabled: the quiet-take cue, kept under Judged silent. Anything with sound in it (loud enough, or sustained speech however quiet) is a failure: Error, "No text!", take kept. Real sound went in and nothing came out, which is how a broken backend presents.
 - **No lockout.** `_recState` stays at Stopping for the whole stop path. A `Task.Delay(1500)` that once ran inside it caused ~2 s dead-hotkey windows after mis-presses. Transient status now goes through `FlashStatus`, a Background-priority one-shot timer.
 
 ## 3.5 Reliability: never lose a dictation
@@ -384,6 +399,7 @@ This was ported from `praxeo/elevenlabs-web`, the clinical web app (`worker.js`:
   - For every take that passed the guards, `Begin` queues the WAV and JSON sidecar write to `%APPDATA%\.WhisperInk\unsent\` on the thread pool, before transcription starts. It doesn't wait for the write.
   - `Delivered` deletes them. `Keep` records `failed` or `incomplete` with a reason. The stop path's `catch` keeps an unresolved take.
   - At startup, `Recover()` turns anything still `pending` into `interrupted` (the app closed, crashed or rebooted mid-take) and prunes to 14 days / 50 takes. A balloon says how many are waiting.
+  - Takes the silence gate drops are kept too, with status `quiet`: the newest 5 (`MaxQuietCount`), on their own allowance so they can never push a real failure out. They're listed under ↻ Unsent → 🔇 Judged silent and left out of the startup count. A retry of one that comes back empty stays there ("Nothing heard", Dismissed) instead of becoming a failure, and one whose retry fails also keeps its place.
   - The folder is deliberately not OneDrive-synced, because this is clinical audio.
 - **↻ Unsent dictations** (both menus) lists the newest 10 takes, each with:
   - *Retry with {active provider}*;
@@ -443,7 +459,10 @@ Safety rules:
 ## 3.7 Delivery (`TextInjector.cs`, `MainWindow.DeliverAsync`)
 
 - **The verified target.** `DeliverAsync` calls `SetForegroundWindow` if needed, then waits up to 10×15 ms for the take's own window to be in front, and only then pastes. Otherwise the text goes to the clipboard, with a `[warn] not pasted …` line that logs window handles only.
-- **The paste.** Clipboard set, a synthetic Ctrl+V, and a leading space to avoid fusing words. The prior clipboard is cloned and restored ~250 ms later. Chained takes reuse the pending saved copy, so the user's original clipboard survives rapid dictation.
+- **The paste.** Clipboard set, a synthetic Ctrl+V, and a leading space to avoid fusing words. The prior clipboard is cloned and restored `ClipboardRestoreMs` (1 s) later. Chained takes reuse the pending saved copy, so the user's original clipboard survives rapid dictation.
+  - **Why 1 s.** The target app reads the clipboard whenever it gets round to handling the Ctrl+V, and one that reads it *after* the restore pastes the user's old clipboard instead of the dictation. A busy window (Electron mid-render, an EHR over Citrix) can take longer than the 250 ms used until 2026-09-23. Suspected, not proven: that evening, log excerpts the owner had copied arrived in a Claude chat in place of dictations.
+  - **Never clobber a newer copy.** The restore is skipped if anything else has written the clipboard since our own write (`GetClipboardSequenceNumber` moved), logged as `Paste: the clipboard changed after the paste — not restored`. A chained paste reuses the pending saved copy only if nothing was copied in between; otherwise it saves the newer copy. A restore overtaken by a newer paste stands down.
+  - **Watch for:** that "not restored" line on *every* paste. It would mean something (a clipboard manager, Citrix or RDP redirection) writes the clipboard after each paste, leaving the dictation on it instead of the user's copy. Unverified either way as of 2026-09-23.
 - **`CopyToClipboard`** puts the text alone on the clipboard, with no paste and no restore. It cancels any pending restore, which would otherwise overwrite it. Used for undeliverable takes and retries.
 - **`ReleaseAllModifierKeys`** runs at press and in the stop path's `finally`. The hook swallows the physical key-up, so without it Ctrl stays down.
 
@@ -470,7 +489,7 @@ Safety rules:
 | 🔊 / 🔇 Sound | Both | Mutes the tones |
 | 🎯 Context Bias Terms | Both | Modal editor for the shared list |
 | 📋 History | Both | The history window: HH:mm times only, Copy and Delete per row, no search |
-| ↻ Unsent dictations (N) ▸ | Both | The newest 10 takes, each with Retry with {active}, Retry on {local} (local fallback) and Show audio file; then an overflow line and 📂 Open unsent folder |
+| ↻ Unsent dictations (N) ▸ | Both | The newest 10 takes, each with Retry with {active}, Retry on {local} (local fallback) and Show audio file; then an overflow line, 🔇 Judged silent (M) ▸ with the same actions for the takes the silence gate dropped (not counted in N), and 📂 Open unsent folder |
 | 🖥 Local GPU backend ▸ Auto / Vulkan / CUDA / CPU | Both | Tooltip = the GPU probe. A change runs `DropAll()` |
 | 📂 Open config folder / Open debug log / Open model folder | Both | "Model folder" is always `cohere-gguf`, even if a preset sets `LocalModelFolder` |
 | Copy support bundle | Both | See below |
@@ -520,10 +539,10 @@ Safety rules:
 
 | Prefix | Meaning | Example |
 |---|---|---|
-| `[diag]` | Pipeline tracing | `[diag] captured 6950ms, RMS 0.00856, peak 0.1051` |
+| `[diag]` | Pipeline tracing | `[diag] captured 6950ms, RMS 0.00856, peak 0.1051, floor 0.00031, speech 5130ms` |
 | `[error]` | A loud failure: a deadline, no text for real sound, or a mic failure. **A failed request logs none**; its evidence is the transcriber's `HTTP` or error line, then `[unsent] kept … (<reason>)`. Mic failures are never journaled | `[error] … did not finish within its 21s deadline …` |
 | `[warn]` | Delivered, but check it | `[warn] not pasted: the window … (0x…) is not in front …` |
-| `[skip]` | A deliberate discard | `[skip] held 180ms < 250ms — discarded` |
+| `[skip]` | A deliberate discard | `[skip] held 180ms < 250ms — discarded`, `[skip] 2450ms of audio, RMS 0.00043 < 0.00300 and no sustained speech (…) — nothing said, no transcription; kept under ↻ Unsent → Judged silent` |
 | `[net]` | Cloud connections | `[net] new connection to api.elevenlabs.io:443 (20 ms to connect)`, `[net] pre-warmed … (404) in 45 ms` |
 | `[stream]` | The streamed upload | `[stream] elevenlabs-medical: 110400 bytes streamed (3.5 s); waiting for the transcript` |
 | `[mic]` | The capture device | `[mic] released after 180s idle` |
@@ -1062,7 +1081,7 @@ To fix a value that is already sitting in existing configs, add a case to `ApiPr
 
 ## 6.4 Add a config knob (root level)
 
-Follow `StreamUpload`, the only root knob read with a `ValueKind` guard. `WarmMicEnabled` and the numeric knobs are read unguarded, which is how one wrong-typed value aborts the load. A new knob needs:
+Follow `StreamUpload` or `ClipboardRestoreMs`, the only root knobs read with a `ValueKind` guard. `WarmMicEnabled` and the numeric knobs are read unguarded, which is how one wrong-typed value aborts the load. A new knob needs:
 - a field with a default and a comment explaining why the default is what it is;
 - a guarded read in `LoadConfig`: check `ValueKind` before `GetBoolean()`/`GetInt32()`, and clamp numbers. An exception there aborts the rest of the load and can end with the API keys overwritten (the warning in [3.2](#32-configuration));
 - a line in `SaveConfig`'s anonymous object.
@@ -1114,8 +1133,8 @@ The harnesses compile the **shipping source files directly** (each csproj `Compi
 ```powershell
 cd _scratch\crisp-harness
 .\make-speech.ps1               # once per machine: writes speech.wav (TTS). It's git-ignored, and every run reads it, even `fast`
-dotnet run -c Release -- fast   # 94 checks, ~30 s, no API calls, no crispasr
-dotnet run -c Release           # full: ~107 checks, adds the real crispasr.exe on CPU and a 16 s slow-server check
+dotnet run -c Release -- fast   # 110 checks, ~30 s, no API calls, no crispasr
+dotnet run -c Release           # full: ~123 checks, adds the real crispasr.exe on CPU and a 16 s slow-server check
 ```
 
 | Section | Checks | Covers |
@@ -1125,6 +1144,8 @@ dotnet run -c Release           # full: ~107 checks, adds the real crispasr.exe 
 | 0c | 11 | `TranscriptCoverage` on synthetic WAVs |
 | 0d | 12 | `UnsentTakes`: deliver, keep, crash recovery, orphan WAV, retention, ordering |
 | 0e | 18 | Provider resolution (ElevenLabs auth, model field, bias), `InheritFromSibling`, the Granite glob and its repair |
+| 0f | 12 | `SpeechDetector` on synthetic audio over a noise floor. Dropped as silent: the 2026-09-23 silent take, a fan, clicks. Sent: quiet speech at that evening's level (RMS under 0.003), a cold-mic take with no pre-roll, a short phrase in a 30 s hold, and loud steady noise. Also fail-open, digital zero, and a disabled gate |
+| 0g | 4 | Takes judged silent: only the newest 5 kept, never pushing out a real failure, and left out of the startup count |
 | 1 | 21 (+1 full) | `HttpTranscriber` against a fake server on `127.0.0.1:18999`: the ElevenLabs field set and order, keyterm merging and validation, word timing, `auto` language, a non-ElevenLabs provider getting no Scribe fields, the deadline |
 | 1b | 16 | `StreamedTranscription` against the fake server: chunked, byte-exact PCM, field parity, and the short-stream / discarded-take / HTTP-error / deadline / 5-minute paths |
 | 2a–2d | ~13 (full only) | Real `crispasr.exe` on CPU (ports 18997/18998, needs a `parakeet-tdt-*.gguf`): startup failure, empty text, deadline mid-inference then restart, server killed between takes |
@@ -1163,6 +1184,8 @@ The fake server runs on loopback, so providers pointed at it get the **local** d
 
 - **`MicCapture` with a real device**, including `PreRollRing` ordering. The "400 randomised trials" verification quoted in older notes was a one-off and **isn't in the repo**; adding it to the harness is on the backlog.
 - **The keyboard hook**, suppression and the watchdog.
+- **The clipboard restore** (`TextInjector`: the delay and the sequence-number guard). A harness run would clobber the real clipboard.
+- **`SpeechDetector` on real silence.** Its silent cases are synthetic; the takes kept under 🔇 Judged silent are the real-world check.
 - **WPF UI**: menus, dialogs, the bar, balloons, sounds.
 - **The whole press → paste path** in the running app.
 
@@ -1192,6 +1215,8 @@ After touching any of these, deploy ([1.4](#14-build-test-deploy)) and have the 
 
 - **"Where did that dictation go?"** Check ↻ Unsent dictations (not delivered, with the reason), then History (delivered, including clipboard-only), then `debug.log` around that time. `[unsent] kept …` gives the reason, with the transcriber's `HTTP` or error line just before it. A failed request logs no `[error]`; a deadline, no text for real sound, or a mic failure does.
 - **Every take fails with 401 on a hand-added provider.** Check the `Active provider: … (auth=…)` log line. ElevenLabs hosts now resolve a blank header to `xi-api-key`; any other service needs the right `AuthHeaderName` typed in.
+- **A take vanished with a quiet blip, or "Too quiet? Saved ↻".** The silence gate judged it silent. It's under ↻ Unsent → 🔇 Judged silent (the newest 5), ready to retry. If real speech keeps landing there, compare the `[skip]` line's RMS, floor and speech values with [3.4](#34-capture-pipeline-miccapturecs).
+- **Your old clipboard was pasted instead of the dictation.** The app handled the Ctrl+V after WhisperInk had put the old clipboard back. Raise `ClipboardRestoreMs` ([3.7](#37-delivery-textinjectorcs-mainwindowdeliverasync)). The dictation itself is in History.
 - **"Copied — paste it" when you didn't expect it.** The window the take started in wasn't in front at delivery: you clicked elsewhere, or Windows refused the focus switch. The text is on the clipboard. This is by design.
 - **"No text!" on a take with real speech.** The backend answered with nothing. For local models that's almost always a server problem (see 8.3). For cloud, look at the `HTTP` line.
 - **A local preset transcribes badly or with the wrong model.** Check which GGUF `LocalModelGlob` actually matches (the first `EnumerateFiles` hit wins). See [6.1](#61-add-a-provider).
@@ -1239,7 +1264,7 @@ After touching any of these, deploy ([1.4](#14-build-test-deploy)) and have the 
 
 ## 9.1 Timeline
 
-All 58 commits are linear on `main`; feature branches are fast-forwarded.
+All 59 commits (as of `8c0a52d`) are linear on `main`; feature branches are fast-forwarded.
 
 | Date | Commit(s) | What changed |
 |---|---|---|
@@ -1257,6 +1282,8 @@ All 58 commits are linear on `main`; feature branches are fast-forwarded.
 | 08-29 | `176d4a6`, `b0476ca` | **Warm mic + pre-roll**, persistent audio out, no mis-press lockout; Reson8, Modulate, Smallest.ai; the Qwen3-ASR 1.7B local preset |
 | 09-23 | `fef3ba2`, `a16352c` | **Never lose a dictation**: deadlines, the journal, loud failures, ElevenLabs request parity (ported from elevenlabs-web) |
 | 09-23 | `a9e288a` | **Scribe Medical preset**, ElevenLabs auth resolution, sibling key inheritance, the Granite glob fix, a 9-min pool + keep-alive + pre-warm, **the streamed upload** |
+| 09-23 | `8c0a52d` | This file rewritten and audited against the code |
+| 09-23 | the commit after `8c0a52d` | **Quiet speech no longer dropped as silence** (`SpeechDetector`), takes judged silent kept, a 1 s clipboard restore that never clobbers a newer copy. The desktop ran `SilenceThreshold` 0.001 for a few hours before it, as a stopgap |
 
 ## 9.2 Decided against: don't re-propose without new evidence
 
@@ -1325,6 +1352,8 @@ Each was inferred from reading the code; none was reproduced. Line numbers are a
 - **Streamed upload for Deepgram and Smallest.ai.** Both take the audio as the raw request body, with the format in query params.
 - **Coverage checks for Deepgram and Soniox.** Deepgram has per-word `end` times and Soniox tokens have `end_ms`, so each is a small `ITranscriptCoverage` implementation.
 - **A `PreRollRing` test in the harness.** The old "400 trials" check was never committed.
+- **`TranscriptCoverage` still uses a fixed 0.01 speech-frame threshold**, from the same wrong calibration the silence gate had. On quiet takes it under-detects speech, so the incomplete-transcript check goes lenient. Switch it to `SpeechDetector`'s per-take floor.
+- **Check `SpeechDetector` against real silence.** Its negative cases are synthetic. The takes kept under 🔇 Judged silent, with the levels in their `[skip]` lines, are the data.
 - **`LoadConfig` should save after merging or repairing defaults.** Also make it robust per field: skip a bad field rather than abort the load.
 - **Deploy CrispASR v0.8.36**, after an A/B.
 - **Try a Whisper large-v3-turbo preset** for `prompt` biasing. The transcriber would need to send `prompt`, and the GGUF is ~1.6 GB.

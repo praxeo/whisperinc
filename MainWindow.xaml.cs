@@ -234,13 +234,23 @@ namespace WhisperInk
         // Presses shorter than this are treated as accidental: discarded with
         // no API call, no error tone and no lockout.
         private int _minHoldMs = 250;
-        // RMS level (0..1) below which a clip counts as "said nothing".
-        // Measured silence on this mic is 0.0006-0.0012 RMS and speech is
-        // 0.01-0.1, so 0.003 has margin both ways. 0 disables the gate.
+        // Whole-take RMS (0..1) below which a take MAY be silent. It's only
+        // dropped if SpeechDetector also finds no sustained speech in it, so
+        // quiet speech gets through at any setting (on 2026-09-23 the owner's
+        // quiet takes averaged 0.0017-0.0026, under this line, and were lost).
+        // What the threshold still does is keep a steady-noise room
+        // (0.0006-0.0012 measured) from being sent. 0 disables the gate.
         private double _silenceThreshold = DefaultSilenceThreshold;
         // Also the floor that separates "silent take" from "real sound that
         // came back as no text" when the gate itself is disabled (0).
         private const double DefaultSilenceThreshold = 0.003;
+        // A hold this long that turns out silent gets the Warn tone instead of
+        // the quiet blip: nobody holds the key for 1.5 s by accident, so it may
+        // be speech the mic barely caught. Either way the take is kept.
+        private const long LongSilentHoldMs = 1500;
+        // How long after a paste the user's own clipboard is put back
+        // (TextInjector.RestoreDelayMs).
+        private int _clipboardRestoreMs = 1000;
         // Upload an ElevenLabs take while it is being spoken, so the release
         // waits only for the transcript (StreamedTranscription). Off = every
         // take is uploaded as a WAV after release, as before 2026-09.
@@ -598,6 +608,9 @@ namespace WhisperInk
                     if (root.TryGetProperty("PostRollMs", out var po)) _postRollMs = Math.Clamp(po.GetInt32(), 0, 1000);
                     if (root.TryGetProperty("MinHoldMs", out var mh)) _minHoldMs = Math.Clamp(mh.GetInt32(), 0, 2000);
                     if (root.TryGetProperty("SilenceThreshold", out var sil)) _silenceThreshold = Math.Clamp(sil.GetDouble(), 0.0, 0.5);
+                    if (root.TryGetProperty("ClipboardRestoreMs", out var crm) && crm.ValueKind == JsonValueKind.Number && crm.TryGetInt32(out int restoreMs))
+                        _clipboardRestoreMs = Math.Clamp(restoreMs, 250, 10000);
+                    _injector.RestoreDelayMs = _clipboardRestoreMs;
                     if (root.TryGetProperty("ContextBiasTerms", out var cbt) && cbt.ValueKind == JsonValueKind.Array)
                     {
                         _contextBiasTerms = new List<string>();
@@ -823,6 +836,7 @@ namespace WhisperInk
                     PostRollMs         = _postRollMs,
                     MinHoldMs          = _minHoldMs,
                     SilenceThreshold   = _silenceThreshold,
+                    ClipboardRestoreMs = _clipboardRestoreMs,
                     StreamUpload       = _streamUpload
                 };
                 // Serialize the TranscriberKind enum as a string so config.json
@@ -1016,7 +1030,7 @@ namespace WhisperInk
                 WriteDebugWav(wav);
 
                 double audioMs = GetWavDurationMs(wav);
-                var level = MicCapture.Measure(wav);
+                var level = await Task.Run(() => SpeechDetector.Measure(wav));
 
                 // ── The mic failed mid-take ──────────────────────────────
                 // A device error (unplug, driver reset) is flagged by
@@ -1058,39 +1072,40 @@ namespace WhisperInk
                 }
 
                 // ── Guard 2: held but silent ─────────────────────────────
-                // Covers "pressed and then thought about what to say". The
-                // provider returns an empty string for this anyway; deciding it
-                // locally skips the round-trip and the error path.
+                // Covers "pressed and then thought about what to say". Deciding
+                // it locally skips a round-trip, and keeps silence away from
+                // local models, which can hallucinate text out of it.
                 //
-                // Gated on RMS, not peak. Peak is the intuitive choice and was
-                // measured useless: two silent-room captures peaked at 0.0123
-                // and 0.0124 (one fan or keyboard transient is enough) while
-                // their RMS was 0.00060 and 0.00124. Speech RMS runs 0.01-0.1,
-                // so the 0.003 default sits 2.5-5x above the observed silence
-                // floor and 3-30x below speech — margin in both directions,
-                // where peak had none at any safe threshold.
+                // Silent means BOTH a quiet whole take (RMS under the
+                // threshold; not peak, which a single fan or keyboard transient
+                // pushes to 0.012 in a silent room) AND no sustained speech
+                // anywhere in it (SpeechDetector). The RMS test alone threw
+                // away real, quiet speech on 2026-09-23: those takes averaged
+                // 0.0017-0.0026, and speech had been assumed to run 0.01-0.1.
                 //
-                // Both levels are logged on every capture so the threshold can
-                // be re-checked against real dictation, and the WAV is already
-                // on disk above, so a misjudged clip is recoverable.
-                if (_silenceThreshold > 0 && level.Rms < _silenceThreshold)
+                // A take judged silent is still kept (the newest few, under
+                // ↻ Unsent → Judged silent), and the levels are logged on
+                // every capture so the thresholds can be re-checked.
+                if (_silenceThreshold > 0 && SpeechDetector.IsSilent(level, _silenceThreshold))
                 {
                     if (micCutOut)
                     {
                         // Silent because the mic died, not because nothing was
                         // said — the quiet blip would pass a lost dictation
-                        // off as a pause.
-                        Log($"[error] the take is silent because the microphone cut out ({audioMs:F0}ms captured of a {holdMs}ms hold) — nothing to transcribe");
+                        // off as a pause. Kept like any take judged silent, in
+                        // case what it did capture was quiet speech.
+                        Log($"[error] the take is silent because the microphone cut out ({audioMs:F0}ms captured of a {holdMs}ms hold) — nothing to transcribe; kept under ↻ Unsent → Judged silent");
+                        _unsent?.KeepQuiet(wav, GetActiveProvider(), audioMs / 1000.0, "silent after the mic cut out");
                         PlayUiSound(UiSound.Error);
                         FlashStatus("Mic lost!", 3000);
                         return;
                     }
-                    Log($"[skip] {audioMs:F0}ms of audio, RMS {level.Rms:F5} < {_silenceThreshold:F5} (peak {level.Peak:F4}) — nothing said, no transcription");
-                    PlayUiSound(UiSound.Dismissed);
-                    FlashStatus("(silence)");
+                    Log($"[skip] {audioMs:F0}ms of audio, RMS {level.Rms:F5} < {_silenceThreshold:F5} and no sustained speech (peak {level.Peak:F4}, floor {level.NoiseFloor:F5}) — nothing said, no transcription; kept under ↻ Unsent → Judged silent");
+                    _unsent?.KeepQuiet(wav, GetActiveProvider(), audioMs / 1000.0, $"judged silent (RMS {level.Rms:F4})");
+                    CueQuietTake(holdMs, "(silence)", "Too quiet? Saved ↻");
                     return;
                 }
-                Log($"[diag] captured {audioMs:F0}ms, RMS {level.Rms:F5}, peak {level.Peak:F4}");
+                Log($"[diag] captured {audioMs:F0}ms, {level.Describe()}");
 
                 lblStatus.Content = "Processing...";
                 lblStatus.Opacity = 1;
@@ -1154,31 +1169,31 @@ namespace WhisperInk
                 }
                 else if (text != null)
                 {
-                    // The provider answered but returned no text. Below the
-                    // speech floor that is just a silent take (the silence
-                    // gate above normally drops those before any API call;
-                    // they only reach here when the gate is disabled), so it
-                    // stays the quiet Dismissed blip.
+                    // The provider answered but returned no text. For a take
+                    // the detector judges silent that's expected — and only
+                    // reachable with the gate disabled, since the gate drops
+                    // those before any API call. It gets the quiet-take cue
+                    // and is kept, not deleted.
                     //
-                    // ABOVE the floor, real sound went in and nothing came
-                    // out — which is also exactly how a broken backend
-                    // presents: a CrispASR server missing a DLL answering with
-                    // empty text, a wrong or corrupt model, a provider-side
-                    // fault. As a quiet "(nothing heard)" every dictation could
-                    // fail that way unnoticed until someone saw nothing was
-                    // pasting, so it is a failure: error tone, a status that
-                    // says so, and the evidence in the log.
+                    // Anything else had real sound in it (loud enough, or
+                    // sustained speech however quiet), and nothing came out —
+                    // which is also exactly how a broken backend presents: a
+                    // CrispASR server missing a DLL answering with empty text,
+                    // a wrong or corrupt model, a provider-side fault. As a
+                    // quiet "(nothing heard)" every dictation could fail that
+                    // way unnoticed until someone saw nothing was pasting, so
+                    // it is a failure: error tone, a status that says so, and
+                    // the evidence in the log.
                     double speechFloor = _silenceThreshold > 0 ? _silenceThreshold : DefaultSilenceThreshold;
-                    if (level.Rms < speechFloor && !micCutOut)
+                    if (SpeechDetector.IsSilent(level, speechFloor) && !micCutOut)
                     {
-                        Log($"[skip] provider returned no text for a silent take (RMS {level.Rms:F5} < {speechFloor:F5})");
-                        if (take != null) _unsent!.Delivered(take);
-                        PlayUiSound(UiSound.Dismissed);
-                        FlashStatus("(nothing heard)");
+                        Log($"[skip] provider returned no text for a silent take ({level.Describe()}) — kept under ↻ Unsent → Judged silent");
+                        if (take != null) _unsent!.Keep(take, UnsentTakes.Quiet, "no text for a silent take");
+                        CueQuietTake(holdMs, "(nothing heard)", "Nothing heard? Saved ↻");
                     }
                     else
                     {
-                        Log($"[error] {result.ProviderName} returned NO TEXT for {audioMs:F0}ms of audio at RMS {level.Rms:F5} (above the {speechFloor:F5} speech floor) — nothing pasted; the audio is kept for a retry");
+                        Log($"[error] {result.ProviderName} returned NO TEXT for {audioMs:F0}ms of audio with sound in it ({level.Describe()}; speech floor {speechFloor:F5}) — nothing pasted; the audio is kept for a retry");
                         if (take != null) _unsent!.Keep(take, UnsentTakes.Failed, "no text returned");
                         PlayUiSound(UiSound.Error);
                         FlashStatus("No text! Saved ↻", 3000);
@@ -1225,6 +1240,25 @@ namespace WhisperInk
                 ResetUi();
                 UpdateStatusLabel();
                 RestartMicIdleTimer();
+            }
+        }
+
+        /// <summary>The cue for a take judged silent (and kept under ↻ Unsent
+        /// → Judged silent). A short hold gets the quiet Dismissed blip; a long
+        /// one gets Warn, because it may have been speech the mic barely
+        /// caught, and the quiet blip alone once let three such takes go
+        /// unnoticed.</summary>
+        private void CueQuietTake(long holdMs, string shortStatus, string longStatus)
+        {
+            if (holdMs >= LongSilentHoldMs)
+            {
+                PlayUiSound(UiSound.Warn);
+                FlashStatus(longStatus, 3000);
+            }
+            else
+            {
+                PlayUiSound(UiSound.Dismissed);
+                FlashStatus(shortStatus);
             }
         }
 
@@ -1515,7 +1549,21 @@ namespace WhisperInk
                 if (string.IsNullOrWhiteSpace(result.Text))
                 {
                     string reason = result.Text == null ? result.FailReason : "no text returned";
-                    _unsent?.Keep(take, UnsentTakes.Failed, "retry failed: " + reason);
+                    bool judgedSilent = take.Status == UnsentTakes.Quiet;
+                    if (judgedSilent && result.Text != null)
+                    {
+                        // Judged silent, and the provider heard nothing either:
+                        // almost certainly silence. It stays under Judged
+                        // silent, where its own small allowance retires it,
+                        // instead of joining the real failures.
+                        _unsent?.Keep(take, UnsentTakes.Quiet, "judged silent; a retry heard nothing either");
+                        PlayUiSound(UiSound.Dismissed);
+                        FlashStatus("Nothing heard", 2500);
+                        return;
+                    }
+                    // A take judged silent whose retry FAILED stays where it
+                    // was too; the failure itself still gets the error cue.
+                    _unsent?.Keep(take, judgedSilent ? UnsentTakes.Quiet : UnsentTakes.Failed, "retry failed: " + reason);
                     PlayUiSound(UiSound.Error);
                     FlashStatus("Retry failed", 2500);
                     _tray?.ShowBalloon("Retry failed", $"{result.ProviderName}: {reason}. The audio is still saved.", warning: true);
@@ -1575,16 +1623,14 @@ namespace WhisperInk
         /// Rebuilt on every open, like the rest of the menu.</summary>
         private MenuNode BuildUnsentMenu()
         {
-            var takes = _unsent?.List() ?? new List<UnsentTakes.Take>();
+            var all = _unsent?.List() ?? new List<UnsentTakes.Take>();
+            var takes = all.Where(t => t.Status != UnsentTakes.Quiet).ToList();
+            var quiet = all.Where(t => t.Status == UnsentTakes.Quiet).ToList();
             var active = GetActiveProvider();
             var fallbacks = ReadyLocalProviders(active?.Id).ToList();
 
-            var children = new List<MenuNode>();
-            if (takes.Count == 0)
-                children.Add(new MenuNode { Header = "(none — every dictation was delivered)", IsEnabled = false });
-            foreach (var take in takes.Take(10))
+            MenuNode TakeNode(UnsentTakes.Take t)
             {
-                var t = take; // capture for the closures
                 var actions = new List<MenuNode>();
                 if (active != null)
                     actions.Add(new MenuNode
@@ -1603,15 +1649,34 @@ namespace WhisperInk
                 }
                 actions.Add(MenuNode.Separator());
                 actions.Add(new MenuNode { Header = "Show audio file", Action = () => OpenExplorerSelect(t.WavPath) });
-                children.Add(new MenuNode
+                return new MenuNode
                 {
                     Header = t.Label,
                     ToolTip = string.IsNullOrWhiteSpace(t.ProviderName) ? null : $"Recorded for {t.ProviderName}",
                     Children = actions,
-                });
+                };
             }
+
+            var children = new List<MenuNode>();
+            if (takes.Count == 0)
+                children.Add(new MenuNode { Header = "(none — every dictation was delivered)", IsEnabled = false });
+            foreach (var take in takes.Take(10))
+                children.Add(TakeNode(take));
             if (takes.Count > 10)
                 children.Add(new MenuNode { Header = $"…and {takes.Count - 10} older (open the folder)", IsEnabled = false });
+            // Takes the silence check dropped without sending, kept in case one
+            // was quiet speech. Apart from the real failures, and not counted
+            // in the header, since most of them really are silence.
+            if (quiet.Count > 0)
+            {
+                children.Add(MenuNode.Separator());
+                children.Add(new MenuNode
+                {
+                    Header = $"🔇 Judged silent ({quiet.Count})",
+                    ToolTip = $"Dropped as silence without being sent. The newest {UnsentTakes.MaxQuietCount} are kept in case one was quiet speech.",
+                    Children = quiet.Select(TakeNode).ToList(),
+                });
+            }
             children.Add(MenuNode.Separator());
             children.Add(new MenuNode
             {

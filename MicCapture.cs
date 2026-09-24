@@ -290,46 +290,8 @@ namespace WhisperInk
             _memStream = null;
         }
 
-        /// <summary>Signal levels as 0..1 fractions of full scale.</summary>
-        public readonly record struct AudioLevel(double Peak, double Rms);
-
-        /// <summary>Single-pass peak and RMS, used to tell "held the key and
-        /// said nothing" apart from real speech before spending an API call.
-        ///
-        /// RMS is the one that decides. Peak looks like the obvious choice and
-        /// is useless here: measured on 1.95 s of an actually-silent room, peak
-        /// hit 0.0123 — a single fan or keyboard transient — while RMS was
-        /// 0.00060. Speech RMS runs 0.01-0.1, so RMS separates by 20-100x where
-        /// peak separated by 1.2x. Peak is still returned, for the log.</summary>
-        public static AudioLevel Measure(byte[] wavBytes)
-        {
-            try
-            {
-                using var ms = new MemoryStream(wavBytes, writable: false);
-                using var reader = new WaveFileReader(ms);
-                var buffer = new byte[8192];
-                int peak = 0, read;
-                double sumSquares = 0;
-                long count = 0;
-                while ((read = reader.Read(buffer, 0, buffer.Length)) > 0)
-                {
-                    for (int i = 0; i + 1 < read; i += 2)
-                    {
-                        int sample = (short)(buffer[i] | (buffer[i + 1] << 8));
-                        int magnitude = Math.Abs(sample);
-                        if (magnitude > peak) peak = magnitude;
-                        double norm = sample / (double)short.MaxValue;
-                        sumSquares += norm * norm;
-                        count++;
-                    }
-                }
-                double rms = count > 0 ? Math.Sqrt(sumSquares / count) : 0;
-                return new AudioLevel(peak / (double)short.MaxValue, rms);
-            }
-            // Unreadable — claim full scale so the caller transcribes it.
-            // Never silently drop audio because the meter failed.
-            catch { return new AudioLevel(1.0, 1.0); }
-        }
+        // Measuring a finished take (peak, RMS, sustained speech) lives in
+        // SpeechDetector, where the harness can test it without a microphone.
 
         public void Dispose()
         {
