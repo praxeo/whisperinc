@@ -48,11 +48,96 @@ namespace WhisperInk
         private readonly string _healthUrl;
 
         private Process? _serverProc;
+        // The current server's recent output, so a failure can say WHY.
+        // One per process (created at spawn), never shared, so a dying old
+        // process can't write its last lines into a new server's tail.
+        private OutputTail? _serverTail;
+        // The process whose exit was already logged (by the startup check or
+        // a failed request), so the restart path doesn't log it a second time.
+        private Process? _exitReportedFor;
         private readonly SemaphoreSlim _startLock = new(1, 1);
         private volatile bool _serverReady;
         private bool _disposed;
 
-        private static readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(120) };
+        // No flat per-request timeout any more. A transcription is bounded by
+        // the caller's per-take deadline token (TranscriptionDeadline: 180 s +
+        // the audio's length) and each /health ping by its own 500 ms token.
+        // The old flat 120 s failed any take whose inference ran past two
+        // minutes, however healthy the server; the backstop is longer than
+        // every deadline and only ends a request that carries no token.
+        private static readonly HttpClient _http = new() { Timeout = TranscriptionDeadline.HttpBackstop };
+
+        // crispasr.exe exits with this when a DLL it links is missing — the
+        // documented "silent exit, no output" failure (CLAUDE.md gotchas).
+        private const int StatusDllNotFound = unchecked((int)0xC0000135);
+
+        /// <summary>The last lines a server process printed (stdout and
+        /// stderr interleaved), bounded. crispasr prints its reason before it
+        /// dies — a bad or truncated model, CUDA out of memory, an unknown
+        /// backend — but the output used to be read and discarded, so
+        /// debug.log could only ever say "did not respond" or nothing.</summary>
+        private sealed class OutputTail
+        {
+            private const int MaxLines = 20;
+            private const int MaxLineChars = 300;
+            private readonly Queue<string> _lines = new();
+
+            public void Add(string? line)
+            {
+                if (string.IsNullOrWhiteSpace(line)) return;
+                if (line.Length > MaxLineChars) line = line[..MaxLineChars] + "…";
+                lock (_lines)
+                {
+                    _lines.Enqueue(line);
+                    while (_lines.Count > MaxLines) _lines.Dequeue();
+                }
+            }
+
+            public string Text()
+            {
+                lock (_lines)
+                {
+                    return _lines.Count == 0
+                        ? " (none captured)"
+                        : "\n    " + string.Join("\n    ", _lines);
+                }
+            }
+        }
+
+        private static string DescribeExit(Process p)
+        {
+            try
+            {
+                int code = p.ExitCode;
+                string hint = code == StatusDllNotFound
+                    ? " = STATUS_DLL_NOT_FOUND: a CrispASR DLL is missing from the model folder; re-run scripts\\update-crispasr.ps1"
+                    : "";
+                return $"exited with code {code} (0x{code:X8}){hint}";
+            }
+            catch
+            {
+                return "exited (exit code unavailable)";
+            }
+        }
+
+        /// <summary>Lets an exited process's async output readers deliver
+        /// their final lines (usually the error) before the tail is logged.
+        /// WaitForExitAsync also waits for redirected-stream EOF; bounded, in
+        /// case something still holds the pipe open.</summary>
+        private static async Task DrainAsync(Process p)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await p.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch { }
+        }
+
+        private static string Preview(string body) =>
+            string.IsNullOrEmpty(body) ? "(empty body)"
+            : body.Length <= 300 ? body
+            : body[..300] + "…";
 
         // Form-field names this transcriber sets itself. LocalExtraParams entries
         // that collide with these are skipped so config.json can't clobber them.
@@ -126,9 +211,30 @@ namespace WhisperInk
                 var fileContent = new ByteArrayContent(wavBytes);
                 return await PostMultipartAsync(fileContent, _provider.Language ?? "en", hotwords, ct).ConfigureAwait(false);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // The caller's per-take deadline passed (MainWindow logs the
+                // error with the numbers). An inference already running can't
+                // be interrupted, and the next request would queue behind it,
+                // so the next dictation gets a fresh server instead.
+                _log($"CrispAsr({_provider.Id}): stopped at the take's deadline; the server restarts on the next dictation. Last output:{_serverTail?.Text() ?? " (none captured)"}");
+                _serverReady = false;
+                return null;
+            }
             catch (Exception ex)
             {
-                _log($"CrispAsr({_provider.Id}) transcribe failed: {ex.Message}");
+                // Name the server's state too: "A task was canceled" alone
+                // can't tell a slow inference from a server that crashed
+                // mid-request.
+                var proc = _serverProc;
+                string server = "";
+                if (proc != null && !IsProcessAlive(proc))
+                {
+                    await DrainAsync(proc).ConfigureAwait(false);
+                    server = $" — the server {DescribeExit(proc)}. Last output:{_serverTail?.Text() ?? " (none captured)"}";
+                    _exitReportedFor = proc;
+                }
+                _log($"CrispAsr({_provider.Id}) transcribe failed: {ex.GetType().Name}: {ex.Message}{server}");
                 _serverReady = false;
                 return null;
             }
@@ -179,12 +285,28 @@ namespace WhisperInk
 
                 using var response = await _http.PostAsync(_inferenceUrl, content, ct).ConfigureAwait(false);
                 string body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode) return null;
+                if (!response.IsSuccessStatusCode)
+                {
+                    _log($"CrispAsr({_provider.Id}): HTTP {(int)response.StatusCode} from the server: {Preview(body)}");
+                    return null;
+                }
 
                 using var doc = JsonDocument.Parse(body);
-                if (doc.RootElement.TryGetProperty("text", out var textEl))
-                    return textEl.GetString()?.Trim();
-                return null;
+                if (!doc.RootElement.TryGetProperty("text", out var textEl))
+                {
+                    _log($"CrispAsr({_provider.Id}): response has no \"text\" field: {Preview(body)}");
+                    return null;
+                }
+                string text = textEl.GetString()?.Trim() ?? "";
+                if (text.Length == 0)
+                {
+                    // Not an error by itself (a genuinely silent take), but it
+                    // is also how a broken backend answers. MainWindow decides
+                    // by the captured level; the server's own output is the
+                    // evidence for WHY, so record it now while it's fresh.
+                    _log($"CrispAsr({_provider.Id}): server returned EMPTY text. Last server output:{_serverTail?.Text() ?? " (none captured)"}");
+                }
+                return text;
             }
         }
 
@@ -196,6 +318,17 @@ namespace WhisperInk
             try
             {
                 if (_serverReady && IsProcessAlive(_serverProc)) return true;
+
+                // A server that died on its own since the last dictation (a
+                // crash, a CUDA fault, killed from outside) used to be
+                // respawned without a word. Say so first — once per process.
+                var previous = _serverProc;
+                if (previous != null && previous != _exitReportedFor && !IsProcessAlive(previous))
+                {
+                    await DrainAsync(previous).ConfigureAwait(false);
+                    _log($"CrispAsr({_provider.Id}): previous server {DescribeExit(previous)} — restarting. Last output:{_serverTail?.Text() ?? " (none captured)"}");
+                    _exitReportedFor = previous;
+                }
 
                 KillServer();
                 if (!File.Exists(_exePath) || !File.Exists(_modelPath)) return false;
@@ -252,24 +385,42 @@ namespace WhisperInk
                     psi.ArgumentList.Add(_truecaseModel);
                 }
 
-                _serverProc = new Process { StartInfo = psi };
-                if (!_serverProc.Start()) return false;
-                _log($"CrispAsr({_provider.Id}): spawned PID {_serverProc.Id} on port {_port} (gpu={gpuBackend})");
-
-                _ = Task.Run(async () =>
+                // Output is captured line by line into a bounded tail. It has
+                // to be drained either way (a chatty server blocks on a full
+                // pipe); the handlers close over THIS process's tail, so a
+                // respawn can't mix two processes' output. (The old readers
+                // re-read the _serverProc field inside Task.Run, which could
+                // already point at the next process.)
+                var tail = new OutputTail();
+                var proc = new Process { StartInfo = psi };
+                proc.OutputDataReceived += (_, e) => tail.Add(e.Data);
+                proc.ErrorDataReceived += (_, e) => tail.Add(e.Data);
+                if (!proc.Start())
                 {
-                    try { await _serverProc.StandardOutput.ReadToEndAsync().ConfigureAwait(false); } catch { }
-                });
-                _ = Task.Run(async () =>
-                {
-                    try { await _serverProc.StandardError.ReadToEndAsync().ConfigureAwait(false); } catch { }
-                });
+                    _log($"CrispAsr({_provider.Id}): {ExeName} did not start");
+                    proc.Dispose();
+                    return false;
+                }
+                _serverProc = proc;
+                _serverTail = tail;
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+                _log($"CrispAsr({_provider.Id}): spawned PID {proc.Id} on port {_port} (gpu={gpuBackend})");
 
                 var deadline = DateTime.UtcNow.AddSeconds(HealthDeadlineSeconds);
                 while (DateTime.UtcNow < deadline)
                 {
                     if (ct.IsCancellationRequested) return false;
-                    if (!IsProcessAlive(_serverProc)) return false;
+                    if (!IsProcessAlive(proc))
+                    {
+                        // The common startup failures all land here, and crispasr
+                        // prints the reason just before it goes: a missing DLL
+                        // (see DescribeExit), a bad model path, CUDA OOM.
+                        await DrainAsync(proc).ConfigureAwait(false);
+                        _log($"CrispAsr({_provider.Id}): server {DescribeExit(proc)} during startup, before /health answered. Last output:{tail.Text()}");
+                        _exitReportedFor = proc;
+                        return false;
+                    }
                     try
                     {
                         using var pingCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -286,8 +437,8 @@ namespace WhisperInk
                     await Task.Delay(200, ct).ConfigureAwait(false);
                 }
 
+                _log($"CrispAsr({_provider.Id}): /health did not respond within {HealthDeadlineSeconds}s — killing server. Last output:{tail.Text()}");
                 KillServer();
-                _log($"CrispAsr({_provider.Id}): /health did not respond within {HealthDeadlineSeconds}s — killed server");
                 return false;
             }
             finally

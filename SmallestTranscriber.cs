@@ -15,7 +15,7 @@
 // One synchronous POST per dictation, like Deepgram/Modulate — no job/poll
 // cycle as with Soniox. Measured on jfk.wav (11 s audio): server-side
 // processing ~180-200 ms at rtfx 55-62, ~1.4 s wall-clock including upload,
-// comfortably inside the shared 15 s HttpClient timeout.
+// comfortably inside its per-take deadline (TranscriptionDeadline).
 //
 // ── The two models (one preset each; see AppConfig.CreateDefaults) ────────
 //
@@ -184,9 +184,17 @@ namespace WhisperInk
 
                 return ParseTranscript(body);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                _log($"SmallestTranscriber({_provider.Id}): cancelled");
+                // The per-take deadline (MainWindow logs it as the error).
+                _log($"SmallestTranscriber({_provider.Id}): stopped at the take's deadline");
+                return null;
+            }
+            catch (OperationCanceledException ex)
+            {
+                // Not our token: the HttpClient's own timeout, which surfaces
+                // as a TaskCanceledException — never a user cancel.
+                _log($"SmallestTranscriber({_provider.Id}): HTTP request timed out: {ex.Message}");
                 return null;
             }
             catch (Exception ex)

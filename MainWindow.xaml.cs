@@ -26,6 +26,9 @@ namespace WhisperInk
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
         // Active-provider state is computed, never cached: a provider
         // switch mid-flight can therefore never leave stale values behind.
         private string ActiveApiKey => GetActiveProvider()?.ApiKey ?? "";
@@ -67,17 +70,18 @@ namespace WhisperInk
 
         private IntPtr _targetWindow = IntPtr.Zero;
 
-        // Bounded timeout so a stalled SendAsync surfaces as TaskCanceledException
-        // (caught + logged by the global handler) instead of pretending to work.
-        // Successful ElevenLabs calls have measured at 300–870 ms in normal use.
-        private readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(15) };
+        // Shared by every cloud transcriber. What bounds a request is the
+        // per-take deadline token TranscribeTakeAsync passes in — scaled to
+        // the recording (TranscriptionDeadline) — so this timeout is only a
+        // backstop, longer than any deadline. It used to be a flat 15 s, which
+        // was a length limit in disguise: any take whose upload + inference
+        // ran past 15 s failed, however healthy the service.
+        private readonly HttpClient _httpClient = new() { Timeout = TranscriptionDeadline.HttpBackstop };
 
         // One transcriber instance per provider, lazily constructed by the
         // factory on first use. Replaces the old fan-out of 12 per-provider
         // fields plus their disposal boilerplate.
         private TranscriberFactory? _transcribers;
-
-        private string _currentFileName = "";
 
         // ── Audio capture ────────────────────────────────────────────
         // Owns the microphone: held open between dictations with a pre-roll
@@ -85,9 +89,15 @@ namespace WhisperInk
         // contains the last few hundred ms. See MicCapture for why.
         private MicCapture? _mic;
 
-        // Bytes of the last capture. Local GGUF servers get these directly and
-        // skip the disk round-trip; the on-disk copy is only a debug artifact.
-        private byte[]? _lastWavBytes;
+        // Every take's audio, journaled before it is sent and deleted once its
+        // text is delivered — failures keep theirs for a retry. See UnsentTakes.
+        private UnsentTakes? _unsent;
+
+        // A capture this much shorter than the hold means the mic stopped
+        // delivering audio mid-take. Normally the capture is LONGER than the
+        // hold (it starts with the pre-roll); a cold open trails it by
+        // ~130-160 ms, so a full second is far outside either.
+        private const int MicStallToleranceMs = 1000;
 
         // Persistent output device for the UI chirps — the old per-chirp
         // SoundPlayer cost 190-222 ms. See UiSoundPlayer.
@@ -127,9 +137,14 @@ namespace WhisperInk
         // RMS level (0..1) below which a clip counts as "said nothing".
         // Measured silence on this mic is 0.0006-0.0012 RMS and speech is
         // 0.01-0.1, so 0.003 has margin both ways. 0 disables the gate.
-        private double _silenceThreshold = 0.003;
+        private double _silenceThreshold = DefaultSilenceThreshold;
+        // Also the floor that separates "silent take" from "real sound that
+        // came back as no text" when the gate itself is disabled (0).
+        private const double DefaultSilenceThreshold = 0.003;
 
         private static readonly string LogFile = Path.Combine(ConfigFolder, "debug.log");
+        // The previous session's log, kept across one restart (see MainWindow_Loaded).
+        private static readonly string PreviousLogFile = Path.Combine(ConfigFolder, "debug.previous.log");
 
         private static void Log(string msg)
         {
@@ -142,7 +157,9 @@ namespace WhisperInk
         private static void RunSafe(Func<Task> op, string name)
         {
             _ = op().ContinueWith(
-                t => Log($"[unhandled] {name}: {t.Exception?.GetBaseException().Message}"),
+                // Type + stack, not just the message: "Object reference not set
+                // to an instance of an object" on its own names no culprit.
+                t => Log($"[unhandled] {name}: {t.Exception?.GetBaseException()}"),
                 TaskContinuationOptions.OnlyOnFaulted);
         }
 
@@ -211,8 +228,19 @@ namespace WhisperInk
         {
             // Fresh log per session — must happen BEFORE LoadConfig, or the
             // truncation wipes the very startup diagnostics it should keep
-            // (provider appends, active-provider line).
-            try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} ===\n"); } catch { }
+            // (provider appends, active-provider line). The previous session's
+            // log is kept as debug.previous.log first: the usual reaction to a
+            // failure or a crash is to restart the app, and the plain
+            // truncation used to destroy the one record of what went wrong.
+            try
+            {
+                if (File.Exists(LogFile)) File.Move(LogFile, PreviousLogFile, overwrite: true);
+            }
+            catch
+            {
+                try { File.Copy(LogFile, PreviousLogFile, overwrite: true); } catch { }
+            }
+            try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} === (previous session: {Path.GetFileName(PreviousLogFile)})\n"); } catch { }
 
             Topmost = true;
             var screen = SystemParameters.WorkArea;
@@ -224,10 +252,7 @@ namespace WhisperInk
             _hook = new KeyboardHookService(
                 isRecording: () => IsRecording,
                 onDictationStart: target =>
-                {
-                    _targetWindow = target;
-                    Dispatcher.BeginInvoke(() => StartBatchDictation());
-                },
+                    Dispatcher.BeginInvoke(() => StartBatchDictation(target)),
                 onDictationStop: () =>
                     Dispatcher.BeginInvoke(() => RunSafe(StopBatchDictationAsync, "StopBatchDictation")),
                 log: Log);
@@ -241,8 +266,11 @@ namespace WhisperInk
             // Audio devices are created after LoadConfig so they see the
             // configured mic index and pre-roll length.
             _sounds = new UiSoundPlayer(Log);
-            _mic = new MicCapture(() => _selectedDeviceNumber, () => _preRollMs, Log);
+            _mic = new MicCapture(() => _selectedDeviceNumber, () => _preRollMs, Log,
+                onCaptureLost: () => Dispatcher.BeginInvoke(OnMicLostMidDictation));
             WarmMic();
+
+            _unsent = new UnsentTakes(Path.Combine(ConfigFolder, "unsent"), Log);
 
             // Factory owns one ITranscriber per provider. The GPU-backend
             // delegate lets it pick up live edits from the settings dialog
@@ -254,6 +282,24 @@ namespace WhisperInk
             InitializeTrayAndHealth();
             SyncLaunchAtStartupFromRegistry();
             RunFirstRunCheck();
+            AnnounceUnsentTakes();
+        }
+
+        /// <summary>Startup half of "never lose a dictation": takes the last
+        /// session failed — or never finished, because the app closed or
+        /// crashed mid-take — are waiting in the unsent folder. Say so once,
+        /// where it will be seen, instead of leaving them to be found.</summary>
+        private void AnnounceUnsentTakes()
+        {
+            int waiting;
+            try { waiting = _unsent?.Recover() ?? 0; }
+            catch (Exception ex) { Log($"[unsent] recovery failed: {ex.GetType().Name}: {ex.Message}"); return; }
+            if (waiting == 0) return;
+            Log($"[unsent] {waiting} unsent dictation(s) waiting in {_unsent!.Folder}");
+            _tray?.ShowBalloon(
+                $"{waiting} unsent dictation{(waiting == 1 ? "" : "s")}",
+                "Their audio is saved. Right-click the tray icon → ↻ Unsent dictations to retry.",
+                warning: true);
         }
 
         // ── Provider helpers ────────────────────────────────────────────
@@ -681,7 +727,7 @@ namespace WhisperInk
         // and ~120 ms of teardown is now a couple of milliseconds each way.
         // ════════════════════════════════════════════════════════════════
 
-        private void StartBatchDictation()
+        private void StartBatchDictation(IntPtr target)
         {
             var startProvider = GetActiveProvider();
             if (startProvider != null && startProvider.RequiresApiKey && string.IsNullOrWhiteSpace(startProvider.ApiKey))
@@ -690,8 +736,26 @@ namespace WhisperInk
                 return;
             }
 
-            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0) return;
+            if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0)
+            {
+                // The previous take (or a retry) is still transcribing. Used to
+                // be silent — and with deadlines that scale to long takes, the
+                // wait can be long enough to start talking into a press that
+                // was never recording. The Start chirp's absence was the only
+                // clue; the Dismissed blip says "heard you, not now".
+                if (IsStopping)
+                {
+                    Log("[skip] hotkey pressed while the previous take is still transcribing — not recording");
+                    PlayUiSound(UiSound.Dismissed);
+                }
+                return;
+            }
             _pressTicks = Environment.TickCount64;
+            // Taken only once the take has really started. It used to be set
+            // by the hook callback on every press — so a press made while the
+            // previous take was still transcribing re-pointed THAT take's
+            // paste at whatever window the second press happened in.
+            _targetWindow = target;
 
             // FIRST, before any device or UI work: the chirp is the user's only
             // confirmation that the press registered, so nothing may queue ahead
@@ -699,7 +763,6 @@ namespace WhisperInk
             PlayUiSound(UiSound.Start);
 
             _hook?.BeginSuppression();
-            _lastWavBytes = null;
             _injector.ReleaseAllModifierKeys();
             _micIdleTimer?.Stop();
 
@@ -737,6 +800,8 @@ namespace WhisperInk
             bool accidental = holdMs < _minHoldMs;
             Log($"[diag] StopBatchDictation: enter (held {holdMs}ms)");
 
+            // Outside the try so the catch can still give it an outcome.
+            UnsentTakes.Take? take = null;
             try
             {
                 // ── Pipeline timing instrumentation ──
@@ -751,7 +816,7 @@ namespace WhisperInk
                 byte[]? wav = mic == null
                     ? null
                     : await Task.Run(() => mic.EndCapture(accidental ? 0 : _postRollMs));
-                _lastWavBytes = wav;
+                bool micInterrupted = mic?.LastCaptureInterrupted == true;
                 tCapture = swBatch.ElapsedMilliseconds;
 
                 // ── Guard 1: accidental press ────────────────────────────
@@ -770,6 +835,13 @@ namespace WhisperInk
 
                 if (wav is not { Length: > 0 })
                 {
+                    if (micInterrupted)
+                    {
+                        Log("[error] the microphone failed before any audio was captured — nothing to transcribe");
+                        PlayUiSound(UiSound.Error);
+                        FlashStatus("Mic lost!", 2500);
+                        return;
+                    }
                     Log("[skip] no audio captured");
                     PlayUiSound(UiSound.Dismissed);
                     FlashStatus("(no audio)");
@@ -782,6 +854,48 @@ namespace WhisperInk
                 // Written BEFORE the silence gate on purpose: if that gate ever
                 // misjudges real speech, the audio is still on disk to check.
                 WriteDebugWav(wav);
+
+                double audioMs = GetWavDurationMs(wav);
+                var level = MicCapture.Measure(wav);
+
+                // ── The mic failed mid-take ──────────────────────────────
+                // A device error (unplug, driver reset) is flagged by
+                // MicCapture. A mic that just stopped delivering buffers shows
+                // up as a capture far SHORTER than the hold — normally it's
+                // longer, since it starts with the pre-roll. Either way the
+                // take is missing its end; it still goes out (what was said
+                // before the failure is real), but it's flagged on delivery
+                // instead of passing for a complete note.
+                bool micStalled = !micInterrupted && audioMs + MicStallToleranceMs < holdMs;
+                bool micCutOut = micInterrupted || micStalled;
+                if (micCutOut)
+                {
+                    Log($"[error] the microphone {(micInterrupted ? "failed" : "stopped delivering audio")} mid-dictation: captured {audioMs:F0}ms of a {holdMs}ms hold — the take is missing its end");
+                    if (micStalled)
+                    {
+                        // A stalled device never recovers by itself, and its
+                        // frozen pre-roll would seed the next take with stale
+                        // audio. Reopen it now.
+                        Log("[mic] reopening the capture device after the stall");
+                        mic?.DeviceChanged();
+                    }
+                }
+
+                // ── Guard 2a: the mic produced NO signal ─────────────────
+                // Not the same as "said nothing". A real microphone always has
+                // a noise floor (measured 0.0006-0.0012 RMS here); exact
+                // digital zero on a deliberate hold means the input is muted
+                // or dead — the Windows privacy switch, a hardware mute, a
+                // driver handing back an empty stream. The user just dictated
+                // into nothing, and the quiet "(silence)" blip below would let
+                // them walk away believing it worked.
+                if (level.Peak <= 0)
+                {
+                    Log($"[error] the microphone delivered pure digital silence ({audioMs:F0}ms, peak 0) — input muted or dead; nothing was recorded");
+                    PlayUiSound(UiSound.Error);
+                    FlashStatus("No mic signal!", 3000);
+                    return;
+                }
 
                 // ── Guard 2: held but silent ─────────────────────────────
                 // Covers "pressed and then thought about what to say". The
@@ -799,10 +913,18 @@ namespace WhisperInk
                 // Both levels are logged on every capture so the threshold can
                 // be re-checked against real dictation, and the WAV is already
                 // on disk above, so a misjudged clip is recoverable.
-                double audioMs = GetWavDurationMs(wav);
-                var level = MicCapture.Measure(wav);
                 if (_silenceThreshold > 0 && level.Rms < _silenceThreshold)
                 {
+                    if (micCutOut)
+                    {
+                        // Silent because the mic died, not because nothing was
+                        // said — the quiet blip would pass a lost dictation
+                        // off as a pause.
+                        Log($"[error] the take is silent because the microphone cut out ({audioMs:F0}ms captured of a {holdMs}ms hold) — nothing to transcribe");
+                        PlayUiSound(UiSound.Error);
+                        FlashStatus("Mic lost!", 3000);
+                        return;
+                    }
                     Log($"[skip] {audioMs:F0}ms of audio, RMS {level.Rms:F5} < {_silenceThreshold:F5} (peak {level.Peak:F4}) — nothing said, no transcription");
                     PlayUiSound(UiSound.Dismissed);
                     FlashStatus("(silence)");
@@ -813,38 +935,106 @@ namespace WhisperInk
                 lblStatus.Content = "Processing...";
                 lblStatus.Opacity = 1;
 
+                var provider = GetActiveProvider();
+                if (provider == null)
+                {
+                    Log("[diag] Transcribe: no active provider");
+                    PlayUiSound(UiSound.Error);
+                    FlashStatus("Error", 1500);
+                    return;
+                }
+
+                // Journaled BEFORE the send: from here on no failure — a
+                // timeout, an outage, a crash mid-request — can cost this take.
+                // Delivery deletes it; every other outcome keeps it for a retry.
+                take = _unsent?.Begin(wav, provider, audioMs / 1000.0);
+
                 Log("[diag] StopBatchDictation: pre-transcribe");
-                string? text = await TranscribeAudioAsync(_currentFileName);
+                var result = await TranscribeTakeAsync(provider, wav, audioMs);
+                string? text = result.Text;
                 tTranscribe = swBatch.ElapsedMilliseconds;
                 Log($"[diag] StopBatchDictation: post-transcribe, text.Length={text?.Length ?? -1}");
                 if (!string.IsNullOrWhiteSpace(text))
                 {
-                    if (_targetWindow != IntPtr.Zero)
-                        SetForegroundWindow(_targetWindow);
+                    var shortfall = CheckCoverage(wav, audioMs, result);
+
                     Log("[diag] StopBatchDictation: pre-paste");
-                    _injector.PasteTextToActiveWindow(text);
+                    bool pasted = await DeliverAsync(text);
                     tPaste = swBatch.ElapsedMilliseconds;
                     Log("[diag] StopBatchDictation: post-paste, pre-history");
                     HistoryService.Add(text);
                     Log("[diag] StopBatchDictation: post-history");
-                    PlayUiSound(UiSound.Success);
 
-                    int charCount = text?.Length ?? 0;
-                    Log($"Batch pipeline: capture={tCapture}ms  transcribe={tTranscribe - tCapture}ms  paste={tPaste - tTranscribe}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
+                    // An incomplete transcript keeps its audio: a retry (or
+                    // another provider) may get the part that's missing.
+                    if (take != null)
+                    {
+                        if (shortfall is { } sf) _unsent!.Keep(take, UnsentTakes.Incomplete, "incomplete: " + sf.Describe());
+                        else _unsent!.Delivered(take);
+                    }
+
+                    // One cue per outcome. Text that needs a second look gets
+                    // the Warn double-pulse and a status that says why — the
+                    // Success chirp must only ever mean "all of it, where you
+                    // were typing".
+                    if (shortfall is { } missing)
+                        WarnDelivered("⚠ Check the end!", "Transcript may be incomplete",
+                            $"{result.ProviderName} {missing.Describe()}. {(pasted ? "It was pasted" : "It's on the clipboard")} — check the end of the note. The audio is saved: ↻ Unsent dictations can retry it.");
+                    else if (micCutOut)
+                        WarnDelivered("⚠ Mic cut out!", "Microphone stopped mid-dictation",
+                            $"Only the first {audioMs / 1000.0:F0}s of a {holdMs / 1000.0:F0}s hold were recorded. {(pasted ? "That part was pasted" : "That part is on the clipboard")} — anything said after it is missing.");
+                    else if (!pasted)
+                        WarnDelivered("Copied — paste it", "Text copied, not pasted",
+                            "The window you dictated into was no longer in front, so nothing was pasted. The text is on the clipboard — paste it where it belongs.");
+                    else
+                        PlayUiSound(UiSound.Success);
+
+                    int charCount = text.Length;
+                    Log($"Batch pipeline: capture={tCapture}ms  transcribe={tTranscribe - tCapture}ms  {(pasted ? "paste" : "clipboard")}={tPaste - tTranscribe}ms  ({charCount} chars)  TOTAL={swBatch.ElapsedMilliseconds}ms");
                 }
                 else if (text != null)
                 {
-                    // The provider ran fine and heard nothing worth typing.
-                    // That is not a failure, so it gets neither the error tone
-                    // nor a status the user has to wait out.
-                    Log("[skip] provider returned no text");
-                    PlayUiSound(UiSound.Dismissed);
-                    FlashStatus("(nothing heard)");
+                    // The provider answered but returned no text. Below the
+                    // speech floor that is just a silent take (the silence
+                    // gate above normally drops those before any API call;
+                    // they only reach here when the gate is disabled), so it
+                    // stays the quiet Dismissed blip.
+                    //
+                    // ABOVE the floor, real sound went in and nothing came
+                    // out — which is also exactly how a broken backend
+                    // presents: a CrispASR server missing a DLL answering with
+                    // empty text, a wrong or corrupt model, a provider-side
+                    // fault. As a quiet "(nothing heard)" every dictation could
+                    // fail that way unnoticed until someone saw nothing was
+                    // pasting, so it is a failure: error tone, a status that
+                    // says so, and the evidence in the log.
+                    double speechFloor = _silenceThreshold > 0 ? _silenceThreshold : DefaultSilenceThreshold;
+                    if (level.Rms < speechFloor && !micCutOut)
+                    {
+                        Log($"[skip] provider returned no text for a silent take (RMS {level.Rms:F5} < {speechFloor:F5})");
+                        if (take != null) _unsent!.Delivered(take);
+                        PlayUiSound(UiSound.Dismissed);
+                        FlashStatus("(nothing heard)");
+                    }
+                    else
+                    {
+                        Log($"[error] {result.ProviderName} returned NO TEXT for {audioMs:F0}ms of audio at RMS {level.Rms:F5} (above the {speechFloor:F5} speech floor) — nothing pasted; the audio is kept for a retry");
+                        if (take != null) _unsent!.Keep(take, UnsentTakes.Failed, "no text returned");
+                        PlayUiSound(UiSound.Error);
+                        FlashStatus("No text! Saved ↻", 3000);
+                    }
                 }
                 else
                 {
+                    // Timed out or failed outright. The take's audio is kept,
+                    // and the tray says so in words — a status flash alone is
+                    // easy to miss when you're already looking at the chart.
+                    if (take != null) _unsent!.Keep(take, UnsentTakes.Failed, result.FailReason);
                     PlayUiSound(UiSound.Error);
-                    FlashStatus("Error", 1500);
+                    FlashStatus(result.DeadlineHit ? "Timed out — saved ↻" : "Failed — saved ↻", 3000);
+                    _tray?.ShowBalloon("Dictation not transcribed",
+                        $"{result.ProviderName}: {result.FailReason}. The audio is saved — right-click the tray icon → ↻ Unsent dictations to retry.",
+                        warning: true);
                 }
 
                 Log("[diag] StopBatchDictation: exit");
@@ -852,12 +1042,15 @@ namespace WhisperInk
             catch (Exception ex)
             {
                 Log($"[diag] StopBatchDictation: UNHANDLED {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
+                // Whatever broke, the take's audio must not go down with it.
+                if (take is { Resolved: false })
+                    _unsent?.Keep(take, UnsentTakes.Failed, $"WhisperInk error ({ex.GetType().Name})");
                 throw;
             }
             finally
             {
                 // Release on EVERY exit path. A thrown transcription/paste (e.g.
-                // the 15s HTTP timeout, or a network error) used to skip this,
+                // an HTTP timeout, or a network error) used to skip this,
                 // stranding Ctrl "down" — the keyboard hook swallows the user's
                 // physical key-up, so this synthetic release is the only thing
                 // that tells the OS the key came back up. A stuck Ctrl turns the
@@ -909,7 +1102,6 @@ namespace WhisperInk
         {
             string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MyRecordings");
             string path = Path.Combine(folder, "temp_audio.wav");
-            _currentFileName = path; // set synchronously; only the write is deferred
             _ = Task.Run(() =>
             {
                 try
@@ -959,55 +1151,283 @@ namespace WhisperInk
 
         // ── Transcription dispatch ──────────────────────────────────────
         //
-        // Single entry point for every batch transcription. The factory hands
-        // back the right ITranscriber for the active provider (cloud HTTP,
-        // auto-spawned CrispASR server, Google Chirp 3, Soniox, Deepgram,
-        // Modulate, Smallest.ai); we
-        // don't care which it is. Adding a new model is now a config-only change â€”
-        // no new branches here.
+        // Single entry point for every batch transcription — live takes and
+        // retries alike. The factory hands back the right ITranscriber for the
+        // provider (cloud HTTP, auto-spawned CrispASR server, Google Chirp 3,
+        // Soniox, Deepgram, Modulate, Smallest.ai, Reson8); we don't care which
+        // it is. Adding a new model is a config-only change — no new branches
+        // here.
 
-        private async Task<string?> TranscribeAudioAsync(string filePath)
+        /// <summary>What one transcription attempt produced — and, when it
+        /// produced nothing, a short reason fit for the menu and the tray.</summary>
+        private readonly record struct TakeTranscription(
+            string? Text,
+            string ProviderName,
+            bool DeadlineHit,
+            string FailReason,
+            double? LastWordEndSeconds,
+            double? DecodedAudioSeconds);
+
+        private async Task<TakeTranscription> TranscribeTakeAsync(ApiProvider provider, byte[] wavBytes, double audioMs)
         {
-            if (_transcribers == null) return null;
-
-            var provider = GetActiveProvider();
-            if (provider == null) { Log("[diag] Transcribe: no active provider"); return null; }
-
-            byte[] wavBytes;
-            if (_lastWavBytes is { Length: > 0 })
-            {
-                wavBytes = _lastWavBytes;
-            }
-            else if (File.Exists(filePath))
-            {
-                wavBytes = await File.ReadAllBytesAsync(filePath);
-            }
-            else
-            {
-                Log("[diag] Transcribe: no audio bytes and file missing");
-                return null;
-            }
+            static TakeTranscription Fail(string name, string reason) => new(null, name, false, reason, null, null);
+            if (_transcribers == null) return Fail(provider.Name, "WhisperInk was still starting");
 
             ITranscriber transcriber;
             try { transcriber = _transcribers.GetOrCreate(provider); }
-            catch (Exception ex) { Log($"Transcriber init failed for {provider.Id}: {ex.Message}"); return null; }
+            catch (Exception ex)
+            {
+                Log($"Transcriber init failed for {provider.Id}: {ex.Message}");
+                return Fail(provider.Name, "the provider could not start");
+            }
 
             if (!transcriber.IsReady(out var diag))
             {
                 Log($"{transcriber.DisplayName}: {diag}");
-                return null;
+                return Fail(transcriber.DisplayName, $"not ready ({diag})");
             }
 
+            // Scaled to the recording (TranscriptionDeadline), never flat: a
+            // flat deadline fails long takes however healthy the service is.
+            var deadline = TranscriptionDeadline.For(provider, audioMs / 1000.0);
+            using var cts = new CancellationTokenSource(deadline);
+            Log($"[diag] {transcriber.DisplayName}: deadline {deadline.TotalSeconds:F0}s for {audioMs / 1000.0:F1}s of audio");
+
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            string? result = await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms);
+            string? result = await transcriber.TranscribeAsync(wavBytes, _contextBiasTerms, cts.Token);
             sw.Stop();
 
-            double audioMs = GetWavDurationMs(wavBytes);
             double rtfx    = audioMs > 0 && sw.ElapsedMilliseconds > 0 ? audioMs / sw.ElapsedMilliseconds : 0;
-            string mode    = _lastWavBytes is { Length: > 0 } ? "mem" : "disk";
             string preview = result == null ? "(null)" : result[..Math.Min(200, result.Length)];
-            Log($"{transcriber.DisplayName} ({mode}) took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x -- result: {preview}");
-            return result;
+            Log($"{transcriber.DisplayName} took {sw.ElapsedMilliseconds}ms on {audioMs:F0}ms audio = RTFx {rtfx:F2}x -- result: {preview}");
+
+            bool deadlineHit = result == null && cts.IsCancellationRequested;
+            if (deadlineHit)
+                Log($"[error] {transcriber.DisplayName} did not finish within its {deadline.TotalSeconds:F0}s deadline ({audioMs:F0}ms of audio) — nothing pasted; the audio is kept for a retry");
+
+            var coverage = transcriber as ITranscriptCoverage;
+            string failReason = result != null ? ""
+                : deadlineHit ? $"no answer within its {deadline.TotalSeconds:F0}s deadline"
+                : "the request failed (details in debug.log)";
+            return new TakeTranscription(result, transcriber.DisplayName, deadlineHit, failReason,
+                coverage?.LastWordEndSeconds, coverage?.DecodedAudioSeconds);
+        }
+
+        /// <summary>The incomplete-transcript check (TranscriptCoverage),
+        /// for providers that report word timing. Null = no concern.</summary>
+        private static TranscriptCoverage.Shortfall? CheckCoverage(byte[] wav, double audioMs, TakeTranscription result)
+        {
+            if (result.LastWordEndSeconds == null && result.DecodedAudioSeconds == null) return null;
+            double? lastSpeech = TranscriptCoverage.LastSpeechSeconds(wav);
+            var shortfall = TranscriptCoverage.Check(audioMs / 1000.0, lastSpeech,
+                result.LastWordEndSeconds, result.DecodedAudioSeconds);
+            if (shortfall is { } s)
+                Log($"[warn] {result.ProviderName} transcript may be INCOMPLETE — {s.Describe()}; recorded {audioMs / 1000.0:F1}s, last speech at {lastSpeech?.ToString("F1") ?? "?"}s. Delivered anyway, audio kept for a retry");
+            return shortfall;
+        }
+
+        /// <summary>Pastes into the window the dictation was started in — but
+        /// only when that window is really in front. SetForegroundWindow's
+        /// result used to be ignored: when Windows refused the switch (it does,
+        /// for a background process, once the user has clicked elsewhere), the
+        /// Ctrl+V landed in whatever had focus by then — a transcript pasted
+        /// into the wrong app, or the wrong chart. Now anything short of a
+        /// verified target leaves the text on the clipboard instead, and the
+        /// caller warns. True when pasted.</summary>
+        private async Task<bool> DeliverAsync(string text)
+        {
+            IntPtr target = _targetWindow;
+            IntPtr self = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            if (target != IntPtr.Zero && target != self)
+            {
+                if (GetForegroundWindow() != target) SetForegroundWindow(target);
+                // A granted switch can land a beat after the call returns.
+                for (int i = 0; i < 10 && GetForegroundWindow() != target; i++)
+                    await Task.Delay(15);
+                if (GetForegroundWindow() == target)
+                {
+                    _injector.PasteTextToActiveWindow(text);
+                    return true;
+                }
+            }
+
+            // Handles only — window titles can carry patient names.
+            IntPtr front = GetForegroundWindow();
+            bool copied = _injector.CopyToClipboard(text);
+            Log($"[warn] not pasted: the window the dictation started in (0x{target.ToInt64():X}) is not in front (0x{front.ToInt64():X}{(front == self ? ", WhisperInk itself" : "")}) — text {(copied ? "left on the clipboard" : "could NOT be put on the clipboard either; it is in History")}");
+            return false;
+        }
+
+        /// <summary>Delivered, but look at it: the Warn double-pulse, a status
+        /// that says why, and the full story in the tray — a status flash on
+        /// its own is easy to miss while looking at the chart.</summary>
+        private void WarnDelivered(string status, string balloonTitle, string balloonBody)
+        {
+            PlayUiSound(UiSound.Warn);
+            FlashStatus(status, 4000);
+            _tray?.ShowBalloon(balloonTitle, balloonBody, warning: true);
+        }
+
+        /// <summary>The mic died while a dictation was being recorded (unplug,
+        /// driver reset). Say so NOW, while the user is still talking into it,
+        /// rather than after release. The take keeps what was captured before
+        /// the failure and is flagged when it is delivered.</summary>
+        private void OnMicLostMidDictation()
+        {
+            if (!IsRecording) return;
+            Log("[error] microphone lost mid-dictation — nothing said from here on is being recorded");
+            PlayUiSound(UiSound.Error);
+            lblStatus.Content = "🎙 MIC LOST";
+        }
+
+        // ── Unsent takes: retry ───────────────────────────────────────
+
+        /// <summary>Re-transcribes a kept take. The text goes to the
+        /// clipboard, not into a window: by the time anyone retries, the window
+        /// the take was dictated into is long gone from the foreground, and a
+        /// guess would paste into the wrong place. A local model standing in
+        /// for the usual provider is flagged as a fallback everywhere it
+        /// shows.</summary>
+        private async Task RetryTakeAsync(UnsentTakes.Take take, ApiProvider provider, bool localFallback)
+        {
+            // The same gate as a dictation, so a retry and a live take never
+            // overlap; a press during the retry gets the Dismissed blip.
+            if (Interlocked.CompareExchange(ref _recState, 2, 0) != 0)
+            {
+                FlashStatus("Busy — try again", 1500);
+                return;
+            }
+            try
+            {
+                byte[]? wav = _unsent?.ReadAudio(take);
+                if (wav is not { Length: > 0 })
+                {
+                    PlayUiSound(UiSound.Error);
+                    FlashStatus("Audio missing!", 2500);
+                    return;
+                }
+                double audioMs = GetWavDurationMs(wav);
+                lblStatus.Content = localFallback ? "Retrying (local)…" : "Retrying…";
+                lblStatus.Opacity = 1;
+                Log($"[retry] {take.Id} ({audioMs:F0}ms; was: {take.Reason}) with {provider.Name}{(localFallback ? " — LOCAL FALLBACK" : "")}");
+
+                var result = await TranscribeTakeAsync(provider, wav, audioMs);
+                // A fallback model shouldn't stay resident (GBs of VRAM) for a
+                // provider nobody switched to.
+                if (localFallback) _transcribers?.Drop(provider.Id);
+
+                if (string.IsNullOrWhiteSpace(result.Text))
+                {
+                    string reason = result.Text == null ? result.FailReason : "no text returned";
+                    _unsent?.Keep(take, UnsentTakes.Failed, "retry failed: " + reason);
+                    PlayUiSound(UiSound.Error);
+                    FlashStatus("Retry failed", 2500);
+                    _tray?.ShowBalloon("Retry failed", $"{result.ProviderName}: {reason}. The audio is still saved.", warning: true);
+                    return;
+                }
+
+                string text = result.Text;
+                var shortfall = CheckCoverage(wav, audioMs, result);
+                _injector.CopyToClipboard(text);
+                HistoryService.Add(text);
+                if (shortfall is { } sf) _unsent?.Keep(take, UnsentTakes.Incomplete, "retry incomplete: " + sf.Describe());
+                else _unsent?.Remove(take);
+                Log($"[retry] {take.Id}: {text.Length} chars on the clipboard{(localFallback ? " (LOCAL FALLBACK)" : "")}{(shortfall != null ? " (incomplete)" : "")}");
+
+                string who = localFallback
+                    ? $"Transcribed by {result.ProviderName} — a LOCAL FALLBACK, not your usual provider. Check it before it goes in a chart."
+                    : $"Transcribed by {result.ProviderName}.";
+                string body = $"{who} It's on the clipboard — paste it where it belongs."
+                              + (shortfall is { } s ? $" It may be incomplete: {s.Describe()}." : "");
+                if (localFallback || shortfall != null)
+                {
+                    PlayUiSound(UiSound.Warn);
+                    FlashStatus(localFallback ? "Fallback — copied" : "⚠ Copied — check end", 4000);
+                    _tray?.ShowBalloon(shortfall != null ? "Recovered — may be incomplete" : "Recovered with a local fallback", body, warning: true);
+                }
+                else
+                {
+                    PlayUiSound(UiSound.Success);
+                    FlashStatus("Recovered — copied", 3000);
+                    _tray?.ShowBalloon("Recovered dictation copied", body);
+                }
+            }
+            finally
+            {
+                Volatile.Write(ref _recState, 0);
+                UpdateStatusLabel();
+            }
+        }
+
+        /// <summary>Local presets that could transcribe right now — exe and
+        /// model on disk — offered as the Retry menu's offline fallback.</summary>
+        private IEnumerable<ApiProvider> ReadyLocalProviders(string? exceptId) =>
+            _providers.Where(p => p.IsLocalProvider && p.Id != exceptId && LocalModelPresent(p));
+
+        private static bool LocalModelPresent(ApiProvider p)
+        {
+            if (string.IsNullOrWhiteSpace(p.LocalModelGlob)) return false;
+            string sub = string.IsNullOrWhiteSpace(p.LocalModelFolder) ? "cohere-gguf" : p.LocalModelFolder;
+            string folder = Path.Combine(ConfigFolder, sub);
+            return File.Exists(Path.Combine(folder, "crispasr.exe"))
+                && MissingIfAbsent(folder, p.LocalModelGlob) == null;
+        }
+
+        /// <summary>↻ Unsent dictations: every kept take, newest first (ten
+        /// listed), each with Retry on the active provider and on any local
+        /// model that could run now — the offline fallback, labelled as one.
+        /// Rebuilt on every open, like the rest of the menu.</summary>
+        private MenuNode BuildUnsentMenu()
+        {
+            var takes = _unsent?.List() ?? new List<UnsentTakes.Take>();
+            var active = GetActiveProvider();
+            var fallbacks = ReadyLocalProviders(active?.Id).ToList();
+
+            var children = new List<MenuNode>();
+            if (takes.Count == 0)
+                children.Add(new MenuNode { Header = "(none — every dictation was delivered)", IsEnabled = false });
+            foreach (var take in takes.Take(10))
+            {
+                var t = take; // capture for the closures
+                var actions = new List<MenuNode>();
+                if (active != null)
+                    actions.Add(new MenuNode
+                    {
+                        Header = $"Retry with {active.Name}",
+                        Action = () => RunSafe(() => RetryTakeAsync(t, active, localFallback: false), "RetryTake"),
+                    });
+                foreach (var local in fallbacks)
+                {
+                    var l = local;
+                    actions.Add(new MenuNode
+                    {
+                        Header = $"Retry on {l.Name} (local fallback)",
+                        Action = () => RunSafe(() => RetryTakeAsync(t, l, localFallback: true), "RetryTake"),
+                    });
+                }
+                actions.Add(MenuNode.Separator());
+                actions.Add(new MenuNode { Header = "Show audio file", Action = () => OpenExplorerSelect(t.WavPath) });
+                children.Add(new MenuNode
+                {
+                    Header = t.Label,
+                    ToolTip = string.IsNullOrWhiteSpace(t.ProviderName) ? null : $"Recorded for {t.ProviderName}",
+                    Children = actions,
+                });
+            }
+            if (takes.Count > 10)
+                children.Add(new MenuNode { Header = $"…and {takes.Count - 10} older (open the folder)", IsEnabled = false });
+            children.Add(MenuNode.Separator());
+            children.Add(new MenuNode
+            {
+                Header = "📂 Open unsent folder",
+                Action = () => OpenFolder(_unsent?.Folder ?? Path.Combine(ConfigFolder, "unsent")),
+            });
+
+            return new MenuNode
+            {
+                Header = takes.Count == 0 ? "↻ Unsent dictations" : $"↻ Unsent dictations ({takes.Count})",
+                Children = children,
+            };
         }
 
         // ── Text input ──────────────────────────────────────────────────
@@ -1097,6 +1517,7 @@ namespace WhisperInk
                 },
             },
             new MenuNode { Header = "📋 History", Action = () => new HistoryWindow().Show() },
+            BuildUnsentMenu(),
             MenuNode.Separator(),
             BuildGpuBackendMenu(),
             MenuNode.Separator(),

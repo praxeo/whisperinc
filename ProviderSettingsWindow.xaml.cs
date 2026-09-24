@@ -86,7 +86,7 @@ namespace WhisperInk
             // the xi-api-key auth scheme. Hide the whole group for everyone
             // else so the dialog doesn't suggest editable knobs that won't
             // do anything.
-            ScribeGroup.Visibility = _current.UsesCustomAuthHeader
+            ScribeGroup.Visibility = _current.IsElevenLabs
                 ? Visibility.Visible
                 : Visibility.Collapsed;
 

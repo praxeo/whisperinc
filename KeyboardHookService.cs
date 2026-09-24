@@ -56,6 +56,11 @@ namespace WhisperInk
         private const int VK_LCONTROL = 0xA2;
         private const int VK_RCONTROL = 0xA3;
         private const int VK_SPACE = 0x20;
+        // Sweep start (VK_BACK). Below it: mouse buttons (0x01, 0x02,
+        // 0x04-0x06), VK_CANCEL (Ctrl+Break — too rare to be a useful
+        // liveness signal) and an unassigned code — see
+        // AnyKeyPressedSinceLastCheck.
+        private const int VK_FIRST_KEYBOARD = 0x08;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct KBDLLHOOKSTRUCT
@@ -139,19 +144,30 @@ namespace WhisperInk
             Reinstall();
         }
 
-        /// <summary>Sweeps the vkey table once (only ever called from a
-        /// 30s-interval timer, so ~254 cheap syscalls is inconsequential)
+        /// <summary>Sweeps the keyboard vkeys once (only ever called from a
+        /// 30s-interval timer, so ~250 cheap syscalls is inconsequential)
         /// looking for any key pressed since the last sweep. Uses
         /// GetAsyncKeyState rather than our own hook state precisely
         /// because it must still work when the hook itself is the thing
-        /// that's dead.</summary>
+        /// that's dead.
+        ///
+        /// Starts at VK_BACK (0x08): vkeys 0x01, 0x02 and 0x04-0x06 are
+        /// MOUSE buttons, which GetAsyncKeyState reports but a
+        /// WH_KEYBOARD_LL hook never sees. Sweeping from 1 made every 30 s
+        /// of clicking-without-typing look like a dead hook — 377 needless
+        /// reinstalls in one session's debug.log, each one tearing the live
+        /// hook down and re-adding it.
+        /// No early exit: every key's "pressed since last call" bit is
+        /// consumed each sweep, so a stale bit left behind by an earlier
+        /// short-circuit can't trip a later, genuinely idle tick.</summary>
         private static bool AnyKeyPressedSinceLastCheck()
         {
-            for (int vk = 1; vk < 255; vk++)
+            bool any = false;
+            for (int vk = VK_FIRST_KEYBOARD; vk < 0xFF; vk++)
             {
-                if ((GetAsyncKeyState(vk) & 1) != 0) return true;
+                if ((GetAsyncKeyState(vk) & 1) != 0) any = true;
             }
-            return false;
+            return any;
         }
 
         private void Reinstall()

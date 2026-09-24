@@ -2,6 +2,8 @@
 
 This guide explains how to maximize transcription accuracy across all supported providers in WhisperInk.
 
+> **Status (2026-09):** parts of this guide predate the 2026-06 refactor that made context-bias routing automatic (one shared list, sent to each provider's native field — there is no per-provider "Context Bias Mode" to pick any more) and removed the realtime mode, AI edit and med-correction. The biasing tables, the Cohere / Mistral / ElevenLabs sections and the medical / ED recommendations were corrected in 2026-09. Where anything here disagrees with `CLAUDE.md` → *Provider system*, CLAUDE.md is authoritative — it tracks the code.
+
 ## Table of Contents
 - [Overview](#overview)
 - [Core Accuracy Parameters](#core-accuracy-parameters)
@@ -16,9 +18,10 @@ WhisperInk supports multiple transcription providers, each with different parame
 
 ### Supported Providers
 - **OpenAI Whisper** - General-purpose speech recognition with excellent multilingual support
-- **Cohere Transcribe** - Optimized for medical and technical domains with context biasing
+- **Cohere Transcribe** - Strong English accuracy; **no vocabulary biasing** (the v2 API has no biasing field)
 - **Mistral Voxtral** - Fast, accurate transcription with language detection
-- **ElevenLabs Scribe** - High-quality transcription with speaker diarization support
+- **ElevenLabs Scribe** - High-accuracy transcription with large keyterm lists (up to 1000 terms)
+- Also: Deepgram Nova-3 (and Nova-3 Medical), Google Chirp 3, Soniox, and local models via CrispASR (Parakeet, Cohere, Voxtral, Granite, Qwen3-ASR) — see `CLAUDE.md` for the full list
 
 ## Core Accuracy Parameters
 
@@ -97,37 +100,23 @@ hypertension
 hypotension
 ```
 
-**Provider support:**
-| Provider | Mode | Limit | Notes |
-|----------|------|-------|-------|
-| OpenAI Whisper | `whisper_prompt` | ~224 tokens | Comma-delimited string |
-| Cohere Transcribe | `cohere_terms` | 100 terms | JSON array |
-| Mistral Voxtral | N/A | N/A | Not supported |
-| ElevenLabs Scribe | N/A | N/A | Not supported |
+**Provider support** — the one shared list is routed automatically to each provider's native field (`ApiProvider.BiasMechanism`, baked per provider):
+| Provider | Mechanism | Limit | Notes |
+|----------|-----------|-------|-------|
+| OpenAI Whisper | `whisper_prompt` | ~224 tokens | Labeled glossary in `prompt` |
+| Mistral Voxtral (cloud) | `mistral_context_bias` | 100 terms | Comma string in `context_bias` |
+| ElevenLabs Scribe | `elevenlabs_keyterms` | 1000 terms, each < 50 chars and ≤ 5 words | Repeated `keyterms` fields; ~20% cost surcharge when used |
+| Deepgram Nova-3 / Medical | `deepgram_keyterm` | 100 terms | `keyterm` query params |
+| Soniox | `context_terms` | 100 terms | `context.terms` |
+| Google Chirp 3 | `phrase_sets` | — | `adaptation.phraseSets` |
+| Local CrispASR | `hotwords` | — | Parakeet: phrase-boost trie (boost is opt-in — it can garble neighboring words); Voxtral 3B / Qwen3: injected into the model's prompt, so keep the list short; Cohere / Granite / Voxtral 4B: no effect |
+| Cohere Transcribe (cloud) | none | — | The v2 API has no biasing field (the old `cohere_terms` was silently ignored and has been removed) |
+
+A large list only helps providers that take one: ElevenLabs accepts 1000 terms, most others stop at 100, and a long list injected into an LLM decoder's prompt (Voxtral 3B, Qwen3) can hurt more than it helps.
 
 ### Context Bias Mode
 
-**What it does:** Determines how context bias terms are sent to the API. Different providers use different field names and formats.
-
-**How to configure:**
-1. Right-click the WhisperInk tray icon
-2. Select "⚙ Configure Providers..."
-3. Select your provider from the dropdown
-4. Choose the appropriate mode from "Context Bias Mode"
-
-**Options:**
-- **None** - Don't send bias terms (Mistral, ElevenLabs)
-- **Whisper Prompt** - Send as comma-delimited string in `prompt` field (OpenAI, Groq, DeepInfra, local servers)
-- **Cohere Terms** - Send as JSON array in `context_bias_terms` field (Cohere v2 cloud API only)
-
-**Provider defaults:**
-| Provider | Default Mode |
-|----------|--------------|
-| OpenAI Whisper | `whisper_prompt` |
-| Cohere Transcribe API | `cohere_terms` |
-| Mistral | `none` |
-| ElevenLabs Scribe | `none` |
-| Local Server | `whisper_prompt` |
+There is nothing to choose any more: each built-in provider's mechanism is fixed (table above) and shown read-only in *Providers…*. The old per-provider "Context Bias Mode" setting survives only as the fallback for providers you add yourself.
 
 ## Provider-Specific Recommendations
 
@@ -160,27 +149,24 @@ Context Bias Terms: [domain-specific terms]
 ### Cohere Transcribe
 
 **Strengths:**
-- Excellent medical/technical domain accuracy
-- Powerful context biasing with `context_bias_terms`
+- Strong English accuracy
 - Deterministic output with low temperature
+- Also runs locally (CrispASR GGUF presets) with no per-minute cost
 
 **Optimal Configuration:**
 ```
 Model: cohere-transcribe-03-2026
 Temperature: 0.1
 Language: [required, e.g., "en"]
-Context Bias Mode: cohere_terms
-Context Bias Terms: [up to 100 domain terms]
+Context Bias: none — the API has no biasing field
 ```
 
 **Advanced Tips:**
-- Use the full JSON array format for `context_bias_terms`
-- Cohere's medical terminology recognition is excellent with proper biasing
-- Temperature of 0.1 is specifically recommended for medical dictation
+- Temperature 0.1 is the preset default
 
 **Known Limitations:**
+- **No vocabulary biasing.** The v2 API has no biasing field: the `cohere_terms` → `context_bias_terms` field this guide used to recommend was silently dropped by the server and has been removed. Rare terms can't be steered.
 - Language parameter is required (no auto-detect)
-- Context bias limited to 100 terms
 - No built-in speaker diarization
 
 ### Mistral Voxtral
@@ -195,48 +181,41 @@ Context Bias Terms: [up to 100 domain terms]
 Model: voxtral-mini-latest
 Temperature: [not configurable]
 Language: [optional, but recommended]
-Context Bias Mode: none
-Context Bias Terms: [not supported]
+Context Bias: automatic — sent as `context_bias` (up to 100 terms)
 ```
-
-**Advanced Tips:**
-- Use Realtime mode for live typing with minimal latency
-- Adjust Streaming Delay (240-2400ms) to balance speed vs accuracy
-- 480ms is recommended for most use cases
-- 2400ms provides highest accuracy but more latency
 
 **Known Limitations:**
 - No temperature control
-- No context biasing support
+- Context bias capped at 100 terms
 - Fewer language options than Whisper
+- (The realtime/streaming mode described in older versions of this guide was removed in 2026-06.)
 
 ### ElevenLabs Scribe
 
 **Strengths:**
-- High-quality transcription
-- Speaker diarization support
-- Entity detection and redaction
-- Multi-channel audio processing
+- High accuracy on clinical dictation — it is the engine behind the production ED dictation web app (`praxeo/elevenlabs-web`)
+- **Keyterms:** up to 1000 terms (each < 50 chars, ≤ 5 words) — by far the largest biasing list of any provider here
+- Word-level timestamps and speaker diarization available
 
-**Optimal Configuration:**
+**Optimal Configuration (dictation):**
 ```
 Model: scribe_v2
-Temperature: 0.0-0.3
-Language: [optional, auto-detects well]
-Context Bias Mode: none
-Context Bias Terms: [not supported]
+Temperature: 0             (sent automatically unless you set another in Providers…)
+Language: en               (sent as language_code; "auto" lets Scribe detect it)
+Context Bias: the shared list, plus the "ElevenLabs-only keyterms" box in Providers… —
+              put long specialty lists (drug names, dressings) in that box
+no_verbatim: on            (strips um/uh — preset default)
+tag_audio_events: off      (no "(laughter)"/"(cough)" tags in the text — preset default)
 ```
 
 **Advanced Tips:**
-- Enable diarization for meeting transcription
-- Use entity redaction for privacy-sensitive content
-- Multi-channel processing can separate speakers
-- Language auto-detection is excellent
+- WhisperInk sends the request shape elevenlabs-web runs in production: `language_code`, `temperature=0`, single speaker (`diarize=false`, `num_speakers=1`) and word timestamps, which feed the incomplete-transcript check (a result that stops well short of the speech warns instead of passing as complete). Pinning the language matters on short clips, where auto-detection can drift into another language.
+- The transcript gets elevenlabs-web's cleanup before pasting: Scribe's pause ellipses (`…` / `...`) and line breaks become spaces.
+- Keyterms add roughly 20% to the per-minute cost; spend them on words the model actually gets wrong (drug names, eponyms, abbreviations). Long lists belong in the ElevenLabs-only box: the global Context Bias list reaches every provider, most of which cap it at 100 terms, and the local speech-LLMs (Qwen3-ASR, Voxtral) write it into their prompt, where a long list dilutes.
 
 **Known Limitations:**
-- No context biasing support
-- Higher cost than some alternatives
-- Requires ElevenLabs API key
+- Higher cost than some alternatives (more with keyterms)
+- Requires an ElevenLabs API key
 
 ## Context Biasing Strategies
 
@@ -291,9 +270,9 @@ rehabilitation
 ```
 
 **Configuration:**
-- Provider: Cohere Transcribe or OpenAI Whisper
-- Temperature: 0.1 (Cohere) or 0.0 (Whisper)
-- Post-Processing: Enable "Med Correction" for best results
+- Provider: ElevenLabs Scribe (keyterms take up to 1000 terms — the only provider here where a long medical list is fully used); Deepgram Nova-3 Medical is the alternative with a medical model (keyterms capped at 100)
+- Temperature: 0 (set it in Providers… for ElevenLabs)
+- Cohere Transcribe has no biasing field, so this list does nothing there; "Med Correction" post-processing was removed in 2026-06
 
 ### Technical/Programming Domain
 
@@ -529,19 +508,19 @@ CSR
 
 **Recommended Setup:**
 ```
-Provider: Cohere Transcribe API
-Model: cohere-transcribe-03-2026
-Temperature: 0.1
-Language: en
-Context Bias Mode: cohere_terms
-Post-Processing: ON (Med Correction)
+Provider: ElevenLabs Scribe
+Model: scribe_v2
+Temperature: 0
+ElevenLabs-only keyterms: your ED vocabulary (drug names, eponyms, abbreviations)
+no_verbatim: on
+tag_audio_events: off
 ```
 
 **Why this configuration:**
-- Cohere's model is optimized for medical terminology
-- Low temperature (0.1) ensures deterministic output
-- Context bias terms improve recognition of medical vocabulary
-- Post-processing corrects common speech recognition errors
+- It is the request elevenlabs-web runs in production for ED dictation — English pinned, single speaker, temperature 0, word timestamps — and WhisperInk now sends the same (see the ElevenLabs section)
+- ElevenLabs is the only provider here that accepts a full medical keyterm list (1000 terms); most others cap at 100
+- Temperature 0 keeps output deterministic
+- The previous recommendation here (Cohere Transcribe with `cohere_terms` and "Med Correction") no longer works: Cohere's API has no biasing field — the terms were silently ignored — and med-correction was removed from the app
 
 **Example Context Bias Terms:**
 ```
@@ -684,22 +663,20 @@ Post-Processing: OFF
 ### Problem: Slow transcription speed
 
 **Solution:**
-1. For Mistral Realtime: increase Streaming Delay
-2. For cloud providers: check network connectivity
-3. Consider using a faster model (e.g., voxtral-mini instead of full)
+1. For cloud providers: check network connectivity
+2. Consider using a faster model (e.g., voxtral-mini instead of full)
+3. For local CrispASR models: the first dictation after switching pays the server start (roughly 1.5–3 s on CUDA); later ones are warm. Slow warm times on a laptop usually mean the Balanced power plan (see CLAUDE.md gotchas)
 
 ## Best Practices Summary
 
 1. **Always set the language explicitly** - This is the single biggest accuracy improvement
 2. **Use low temperature** - 0.0-0.1 for dictation, higher only for creative content
 3. **Leverage context biasing** - Add domain-specific terms to improve recognition
-4. **Choose the right provider** - Match provider to your domain (Cohere for medical, etc.)
-5. **Enable post-processing** - Use medical correction for clinical documentation
-6. **Maintain good audio quality** - Clear audio with minimal background noise
-7. **Test and iterate** - Review transcriptions and adjust settings based on errors
-8. **Keep bias terms updated** - Add new terms as you encounter them in your work
-9. **Use appropriate mode** - Realtime for live typing, Batch for highest accuracy
-10. **Monitor performance** - Check debug logs for issues and provider response times
+4. **Choose the right provider** - Match provider to your domain (ElevenLabs Scribe with keyterms for clinical dictation, etc.)
+5. **Maintain good audio quality** - Clear audio with minimal background noise
+6. **Test and iterate** - Review transcriptions and adjust settings based on errors
+7. **Keep bias terms updated** - Add new terms as you encounter them in your work
+8. **Monitor performance** - Check debug logs for issues and provider response times
 
 ## Additional Resources
 

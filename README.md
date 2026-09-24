@@ -43,6 +43,8 @@ Uninstall with `.\scripts\uninstall.ps1`. It removes shortcuts and the auto-star
 - **Global hotkey dictation** — `Ctrl+Space` to record and transcribe into any foreground app.
 - **Multi-provider** — cloud (Mistral, OpenAI, ElevenLabs, Cohere, Deepgram, Google Chirp 3, Soniox, Modulate, Smallest.ai, Reson8) and local (GGUF via CrispASR subprocess/server, incl. Qwen3-ASR 1.7B). Per-provider auth header, endpoint, model, temperature, and context-bias configuration.
 - **Batch dictation** — record → POST to the active provider → paste via clipboard; works with every provider.
+- **Never loses a dictation** — every take's audio is saved before it is sent and deleted once its text is delivered. A timeout, an outage or a crash leaves it in **↻ Unsent dictations** (tray / right-click menu) to retry — with the usual provider, or on a local model when the cloud is down, clearly flagged as a fallback. Deadlines scale with the recording, so long takes don't time out just for being long.
+- **Loud failures** — a distinct tone for each outcome: success, error, and a two-pulse *warn* for "delivered, but check it" (transcript may be incomplete, mic cut out mid-take, or the window you dictated into was no longer in front so the text was left on the clipboard instead of being pasted somewhere else).
 - **Context biasing** — one shared term list, routed to each provider's native mechanism automatically (prompt glossary for OpenAI, `context_bias` for Mistral, `keyterms` for ElevenLabs, `hotwords` for local CrispASR/Parakeet, phrase sets for Google, context terms for Soniox, `custom_terms` for Modulate, `phrases` for Reson8). Providers with no biasing surface at all — Cohere Transcribe, Smallest.ai — log the ignored terms rather than dropping them silently.
 - **History log** — every transcription recorded locally, viewable from the tray.
 
@@ -119,7 +121,7 @@ Then:
 3. Pick your microphone from the device dropdown.
 4. Hold **Ctrl+Space**, speak, release. Text should paste into the focused window.
 
-The debug log at `%APPDATA%\.WhisperInk\debug.log` is your first stop if something isn't working.
+The debug log at `%APPDATA%\.WhisperInk\debug.log` is your first stop if something isn't working. It starts fresh at each launch; the previous session's is kept as `debug.previous.log`.
 
 ---
 
@@ -131,9 +133,10 @@ The debug log at `%APPDATA%\.WhisperInk\debug.log` is your first stop if somethi
 
 ### Batch mode
 
-- Records to `~/Documents/MyRecordings/temp_audio.wav`.
-- POSTs a multipart form to the provider's transcription endpoint.
-- Pastes via clipboard + simulated `Ctrl+V`, with a leading space prepended.
+- Records in memory (a copy of the latest take goes to `~/Documents/MyRecordings/temp_audio.wav` for replay/debugging).
+- Journals the take to `%APPDATA%\.WhisperInk\unsent\` before sending it; delivered takes are deleted, failed ones kept for **↻ Unsent dictations**.
+- POSTs the audio to the provider, with a deadline scaled to the recording (cloud: 20 s + 20 s per minute of audio; local: 180 s + the audio's length).
+- Pastes via clipboard + simulated `Ctrl+V`, with a leading space prepended — but only into the window the dictation started in, and only if it is still in front. Otherwise the text is left on the clipboard and the warn tone plays.
 
 ---
 
@@ -497,8 +500,10 @@ Start/stop chirps are procedurally generated sine waves in memory — no asset f
 | Path | Contents |
 |------|----------|
 | `%APPDATA%\.WhisperInk\config.json` | All providers, active id, mic selection, bias terms. |
-| `%APPDATA%\.WhisperInk\debug.log` | Rolling log. First place to check for any failure. |
+| `%APPDATA%\.WhisperInk\debug.log` | This session's log. First place to check for any failure. |
+| `%APPDATA%\.WhisperInk\debug.previous.log` | The previous session's log (kept across one restart). |
 | `%APPDATA%\.WhisperInk\history.json` | Transcription history (viewable from the tray). |
+| `%APPDATA%\.WhisperInk\unsent\` | Takes that were never delivered (`take-*.wav` + a `.json` with the reason). Kept 14 days / 50 takes. |
 | `~/Documents/MyRecordings/temp_audio.wav` | The most recent Batch-mode recording (overwritten each time). |
 
 Config is loaded on startup and rewritten after any settings change. Safe to back up or sync.
@@ -534,7 +539,7 @@ NuGet dependencies (`WhisperInk.csproj`):
 
 If something isn't working, right-click the tray icon and pick **Copy support bundle**. That drops a zip onto your desktop and puts it on the clipboard so you can paste it straight into Slack / Discord / an issue. The bundle contains:
 
-- The last 500 lines of `%APPDATA%\.WhisperInk\debug.log`
+- The last 500 lines of `%APPDATA%\.WhisperInk\debug.log`, and of `debug.previous.log` (the session before)
 - `config.json` with `ApiKey` fields redacted (`***redacted***`)
 - `about.txt` with app version, commit hash, .NET and OS versions, installed providers, and which local model files are present
 
@@ -545,6 +550,7 @@ For a quick live view of what the active provider needs, the tray also has **Dia
 **Tray menu quick reference:**
 
 - **Show Window** — restore the floating bar (left-click or double-click the tray icon does the same thing).
+- **↻ Unsent dictations** — takes that failed or never finished, each with *Retry with* the active provider or *Retry on* a local model (fallback). A recovered transcript goes to the clipboard, not into a window.
 - **Open debug log / config folder / model folder** — opens the paths in Notepad / Explorer.
 - **Copy support bundle** — described above.
 - **Diagnose active provider** — on-demand health probe with per-file detail.

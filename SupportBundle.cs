@@ -48,6 +48,12 @@ namespace WhisperInk
                     AddText(zip, "debug.log", "(no debug.log present)");
                 }
 
+                // The session before this one: the usual reaction to a failure
+                // is to restart the app, so what went wrong is often in here.
+                string previousLogPath = Path.Combine(ConfigFolder, "debug.previous.log");
+                if (File.Exists(previousLogPath))
+                    AddText(zip, "debug.previous.log", TailLines(previousLogPath, 500));
+
                 // config.json (redacted)
                 string cfgPath = Path.Combine(ConfigFolder, "config.json");
                 if (File.Exists(cfgPath))

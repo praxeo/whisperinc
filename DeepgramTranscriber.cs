@@ -11,8 +11,8 @@
 //   - the transcript lives at results.channels[0].alternatives[0].transcript.
 //
 // One synchronous POST per dictation — there's no job/poll cycle like Soniox.
-// A short clip returns in ~1-3s, comfortably inside the shared HttpClient
-// timeout.
+// A short clip returns in ~1-3s, comfortably inside its per-take deadline
+// (TranscriptionDeadline — 20 s + 20 s per minute of audio).
 //
 // Best model: Nova-3 (TranscriptionModel = "nova-3"), Deepgram's latest. The
 // field is user-editable, so nova-3-medical / nova-2 / whisper-cloud are a
@@ -108,9 +108,17 @@ namespace WhisperInk
 
                 return ParseTranscript(body);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                _log($"DeepgramTranscriber({_provider.Id}): cancelled");
+                // The per-take deadline (MainWindow logs it as the error).
+                _log($"DeepgramTranscriber({_provider.Id}): stopped at the take's deadline");
+                return null;
+            }
+            catch (OperationCanceledException ex)
+            {
+                // Not our token: the HttpClient's own timeout, which surfaces
+                // as a TaskCanceledException — never a user cancel.
+                _log($"DeepgramTranscriber({_provider.Id}): HTTP request timed out: {ex.Message}");
                 return null;
             }
             catch (Exception ex)

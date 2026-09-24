@@ -281,6 +281,17 @@ namespace WhisperInk
         /// <summary>True when auth should use a custom header instead of Authorization: Bearer.</summary>
         public bool UsesCustomAuthHeader => !string.IsNullOrWhiteSpace(AuthHeaderName);
 
+        /// <summary>True for ElevenLabs Scribe — the provider HttpTranscriber
+        /// sends its extra fields to (language_code, keyterms, word
+        /// timestamps, …). Recognized by ElevenLabs' own auth header or host.
+        /// It used to be "has any custom auth header", which would have sent
+        /// ElevenLabs-only fields — and withheld `language` — from any
+        /// user-added provider that authenticates with, say, X-API-Key.</summary>
+        public bool IsElevenLabs =>
+            string.Equals(AuthHeaderName?.Trim(), "xi-api-key", StringComparison.OrdinalIgnoreCase)
+            || (Uri.TryCreate(ResolvedTranscriptionUrl, UriKind.Absolute, out var u)
+                && u.Host.EndsWith("elevenlabs.io", StringComparison.OrdinalIgnoreCase));
+
         /// <summary>The effective biasing mechanism for this provider: the baked
         /// <see cref="BiasMechanism"/> when set, otherwise derived from the legacy
         /// <see cref="ContextBiasMode"/> so older configs and user-added providers

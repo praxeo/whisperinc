@@ -45,6 +45,9 @@ namespace WhisperInk
         private readonly Func<int> _deviceNumber;
         private readonly Func<int> _preRollMs;
         private readonly Action<string> _log;
+        // Raised on the capture thread when the device dies MID-dictation, so
+        // the user hears about it while still talking, not after release.
+        private readonly Action? _onCaptureLost;
 
         // Guards the ring, the writer and _capturing together. Taken by the
         // NAudio callback thread and by the UI thread; never held across a
@@ -57,18 +60,26 @@ namespace WhisperInk
         private MemoryStream? _memStream;
         private WaveFileWriter? _writer;
         private bool _capturing;
+        private bool _captureInterrupted;
         private ManualResetEventSlim? _drainSignal;
 
         private bool _disposed;
 
-        public MicCapture(Func<int> deviceNumber, Func<int> preRollMs, Action<string>? log = null)
+        public MicCapture(Func<int> deviceNumber, Func<int> preRollMs, Action<string>? log = null, Action? onCaptureLost = null)
         {
             _deviceNumber = deviceNumber;
             _preRollMs = preRollMs;
             _log = log ?? (_ => { });
+            _onCaptureLost = onCaptureLost;
         }
 
         public bool IsWarm { get { lock (_gate) return _waveIn != null; } }
+
+        /// <summary>True when the device failed during the capture the most
+        /// recent <see cref="EndCapture"/> returned: that WAV stops where the
+        /// mic did. It used to be handed on as if complete, so everything said
+        /// after an unplug or driver reset simply wasn't in the note.</summary>
+        public bool LastCaptureInterrupted { get; private set; }
 
         /// <summary>Opens the capture device if it isn't already streaming.
         /// Returns false if the device could not be opened.</summary>
@@ -150,6 +161,7 @@ namespace WhisperInk
                     _preRollMs() * BytesPerMs,
                     (buf, offset, count) => writer.Write(buf, offset, count));
 
+                _captureInterrupted = false;
                 _capturing = true;
                 return preRollBytes / BytesPerMs;
             }
@@ -182,6 +194,8 @@ namespace WhisperInk
             {
                 _drainSignal = null;
                 _capturing = false;
+                LastCaptureInterrupted = _captureInterrupted;
+                _captureInterrupted = false;
                 try
                 {
                     _writer?.Dispose();
@@ -224,10 +238,19 @@ namespace WhisperInk
             // the next BeginCapture re-opens rather than silently recording
             // nothing forever.
             _log($"[mic] capture stopped unexpectedly: {e.Exception.GetType().Name}: {e.Exception.Message}");
+            bool midDictation;
             lock (_gate)
             {
                 _waveIn = null;
                 _ring.Clear();
+                // Mid-dictation, the writer keeps what arrived before the
+                // failure; flag the take so it can't pass for a complete one.
+                midDictation = _capturing;
+                if (midDictation) _captureInterrupted = true;
+            }
+            if (midDictation)
+            {
+                try { _onCaptureLost?.Invoke(); } catch { }
             }
         }
 

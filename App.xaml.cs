@@ -18,9 +18,15 @@ namespace WhisperInk
         {
             try
             {
+                // ToString(), not Message + StackTrace: an AggregateException
+                // (every UnobservedTaskException) carries the real failure in
+                // its InnerExceptions, and its own Message is the generic "A
+                // Task's exception(s) were not observed…" with no stack —
+                // which is all debug.log ever recorded of them. ToString()
+                // includes each inner exception with its stack trace.
                 string msg = ex == null
                     ? "(null exception)"
-                    : $"{ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}";
+                    : ex.ToString();
                 File.AppendAllText(
                     CrashLog,
                     $"[{DateTime.Now:HH:mm:ss.fff}] !!! {source} !!! {msg}\n");

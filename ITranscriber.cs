@@ -43,4 +43,22 @@ namespace WhisperInk
             IReadOnlyList<string> biasTerms,
             CancellationToken ct = default);
     }
+
+    /// <summary>
+    /// Optional, for transcribers whose provider returns word timestamps:
+    /// how far into the audio the most recent transcript reached, for the
+    /// incomplete-transcript check (<see cref="TranscriptCoverage"/>). Both
+    /// values describe the LAST <see cref="ITranscriber.TranscribeAsync"/>
+    /// call and are null when the provider didn't report them. Dictations
+    /// are serialized by MainWindow's recording state machine, so "the last
+    /// call" is always the take in hand.
+    /// </summary>
+    public interface ITranscriptCoverage
+    {
+        /// <summary>End time (s) of the last transcribed word.</summary>
+        double? LastWordEndSeconds { get; }
+
+        /// <summary>Seconds of audio the service says it decoded.</summary>
+        double? DecodedAudioSeconds { get; }
+    }
 }

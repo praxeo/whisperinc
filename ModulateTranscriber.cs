@@ -168,9 +168,17 @@ namespace WhisperInk
 
                 return ParseTranscript(body);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                _log($"ModulateTranscriber({_provider.Id}): cancelled");
+                // The per-take deadline (MainWindow logs it as the error).
+                _log($"ModulateTranscriber({_provider.Id}): stopped at the take's deadline");
+                return null;
+            }
+            catch (OperationCanceledException ex)
+            {
+                // Not our token: the HttpClient's own timeout, which surfaces
+                // as a TaskCanceledException — never a user cancel.
+                _log($"ModulateTranscriber({_provider.Id}): HTTP request timed out: {ex.Message}");
                 return null;
             }
             catch (Exception ex)

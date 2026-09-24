@@ -220,11 +220,13 @@
                         <CheckBox x:Name="ChkNoVerbatim" Content="Strip fillers and false starts (no_verbatim)"
                                   ToolTip="On = clean output. Off = preserve every &quot;um&quot;/&quot;uh&quot;/restart — better for patient interviews."/>
 
-                        <Label Content="Extra keyterms (optional)" Margin="0,8,0,0"/>
+                        <Label Content="ElevenLabs-only keyterms (optional)" Margin="0,8,0,0"/>
                         <TextBlock TextWrapping="Wrap" Foreground="#666" FontSize="10" Margin="0,0,0,6">
-                            ElevenLabs keyterms come from the global Context Bias Terms list.
-                            Add ElevenLabs-only extras here (one per line) — they're merged with
-                            that list. Max 1000 terms, &lt;50 chars each, 5 words max. ~20% cost surcharge.
+                            ElevenLabs keyterms come from the global Context Bias Terms list plus
+                            these (one per line). Long specialty lists — drug names, dressings — belong
+                            here, not in the global list: that one reaches every provider, most of which
+                            cap it at 100 terms and some of which write it into the model's prompt.
+                            Max 1000 terms, &lt;50 chars each, 5 words max. ~20% cost surcharge.
                         </TextBlock>
                         <TextBox x:Name="TxtScribeKeyterms"
                                  AcceptsReturn="True"

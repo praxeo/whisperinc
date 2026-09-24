@@ -134,6 +134,31 @@ namespace WhisperInk
             _log("[diag] Paste: exit");
         }
 
+        /// <summary>Leaves text on the clipboard for the user to paste — no
+        /// Ctrl+V, no restore. Used when a transcript can't safely be pasted
+        /// (the window it was dictated into is no longer in front) or comes
+        /// from a retry. Cancels any pending restore of an earlier paste,
+        /// which would otherwise overwrite this text 250 ms later.</summary>
+        public bool CopyToClipboard(string text)
+        {
+            try { _pendingRestoreCts?.Cancel(); } catch { }
+            _pendingRestoreCts = null;
+            _pendingRestoreData = null;
+
+            Exception? clipEx = null;
+            var staThread = new Thread(() =>
+            {
+                try { Clipboard.SetText(text); }
+                catch (Exception ex) { clipEx = ex; }
+            });
+            staThread.SetApartmentState(ApartmentState.STA);
+            staThread.Start();
+            staThread.Join();
+            if (clipEx != null)
+                _log($"[diag] CopyToClipboard failed: {clipEx.GetType().Name}: {clipEx.Message}");
+            return clipEx == null;
+        }
+
         // Snapshot every format on the clipboard into a new DataObject. Skips
         // formats that throw on read (delayed-render, COM-marshalled handles)
         // so a single bad format doesn't lose the rest. Must run on STA thread.

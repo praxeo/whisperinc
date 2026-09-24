@@ -46,11 +46,18 @@ namespace WhisperInk
         private const string DefaultModel = "stt-async-v5";
 
         // Poll cadence + overall ceiling. Short dictation clips finish in a
-        // couple of seconds; the ceiling only exists so a wedged job can't hang
-        // the dictation pipeline forever. Each individual request is still
-        // bounded by the shared HttpClient timeout.
+        // couple of seconds. What ends a slow job is the caller's per-take
+        // deadline token (TranscriptionDeadline — scaled to the recording); the
+        // ceiling only stops a job polled WITHOUT a deadline from spinning
+        // forever, so it must never be shorter than any cloud deadline. It used
+        // to be a flat 120 s, which quietly capped how long a take could be.
         private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(400);
-        private static readonly TimeSpan PollCeiling = TimeSpan.FromSeconds(120);
+        private static readonly TimeSpan PollCeiling = TranscriptionDeadline.CloudCap;
+
+        // Cleanup runs after the take's token may already be cancelled, so it
+        // gets its own short budget rather than none (it used to wait on the
+        // shared client's timeout, now a long backstop).
+        private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(10);
 
         private readonly ApiProvider _provider;
         private readonly HttpClient _http;
@@ -101,9 +108,17 @@ namespace WhisperInk
 
                 return await FetchTranscriptAsync(transcriptionId, ct).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                _log($"SonioxTranscriber({_provider.Id}): cancelled");
+                // The per-take deadline (MainWindow logs it as the error).
+                _log($"SonioxTranscriber({_provider.Id}): stopped at the take's deadline");
+                return null;
+            }
+            catch (OperationCanceledException ex)
+            {
+                // Not our token: the HttpClient's own timeout, which surfaces
+                // as a TaskCanceledException — never a user cancel.
+                _log($"SonioxTranscriber({_provider.Id}): HTTP request timed out: {ex.Message}");
                 return null;
             }
             catch (Exception ex)
@@ -278,9 +293,10 @@ namespace WhisperInk
         {
             try
             {
+                using var cts = new CancellationTokenSource(CleanupTimeout);
                 using var request = new HttpRequestMessage(HttpMethod.Delete, url);
                 AddAuth(request);
-                using var resp = await _http.SendAsync(request).ConfigureAwait(false);
+                using var resp = await _http.SendAsync(request, cts.Token).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                     _log($"[soniox] cleanup DELETE {url} -> HTTP {(int)resp.StatusCode}");
             }

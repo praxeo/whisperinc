@@ -35,6 +35,7 @@ namespace WhisperInk
         Success,    // text pasted
         Error,      // transcription genuinely failed
         Dismissed,  // input deliberately discarded (too short / silent) — not an error
+        Warn,       // delivered, but check it: possibly incomplete, left on the clipboard, mic cut out
     }
 
     public sealed class UiSoundPlayer : IDisposable
@@ -73,6 +74,11 @@ namespace WhisperInk
             // Deliberately quieter and lower than Error: "I saw the press and
             // threw it away" should not sound like "something broke".
             _tones[UiSound.Dismissed] = Synth(520, 28, 0.14);
+            // Two pulses, so it can't be mistaken for Success (one high
+            // chirp) or Error (one low buzz): text arrived, but look at it.
+            // Same shape as elevenlabs-web's warn beep, pitched off the
+            // Dismissed blip so the two never blur together.
+            _tones[UiSound.Warn] = Concat(Synth(660, 90, 0.30), Silence(70), Synth(660, 90, 0.30));
         }
 
         /// <summary>Fire-and-forget. Returns immediately; the tone is opened,
@@ -188,6 +194,22 @@ namespace WhisperInk
                 short s = (short)(Math.Sin(2 * Math.PI * freq * t) * attack * decay * amplitude * short.MaxValue);
                 bytes[i * 2] = (byte)(s & 0xFF);
                 bytes[i * 2 + 1] = (byte)((s >> 8) & 0xFF);
+            }
+            return bytes;
+        }
+
+        private static byte[] Silence(int durMs) => new byte[Format.SampleRate * durMs / 1000 * 2];
+
+        private static byte[] Concat(params byte[][] parts)
+        {
+            int total = 0;
+            foreach (var p in parts) total += p.Length;
+            var bytes = new byte[total];
+            int offset = 0;
+            foreach (var p in parts)
+            {
+                Buffer.BlockCopy(p, 0, bytes, offset, p.Length);
+                offset += p.Length;
             }
             return bytes;
         }
