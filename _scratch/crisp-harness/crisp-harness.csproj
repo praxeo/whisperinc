@@ -30,6 +30,7 @@
     <Compile Include="..\..\SmallestTranscriber.cs" />
     <Compile Include="..\..\Reson8Transcriber.cs" />
     <Compile Include="..\..\LocalModelDiscovery.cs" />
+    <Compile Include="..\..\LocalTakeSplitter.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- TranscriptCoverage reads WAVs with NAudio's WaveFileReader. -->

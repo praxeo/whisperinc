@@ -254,8 +254,27 @@ namespace WhisperInk
                 if (!await EnsureServerRunningAsync(ct).ConfigureAwait(false))
                     return null;
 
-                var fileContent = new ByteArrayContent(wavBytes);
-                return await PostMultipartAsync(fileContent, _provider.Language ?? "en", hotwords, ct).ConfigureAwait(false);
+                string language = _provider.Language ?? "en";
+                var split = MaxPiece() is TimeSpan max ? LocalTakeSplitter.Cut(wavBytes, max) : null;
+                if (split == null)
+                    return await PostMultipartAsync(new ByteArrayContent(wavBytes), language, hotwords, ct).ConfigureAwait(false);
+
+                var lengths = new List<string>();
+                foreach (var p in split.Pieces) lengths.Add($"{split.Seconds(p.Length):F1}");
+                string left = (split.TrailingSilence > 0 ? $"; {split.Seconds(split.TrailingSilence):F1} s of silence after the last speech left out" : "")
+                            + (split.SilentStretches > 0 ? $"; {split.SilentStretches} stretch(es) with no speech left out" : "");
+                _log(split.Pieces.Count == 1
+                    ? $"CrispAsr({_provider.Id}): {split.Seconds(split.TotalSamples):F1} s take sent as one {lengths[0]} s piece{left}"
+                    : $"CrispAsr({_provider.Id}): {split.Seconds(split.TotalSamples):F1} s take sent in {split.Pieces.Count} pieces cut at pauses ({string.Join(" + ", lengths)} s){left}");
+                var texts = new List<string>();
+                foreach (var piece in split.Wavs)
+                {
+                    // One failed piece fails the take, which stays journaled for a retry.
+                    string? text = await PostMultipartAsync(new ByteArrayContent(piece), language, hotwords, ct).ConfigureAwait(false);
+                    if (text == null) return null;
+                    if (text.Length > 0) texts.Add(text);
+                }
+                return string.Join(" ", texts);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -284,6 +303,21 @@ namespace WhisperInk
                 _serverReady = false;
                 return null;
             }
+        }
+
+        // A preset that sets chunk_seconds has a take longer than that cut at
+        // its own pauses (LocalTakeSplitter), into pieces a second shorter so
+        // the server never cuts one again: the server's cut can leave a piece
+        // of pure silence, and a speech-LLM fills it with its prompt. Null:
+        // send every take whole, as before.
+        private TimeSpan? MaxPiece()
+        {
+            if (_provider.LocalExtraParams is { Count: > 0 } extra)
+                foreach (var kv in extra)
+                    if (string.Equals(kv.Key, "chunk_seconds", StringComparison.OrdinalIgnoreCase)
+                        && int.TryParse(kv.Value, out int seconds) && seconds > 1)
+                        return TimeSpan.FromSeconds(seconds - 1);
+            return null;
         }
 
         private async Task<string?> PostMultipartAsync(HttpContent fileContent, string language, string? hotwords, CancellationToken ct)

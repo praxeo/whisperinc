@@ -375,6 +375,12 @@ namespace WhisperInk
         /// built and named for.</summary>
         public const string GraniteLocalGlob = "granite-speech-4.1-2b-q*.gguf";
 
+        /// <summary>The piece length qwen3-asr-1.7b-local asks the server to
+        /// cut a take into. CrispASR's default, 30 s, often left a take over
+        /// 30 s ending in a piece of pure silence, and Qwen3 answers silence
+        /// with the bias list (see the preset).</summary>
+        public const string QwenLocalChunkSeconds = "60";
+
         /// <summary>Repairs a value this app once shipped in CreateDefaults that
         /// turned out to be wrong. Only an exact match on the old shipped value
         /// is rewritten, so anything the user set by hand is left alone. The
@@ -386,6 +392,13 @@ namespace WhisperInk
             {
                 p.LocalModelGlob = GraniteLocalGlob;
                 return $"LocalModelGlob granite-speech-*.gguf -> {GraniteLocalGlob} (the old glob loaded the 2b-plus model)";
+            }
+            // Shipped with no extra params until 2026-09-24, so an empty set is
+            // the old default; a user's own params are left alone.
+            if (p.Id == "qwen3-asr-1.7b-local" && p.LocalExtraParams is not { Count: > 0 })
+            {
+                p.LocalExtraParams = new() { ["chunk_seconds"] = QwenLocalChunkSeconds };
+                return $"LocalExtraParams chunk_seconds={QwenLocalChunkSeconds} (in 30 s pieces a long take could end in a silent piece, which Qwen3 filled with the bias list)";
             }
             return null;
         }
@@ -587,6 +600,24 @@ namespace WhisperInk
                 // it documents which of the two registered qwen3 backend names
                 // this preset means, and survives a change in auto-detection.
                 LocalBackendHint = "qwen3-1.7b",
+                // 60 s pieces, not the server's 30 s. The server cuts a longer
+                // take at the quietest 100 ms in the last 5 s of each piece, and
+                // the silence after the last word is the quietest spot there is,
+                // so a take over 30 s often ended in a piece of pure silence.
+                // Qwen3 answers a silent piece with the bias list, and the paste
+                // ended "... Ascites, syncopal, pleuritic, ... periwound." (a real
+                // take on 2026-09-23; reproduced 2026-09-24 on the clinical clips
+                // with the owner's room tone). With 60 s pieces a take under a
+                // minute is never cut, and every test take up to 4.3 min came
+                // back complete with no list, except one released just past the
+                // 60 s mark after the speech had stopped before it. So a longer
+                // take is also cut by WhisperInk itself, at its own pauses, into
+                // pieces that each hold speech (LocalTakeSplitter, which keys on
+                // this chunk_seconds). One piece for the whole take broke past
+                // ~3 min (hematemesis for every hematochezia, repeated
+                // sentences), and 120 s pieces dropped a third of one piece's
+                // sentences.
+                LocalExtraParams = new() { ["chunk_seconds"] = QwenLocalChunkSeconds },
                 // Deliberately no LocalPuncModel. Qwen3-ASR is a speech-LLM and
                 // emits punctuation and sentence case natively -- on jfk.wav it
                 // produced a correct semicolon and capitalised "Americans"

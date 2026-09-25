@@ -24,6 +24,47 @@ bool Logged(string pattern) { lock (log) return log.Any(l => Regex.IsMatch(l, pa
 
 byte[] speech = File.ReadAllBytes(Path.Combine(dir, "speech.wav"));
 
+// `dotnet run -- qwen-live`: the shipped Qwen3 preset on the GPU, through
+// CrispAsrServerTranscriber, over the takes `_join_clips.ps1 -Tails` builds
+// (the clinical clips at 16 kHz with the owner's room tone: sentences with the
+// key held after them, 30 s to 4.3 min, and takes released past the 60 s mark
+// after the speech stopped), with the real bias list. None of them may come
+// back with the list recited into it. Needs the owner's clips, the Qwen3 GGUF
+// and a GPU, so it's in neither `fast` nor the full run.
+if (args.Contains("qwen-live"))
+{
+    string tails = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", "..", "..", "_scratch", "biasing", "tails"));
+    string cfgPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk", "config.json");
+    using var cfg = System.Text.Json.JsonDocument.Parse(File.ReadAllText(cfgPath));
+    var terms = cfg.RootElement.GetProperty("ContextBiasTerms").EnumerateArray()
+                   .Select(e => e.GetString() ?? "").Where(s => s.Length > 0).ToList();
+    var qwen = ApiProvider.CreateDefaults().Single(p => p.Id == "qwen3-asr-1.7b-local");
+    qwen.LocalServerPort = 18993;
+    Console.WriteLine($"Qwen3 preset (chunk_seconds={qwen.LocalExtraParams["chunk_seconds"]}), {terms.Count} list terms, takes in {tails}");
+    using var tq = new CrispAsrServerTranscriber(qwen, () => "cuda", Log);
+    foreach (string f in Directory.GetFiles(tails, "*.wav").OrderBy(f => f, StringComparer.Ordinal))
+    {
+        string name = Path.GetFileNameWithoutExtension(f);
+        var sw = Stopwatch.StartNew();
+        string text = await tq.TranscribeAsync(File.ReadAllBytes(f), terms) ?? "<null>";
+        int Hits(string s) => Regex.Matches(text, Regex.Escape(s), RegexOptions.IgnoreCase).Count;
+        var listed = terms.Where(t => Regex.IsMatch(text, $@"(?i)(?<!\w){Regex.Escape(t)}(?!\w)")).ToList();
+        Console.WriteLine($"   {name,-30} {sw.ElapsedMilliseconds,6} ms  …{text[Math.Max(0, text.Length - 90)..]}");
+        if (name == "room_tone_only") continue;   // the silence gate never sends a take like this
+        Check(text != "<null>" && listed.All(t => t is "hematochezia" or "ureterolithiasis"), $"{name}: no list recited ({string.Join(", ", listed)})");
+        var reps = Regex.Match(name, @"^long_(\d)x_six$");
+        if (reps.Success)
+        {
+            int n = int.Parse(reps.Groups[1].Value);
+            bool all = Hits("stable condition") == n && Hits("hematochezia") == 2 * n && Hits("ureterolithiasis") == n;
+            Check(all, $"{name}: every sentence and term ({Hits("stable condition")}/{n} sentences, {Hits("hematochezia")}/{2 * n} hematochezia, {Hits("ureterolithiasis")}/{n} ureterolithiasis)");
+            if (!all) Console.WriteLine($"      {text}");
+        }
+    }
+    Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
+    return failures == 0 ? 0 : 1;
+}
+
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 0a. TranscriptionDeadline ==");
 var cloudProv = new ApiProvider { Id = "c", TranscriptionEndpoint = "https://api.elevenlabs.io/v1/speech-to-text" };
@@ -254,6 +295,21 @@ var handGranite = new ApiProvider { Id = "granite-local", LocalModelGlob = "gran
 Check(ApiProvider.RepairSupersededDefault(handGranite) == null && handGranite.LocalModelGlob == "granite-speech-4.1-2b-plus-q4_k.gguf",
       "a glob the user set by hand is left alone");
 
+// Qwen3 in 60 s pieces: in the server's 30 s pieces a long take could end in
+// a silent piece, which Qwen3 filled with the whole bias list.
+var qwenDef = defs.Single(p => p.Id == "qwen3-asr-1.7b-local");
+Check(qwenDef.LocalExtraParams.TryGetValue("chunk_seconds", out var qcs) && qcs == "60" && qwenDef.LocalExtraParams.Count == 1,
+      "the Qwen3 preset asks for 60 s pieces, and nothing else");
+var oldQwen = new ApiProvider { Id = "qwen3-asr-1.7b-local" };
+Check(ApiProvider.RepairSupersededDefault(oldQwen) != null && oldQwen.LocalExtraParams.GetValueOrDefault("chunk_seconds") == "60",
+      "a config still carrying the old Qwen3 preset (no extra params) is repaired");
+Check(ApiProvider.RepairSupersededDefault(oldQwen) == null, "... once");
+var handQwen = new ApiProvider { Id = "qwen3-asr-1.7b-local", LocalExtraParams = new() { ["seed"] = "42" } };
+Check(ApiProvider.RepairSupersededDefault(handQwen) == null && handQwen.LocalExtraParams.Count == 1 && !handQwen.LocalExtraParams.ContainsKey("chunk_seconds"),
+      "extra params the user set by hand are left alone");
+Check(defs.Where(p => p.Id != "qwen3-asr-1.7b-local").All(p => ApiProvider.RepairSupersededDefault(p) == null),
+      "no other shipped preset is touched by a repair");
+
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 0h. Drop-in local models: GGUF headers, providers, the folder scanner ==");
 // Vocabularies as the real files have them (read 2026-09-24): Parakeet RNNT
@@ -427,6 +483,77 @@ foreach (var (file, arch, vocab) in realModels)
     Check(ri?.Architecture == arch && ri.VocabHasCasedWords == vocab && swr.ElapsedMilliseconds < 500,
           $"the real {file}: {ri?.Architecture ?? rp}, cased words in its vocabulary: {ri?.VocabHasCasedWords?.ToString() ?? "no token list"}, read in {swr.ElapsedMilliseconds} ms");
 }
+
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0i. LocalTakeSplitter: long local takes cut at their own pauses ==");
+// The server's own cut can leave a piece of pure silence, which Qwen3 fills
+// with the whole bias list. Takes as the app records them: 16 kHz mono over
+// a 0.0003 RMS noise floor, "speech" in 5 s bursts of a 0.02 tone.
+var maxPiece = TimeSpan.FromSeconds(59);
+int maxPieceSamples = 59 * 16000;
+(byte[] Wav, List<(double From, double To)> Gaps) Bursts(int count, double pause, double tail)
+{
+    var segs = new List<(double Seconds, double Amp)>();
+    var gaps = new List<(double From, double To)>();
+    double t = 0;
+    for (int i = 0; i < count; i++)
+    {
+        segs.Add((5.0, 0.02)); t += 5.0;
+        double gap = i < count - 1 ? pause : tail;
+        if (gap > 0) { segs.Add((gap, 0)); gaps.Add((t, t + gap)); t += gap; }
+    }
+    return (NoisyWav(0.0003, segs.ToArray()), gaps);
+}
+bool Sound(LocalTakeSplitter.Split sp, List<(double From, double To)>? gaps)
+{
+    var p = sp.Pieces;
+    bool ok = p.Count == sp.Wavs.Count && p.All(x => x.Length <= maxPieceSamples && x.Length > 0);
+    for (int i = 0; i < p.Count; i++)
+    {
+        var level = SpeechDetector.Measure(sp.Wavs[i]);
+        ok &= level.Measured && level.SpeechMs > 0 && sp.Wavs[i].Length == 44 + 2 * p[i].Length;
+        if (i + 1 < p.Count && gaps != null)
+        {
+            ok &= p[i].End == p[i + 1].Start;
+            double cut = p[i].End / 16000.0;
+            ok &= gaps.Any(g => cut > g.From && cut < g.To);
+        }
+    }
+    return ok;
+}
+Check(LocalTakeSplitter.Cut(Bursts(8, 0.8, 1.5).Wav, maxPiece) == null, "a take that fits in one piece (47 s) goes out whole");
+var (w105, g105) = Bursts(18, 0.8, 1.5);
+var s105 = LocalTakeSplitter.Cut(w105, maxPiece);
+Check(s105 != null && s105.Pieces.Count == 2 && s105.Pieces[0].Start == 0 && s105.Pieces[^1].End == s105.TotalSamples
+      && s105.TrailingSilence == 0 && Sound(s105, g105),
+      $"105 s: 2 pieces under 59 s, each with speech, cut inside a pause, nothing left out ({Describe(s105)})");
+var (w256, g256) = Bursts(44, 0.8, 1.5);
+var s256 = LocalTakeSplitter.Cut(w256, maxPiece);
+Check(s256 != null && s256.Pieces.Count >= 5 && s256.Pieces[^1].End == s256.TotalSamples && Sound(s256, g256),
+      $"256 s: every piece under 59 s, with speech, cut inside a pause ({Describe(s256)})");
+// The take that still failed with the server's 60 s cut: the speech stops at
+// 57 s and the key is held to 63.6 s.
+var (wStraddle, gStraddle) = Bursts(10, 0.8, 6.4);
+var sStraddle = LocalTakeSplitter.Cut(wStraddle, maxPiece);
+Check(sStraddle != null && sStraddle.Pieces.Count == 1 && sStraddle.Pieces[0].Length > maxPieceSamples - 480
+      && sStraddle.TrailingSilence == sStraddle.TotalSamples - sStraddle.Pieces[0].Length && Sound(sStraddle, gStraddle),
+      $"speech to 57 s, released at 63.6 s: one 59 s piece, and the {sStraddle?.Seconds(sStraddle.TrailingSilence):F1} s of silence past it left out, never sent alone");
+var sGap = LocalTakeSplitter.Cut(NoisyWav(0.0003, (20, 0.02), (70, 0), (20, 0.02)), maxPiece);
+Check(sGap != null && sGap.Pieces.Count == 2 && sGap.SilentStretches == 1 && Sound(sGap, null),
+      $"a 70 s silence mid-take: the stretch with no speech is left out, both speech pieces go ({Describe(sGap)})");
+// 10 s of room first, so the take has a floor to measure speech against. (A
+// piece of unbroken tone has no quiet moment of its own, so Sound's
+// per-piece speech test can't be used on these.)
+var sNoPause = LocalTakeSplitter.Cut(NoisyWav(0.0003, (10, 0), (100, 0.02)), maxPiece);
+Check(sNoPause != null && sNoPause.Pieces.Count >= 2 && sNoPause.Pieces[0].Start == 0 && sNoPause.Pieces[^1].End == sNoPause.TotalSamples
+      && sNoPause.Pieces.All(p => p.Length <= maxPieceSamples)
+      && sNoPause.Pieces.Zip(sNoPause.Pieces.Skip(1), (a, b) => a.End == b.Start).All(x => x),
+      $"100 s of speech with no pause at all is still cut under 59 s, nothing left out ({Describe(sNoPause)})");
+Check(LocalTakeSplitter.Cut(NoisyWav(0.0025, (70, 0)), maxPiece) == null, "70 s of steady noise has no speech to anchor a cut on: sent whole, as before");
+Check(LocalTakeSplitter.Cut(new byte[100], maxPiece) == null, "an unreadable take is sent whole");
+var stereo = (byte[])w105.Clone();
+BitConverter.GetBytes((short)2).CopyTo(stereo, 22); BitConverter.GetBytes(64000).CopyTo(stereo, 28); BitConverter.GetBytes((short)4).CopyTo(stereo, 32);
+Check(LocalTakeSplitter.Cut(stereo, maxPiece) == null, "a stereo WAV (not what the app records) is sent whole");
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");
@@ -737,6 +864,26 @@ if (!fast)
     using (var tg = new CrispAsrServerTranscriber(gone, () => "cpu", Log))
         Check(!await tg.WarmUpAsync() && Logged(@"harness-gone\): can't start: Model GGUF 'no-such-model\.gguf' not found"),
               "a provider whose file is gone fails the warm-up and names the file");
+
+    // ── 2f. A preset that sets chunk_seconds: a long take goes out in pieces cut at its pauses ──
+    Console.WriteLine("\n== 2f. crispasr: a long take cut at its own pauses ==");
+    var cutProv = new ApiProvider { Id = "harness-pieces", Name = "harness pieces", TranscriberKind = TranscriberKind.LocalCrispAsrServer,
+        LocalServerPort = 18994, LocalModelGlob = "parakeet-tdt-*.gguf", LocalGpuBackend = "cpu", Language = "en",
+        LocalExtraParams = new() { ["chunk_seconds"] = "60" } };
+    double speechSeconds = PcmOf(speech).Length / 32000.0;
+    var takeParts = new List<byte[]>();
+    int sentences = 0;
+    while (sentences * (speechSeconds + 1.0) < 66) { takeParts.Add(speech); takeParts.Add(Wav((1.0, 0))); sentences++; }
+    takeParts.Add(Wav((6.0, 0)));   // the key held after the last word
+    byte[] longTake = Concat(takeParts.ToArray());
+    using (var tc = new CrispAsrServerTranscriber(cutProv, () => "cpu", Log))
+    {
+        string? rl = await tc.TranscribeAsync(longTake, Array.Empty<string>());
+        int found = rl == null ? 0 : Regex.Matches(rl, "chest pain", RegexOptions.IgnoreCase).Count;
+        Console.WriteLine($"   {sentences} sentences in {longTake.Length / 32000.0:F1} s -> \"chest pain\" {found} times");
+        Check(Logged(@"harness-pieces\): [\d.,]+ s take sent in [2-9] pieces cut at pauses"), "the take went out in pieces, and the log says so");
+        Check(found == sentences, $"every sentence came back exactly once ({found}/{sentences})");
+    }
 }
 else
 {
@@ -749,6 +896,11 @@ return failures == 0 ? 0 : 1;
 // ── helpers ─────────────────────────────────────────────────────────────
 
 static string Esc(string s) => s.Replace("\r", "\\r").Replace("\n", "\\n");
+
+static string Describe(LocalTakeSplitter.Split? sp) => sp == null ? "sent whole"
+    : string.Join(" + ", sp.Pieces.Select(p => sp.Seconds(p.Length).ToString("F1"))) + " s"
+      + (sp.TrailingSilence > 0 ? $", {sp.Seconds(sp.TrailingSilence):F1} s left out" : "")
+      + (sp.SilentStretches > 0 ? $", {sp.SilentStretches} silent stretch left out" : "");
 
 static bool Throws<T>(Action action) where T : Exception
 {
