@@ -13,27 +13,38 @@
   Produced the 2026-09-23 table in CLAUDE.md: Qwen3-ASR 3/3 with no
   collateral; Granite 3/3 but it rewrote a correct "ureteral colic". And
   the 2026-09-24 Orukeet and Parakeet Ultra rows, against their base
-  model, Parakeet TDT v3, all three in one back-to-back run.
+  model, Parakeet TDT v3, all three in one back-to-back run. And the
+  2026-09-24 Voxtral rows: Mini 3B and 4B Realtime against Qwen3, plus
+  the longer takes _join_clips.ps1 builds.
 
   A run with Backend = '' passes no --backend, as a model added from the
   model folder does (crispasr detects it from the file).
 
   USAGE    pwsh .\_local_bias_ab.ps1                    # every run
            pwsh .\_local_bias_ab.ps1 -Only orukeet,tdt  # runs whose name contains one of these
+           pwsh .\_local_bias_ab.ps1 -Extra .\joined     # also these WAVs (files or folders), after the six clips
+           pwsh .\_local_bias_ab.ps1 -Drop epigastric    # leave these terms out of the list
   NEEDS    the user's own recordings in .\clips\ (see RECORD_THESE.md), and
            the listed GGUFs in %APPDATA%\.WhisperInk\cohere-gguf\
 #>
-param([string[]]$Only)
+param([string[]]$Only, [string[]]$Extra, [string[]]$Drop)
 $ErrorActionPreference = 'Stop'
 $dir   = Join-Path $env:APPDATA '.WhisperInk\cohere-gguf'
 $exe   = Join-Path $dir 'crispasr.exe'
 $clips = Get-ChildItem (Join-Path $PSScriptRoot 'clips\*.wav') | Sort-Object Name
 if (-not $clips) { throw "no clips in $(Join-Path $PSScriptRoot 'clips') - see RECORD_THESE.md" }
+# `pwsh -File` hands "a,b" over as one string, so these are split here too.
+$Extra = @($Extra | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+foreach ($e in $Extra) {
+  $clips = @($clips) + @(if (Test-Path $e -PathType Container) { Get-ChildItem (Join-Path $e '*.wav') | Sort-Object Name } else { Get-Item $e })
+}
+$Drop  = @($Drop | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $cfg   = Get-Content (Join-Path $env:APPDATA '.WhisperInk\config.json') -Raw | ConvertFrom-Json
-$hot   = ($cfg.ContextBiasTerms | Where-Object { $_ }) -join ','
+$terms = @($cfg.ContextBiasTerms | Where-Object { $_ -and $_ -notin $Drop })
+$hot   = $terms -join ','
 $out   = Join-Path $PSScriptRoot 'results'
 New-Item -ItemType Directory -Force $out | Out-Null
-"hotwords ($(@($cfg.ContextBiasTerms).Count) terms): $hot"
+"hotwords ($($terms.Count) terms): $hot"
 
 $runs = @(
   @{ Name = 'granite 4.1 2b';      Model = 'granite-speech-4.1-2b-q4_k.gguf';      Backend = 'granite';    Port = 18207 },
@@ -41,7 +52,9 @@ $runs = @(
   @{ Name = 'qwen3-asr 1.7b';      Model = 'qwen3-asr-1.7b-q4_k.gguf';             Backend = 'qwen3-1.7b'; Port = 18212 },
   @{ Name = 'parakeet tdt 0.6b v3'; Model = 'parakeet-tdt-0.6b-v3-q4_k.gguf';      Backend = '';           Port = 18213 },
   @{ Name = 'orukeet';             Model = 'orukeet-q4_k.gguf';                    Backend = '';           Port = 18214 },
-  @{ Name = 'parakeet ultra';      Model = 'parakeet-ultra-q4_k.gguf';             Backend = '';           Port = 18215 }
+  @{ Name = 'parakeet ultra';      Model = 'parakeet-ultra-q4_k.gguf';             Backend = '';           Port = 18215 },
+  @{ Name = 'voxtral mini 3b';     Model = 'voxtral-mini-3b-2507-q4_k.gguf';       Backend = 'voxtral';    Port = 18216 },
+  @{ Name = 'voxtral 4b realtime'; Model = 'voxtral-mini-4b-realtime-q4_k.gguf';   Backend = 'voxtral4b';  Port = 18217 }
 )
 # `pwsh -File` hands "orukeet,tdt" over as one string, so split it here.
 $Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })

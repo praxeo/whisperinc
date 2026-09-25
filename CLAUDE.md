@@ -34,9 +34,9 @@ Its main use is **clinical dictation**: exam findings and notes pasted straight 
 |---|---|
 | `main` | `origin` (`praxeo/whisperinc`, **public**) has everything up to `0411c65`. The drop-in local models commit (2026-09-24) is on `main` locally, **not pushed**: the owner asked for commit and deploy, not push |
 | Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of the drop-in local models commit. Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
-| Active provider (desktop) | `elevenlabs-medical` (Scribe v2 Medical), with the upload streamed while you talk. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
+| Active provider (desktop) | `local-orukeet-q4_k` (Orukeet, added with ➕) on the evening of 2026-09-24, though it broke a control on the clinical clips ([4.3](#43-context-biasing)); `elevenlabs-medical` (Scribe v2 Medical, streamed) before that. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
 | Vocabulary | 21 terms in the shared Context Bias list and 228 Scribe-only keyterms, so 249 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
-| Local ASR | CrispASR **v0.8.30** CUDA (prebuilt release) in `%APPDATA%\.WhisperInk\cohere-gguf\`. v0.8.36 is out, not deployed. Best local preset: `qwen3-asr-1.7b-local`. New models are added by dropping the GGUF in that folder and clicking ➕ ([6.1](#61-add-a-provider)). On 2026-09-24 the owner added Orukeet (8200) and Granite 2B Plus (8201) that way; parakeet-ultra is downloaded and offered. None beats `qwen3-asr-1.7b-local` on the clinical clips ([4.3](#43-context-biasing)) |
+| Local ASR | CrispASR **v0.8.30** CUDA (prebuilt release) in `%APPDATA%\.WhisperInk\cohere-gguf\`. v0.8.36 is out, not deployed. Best local preset: `qwen3-asr-1.7b-local`. New models are added by dropping the GGUF in that folder and clicking ➕ ([6.1](#61-add-a-provider)). On 2026-09-24 the owner added Orukeet (8200) and Granite 2B Plus (8201) that way; parakeet-ultra is downloaded and offered. None beats `qwen3-asr-1.7b-local` with the bias list on the clinical clips ([4.3](#43-context-biasing)). Voxtral Mini 3B (downloaded 2026-09-24; the shipped `voxtral-local` loads it) is the best local model *without* a list and on longer takes, but **don't switch to it yet**: with the current list, a CrispASR tokenizer bug makes it return a page of `<unk>`, and WhisperInk would paste that ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) |
 | Machines | Desktop: 2× RTX 3090 (`nvidia-smi` on 2026-09-24 listed only these two; the RTX 3080 noted earlier didn't show), CUDA. Laptop: 8-core Ryzen 5825U on CPU, still a pre-v0.7 CrispASR. `config.json` is per machine |
 | Open work | [Part 10](#part-10--roadmap-and-open-questions) |
 
@@ -104,6 +104,7 @@ Start in `%APPDATA%\.WhisperInk\`:
 | A take vanishes with a quiet blip or "Too quiet?" | The silence gate judged it silent. It's under ↻ Unsent → 🔇 Judged silent; compare the `[skip]` line's RMS and speech values with [3.4](#34-capture-pipeline-miccapturecs) |
 | A take is "lost" | ↻ Unsent first, then History, then the log around its time. `[unsent] kept …` gives the reason, with the transcriber's `HTTP` or error line just before it. A failed request logs no `[error]` |
 | A local model returns empty text | `CrispAsr(` lines. Exit code `-1073741515` means a missing DLL |
+| A local model pastes `<unk><unk>…` | A bias term the model's tokenizer can't handle: Voxtral 3B and "epigastric" ([8.3](#83-local-asr)) |
 | A local model transcribes badly | Which GGUF `LocalModelGlob` actually picked up (see [6.1](#61-add-a-provider)) |
 | A model copied into the model folder isn't offered in 🔌 Provider | `[models]` lines: still being copied, not a readable GGUF, not speech-to-text, or a provider already loads it (a loose glob counts). See [8.3](#83-local-asr) |
 | Slow cloud takes | `[net] new connection` (the connection wasn't reused) and `took …ms` lines |
@@ -610,8 +611,8 @@ The shipped presets (`ApiProvider.CreateDefaults()`). "Status" is the desktop as
 | `parakeet-local` | Local, 8103 | Parakeet TDT 0.6b v3 q4_k | Weak on the hard terms even with a boost |
 | `cohere-local-q6k` | Local, 8105 | Cohere Transcribe Q6_K | Misses both hard terms. Biasing is a no-op |
 | `cohere-gguf-server` | Local, 8766 | Cohere, pinned to CPU | CPU fallback. Its glob `cohere-transcribe-*.gguf` is loose ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) |
-| `voxtral4b-local` | Local, 8108 | Voxtral Mini 4B Realtime | Biasing is a no-op |
-| `voxtral-local` | Local, 8106 | Voxtral Mini 3B | **No 3B GGUF on the desktop**, so it can't run there |
+| `voxtral4b-local` | Local, 8108 | Voxtral Mini 4B Realtime | Biasing is a no-op. On the clinical clips (09-24): 0/3 hard terms, 520–850 ms a clip. Nothing to recommend it |
+| `voxtral-local` | Local, 8106 | Voxtral Mini 3B | GGUF on the desktop since 2026-09-24. Knows *hematochezia* without a list and uses the rest of a take (all six right in a 32 s take, no list), but **unusable with the current list**: a CrispASR tokenizer bug turns "epigastric" into a page of `<unk>` ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)). With that word left out, still behind Qwen3 on short takes ([4.3](#43-context-biasing)) |
 | `granite-local` | Local, 8107 | Granite Speech 4.1 2B | Biasing is real but **not chart-safe** (rewrote a correct term). All-lowercase output |
 
 GGUFs on the desktop, in `cohere-gguf\`:
@@ -620,6 +621,7 @@ GGUFs on the desktop, in `cohere-gguf\`:
 - parakeet-rnnt-1.1b q4_k and parakeet-tdt-0.6b-v3 q4_k;
 - qwen3-asr-1.7b q4_k;
 - voxtral-mini-4b-realtime q4_k;
+- voxtral-mini-3b-2507 q4_k (downloaded 2026-09-24 with `get-model.ps1`, 2.5 GB, from `cstr/voxtral-mini-3b-2507-GGUF`; Apache-2.0). The shipped `voxtral-local`'s glob matches it, so it isn't offered under ➕. How it did: [4.3](#43-context-biasing);
 - gemma4-e2b-it q8_0 (a general model; crispasr runs it as `gemma4-e2b`, so it's offered under ➕ too);
 - orukeet q4_k (downloaded 2026-09-24 with `get-model.ps1`, 402 MB, from `cstr/orukeet-GGUF`; a Parakeet TDT 0.6b v3 fine-tune, CC-BY-SA-4.0). The owner added it with ➕ as `local-orukeet-q4_k`, port 8200. On the clinical clips it's no better than its base on the hard terms and breaks a control ([4.3](#43-context-biasing));
 - parakeet-ultra q4_k (downloaded 2026-09-24, 402 MB, from `cstr/parakeet-ultra-GGUF`; moondream's post-trained v3, CC-BY-4.0, better than v3 on every general benchmark its card lists). Offered under ➕. On the clinical clips it matches its base exactly: no gain on the hard terms, no harm to the controls.
@@ -637,8 +639,10 @@ GGUFs on the desktop, in `cohere-gguf\`:
   - `elevenlabs` (Scribe v2), for more consistent sentence punctuation.
 - **Offline or local:**
   - with a GPU, `qwen3-asr-1.7b-local`: ~160–290 ms a clip warm on CUDA, and the only local preset whose biasing is both real and safe;
-  - on CPU, `parakeet-rnnt-local`.
+  - on CPU, `parakeet-rnnt-local`;
+  - not yet `voxtral-local` (Voxtral Mini 3B): the best local model without a list and on longer takes, but the current list breaks it ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)), and on short takes it trailed Qwen3 with the list ([4.3](#43-context-biasing)).
 - **Don't use for clinical text:**
+  - Orukeet (`local-orukeet-q4_k`, added from the model folder): it turned the *ureteral colic* control into "ureter alcolic";
   - Smallest.ai: no biasing, and a clinically opposite substitution;
   - `granite-local`: biasing rewrote a correct term, and the output is lowercase;
   - Modulate: rejected.
@@ -659,7 +663,7 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 | `reson8_phrases` | Reson8 | Comma-joined `phrases` query param. ≤250 terms, 4000-char budget, commas in terms become spaces | Real. A tight list fixed 3/3; **the 17-term list degraded a hard term into its opposite** |
 | `mistral_context_bias` | Mistral | Comma-joined `context_bias`. ≤100 | Not measured |
 | `whisper_prompt` | OpenAI | `prompt` = "Glossary: a, b, c." | Not measured |
-| `hotwords` | Local CrispASR | Comma-joined `hotwords` form field. **Two different mechanisms:** a boost trie on Parakeet (`HotwordsBoost`, off by default: ≥8 garbles neighbours), and prompt text on the speech-LLMs (Qwen3-ASR and Voxtral 3B: "…may appear in the audio"; Granite: " Keywords: …") | Qwen3: real and safe. Granite: real, unsafe. Parakeet: weak. Cohere and Voxtral 4B: ignored |
+| `hotwords` | Local CrispASR | Comma-joined `hotwords` form field. **Two different mechanisms:** a boost trie on Parakeet (`HotwordsBoost`, off by default: ≥8 garbles neighbours), and prompt text on the speech-LLMs (Qwen3-ASR: "The following words may appear in the audio: …" in the system turn; Voxtral 3B: "The following words may appear: …" between `lang:en` and `[TRANSCRIBE]`, where its transcribe mode was trained to see no text at all; Granite: " Keywords: …") | Qwen3: real and safe. Voxtral 3B: real but weak (one term fixed *ureterolithiasis*, 19 didn't), and **one term its tokenizer mishandles breaks every take** ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)). Granite: real, unsafe. Parakeet: weak. Cohere and Voxtral 4B: ignored |
 | `none` | Smallest.ai, Cohere cloud | — | Terms can't be routed anywhere. A mis-heard term on these can't be corrected |
 
 **How much `BiasMechanism` actually controls:** only `HttpTranscriber` reads it.
@@ -671,8 +675,8 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 
 | Provider (date) | hematochezia ×2 | ureterolithiasis | Controls |
 |---|---|---|---|
-| `qwen3-asr-1.7b-local`, no terms (08-29, 09-23) | ✗ hematuria / hematemesis | ✗ "bursitis with edema" | ✓ |
-| `qwen3-asr-1.7b-local` + terms (08-29, 09-23) | ✓✓ | ✓ | ✓ untouched |
+| `qwen3-asr-1.7b-local`, no terms (08-29, 09-23, 09-24) | ✗ hematuria / hematemesis | ✗ "bursitis with edema" | ✓ |
+| `qwen3-asr-1.7b-local` + terms (08-29, 09-23, 09-24; 21 terms, and 19 without "epigastric" and "syncopal") | ✓✓ | ✓ | ✓ untouched |
 | `granite-local` 2B + terms (09-23) | ✓✓ (✗ without) | ✓ (✗ "ureteral atresia" without) | ✗ "ureteral colic" became "ureterolithiasis"; lowercase output |
 | Granite 2b-plus + terms (09-23) | ✗ hematemesis | ✓ | ✗ garbles `ureteral_colic` |
 | `elevenlabs` Scribe v2 + keyterms (09-23) | ✓✓ | ✓ | ✓ (without keyterms: a stray "your") |
@@ -683,6 +687,10 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 | Parakeet TDT 0.6b v3, no hint, ± the 21-term list at the default boost (09-24, CUDA) | ✗ "hematochesia" / "hematocesia" | ✗ "ureter with ISIS" | ✓ (a stray "a" in one sentence); the list changed nothing |
 | **Orukeet** q4_k, the drop-in way, same run (09-24) | ✗ "hematochesia" ×2 | ✗ "uretero with ISIS" | ✗ **"ureteral colic" → "ureter alcolic"**, both reps, with or without the list: a control its base model gets right. Not for charting |
 | **Parakeet Ultra** q4_k (moondream's post-trained v3), the drop-in way, one back-to-back run with the two above (09-24) | ✗ "hematochesia" ×2 | ✗ "ureter with ISIS" | ✓ all three. Identical to its base but for one comma; the list changed nothing. Same speed: median 312 ms a clip vs 291 (v3) and 315 (Orukeet) in that run |
+| **Voxtral Mini 3B** q4_k (`voxtral-local`), no list, back to back with Qwen3 (09-24, CUDA) | ✓✓ natively | ✗ "ureteral with iasis" | ✗ **"ureteral colic" → "urethral colic"**, both reps; the other two ✓ |
+| Voxtral Mini 3B + the 21-term list (09-24) | ✗ | ✗ | ✗ Every clip, `neutral` included, came back as ~520 `<unk>` (2,600 characters) after ~6 s: a CrispASR tokenizer bug set off by "epigastric" ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) |
+| Voxtral Mini 3B + the list without "epigastric" and "syncopal" (19 terms, 09-24) | ✓✓ | ✗ "urtero with isus" (a one-off request with "ureterolithiasis" as the only term fixed it) | ✓ ("ureteral colic" right) |
+| Voxtral 4B Realtime (`voxtral4b-local`) ± the 21-term list, same day (09-24) | ✗ "hematokinesia" ×2 | ✗ "be reader with ISIS" | ✓; the list changed nothing. 520–850 ms a clip |
 | `cohere-local-q6k` (06-14) | ✗ "hematokesia" | ✗ "ureter with Isis" | ✓; biasing byte-identical |
 | `smallest-pulse-pro` (08-29) | ✗ **hematemesis** (clinically opposite) | ✗ | ✓ |
 | `smallest-pulse` (08-29) | ✗ "hematochesia" | ✗ "ureterithiasis" | ✓ |
@@ -690,12 +698,24 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 | `reson8` + 3 targeted terms (08-29) | ✓✓ | ✓ | ✓ unchanged |
 | `reson8` + the 17-term list (08-29) | ✗ **hematemesis** / ✓ | ✓ | ✓ |
 
+**Longer takes (09-24).** `_join_clips.ps1` joins the clips into longer takes: all six in one 32 s take, forwards and reversed, and the `neutral` sentence followed by one clip (9 s). Qwen3 and Voxtral 3B ran back to back through `_local_bias_ab.ps1 -Only qwen3,3b -Extra .\joined -Drop epigastric,syncopal`, two reps each. Greedy decoding made every rep identical, so n is one per condition.
+
+| | Both 32 s takes | `neutral` then `ureterolithiasis` | `neutral` then `ureteral_colic` | `neutral` then `hematochezia_1` |
+|---|---|---|---|---|
+| Qwen3, no list | ✗ *hematemesis* ×2, "ureteral atresis" | ✗ "ureteral atresis" | ✓ | ✗ *hematemesis* |
+| Qwen3 + the 19-term list | ✓ all six | ✓ | ✓ | ✓ |
+| Voxtral 3B, no list | **✓ all six, in both orders** | ✓ | ✗ "urethral colic" | ✓ |
+| Voxtral 3B + the 19-term list | ✓ all six | ✓ | ✓ | ✓ |
+| Voxtral 4B, ± the 21-term list (forwards only, earlier run) | ✗ "hematokinesia" ×2, "ureterothiasis" | — | — | — |
+
+Voxtral 3B uses the rest of a take. With any speech before it, it got *ureterolithiasis*, and after "biliary colic" it got *ureteral colic*; it had missed both on the clip alone. Context never fixed a word for Qwen3 (`hematochezia_1` went from *hematuria* alone to *hematemesis* in the longer takes): it gets the hard terms from the list or not at all. Speed in the same run, warm: Qwen3 165–335 ms a clip and 1.0–1.1 s for 32 s; Voxtral 3B 258–386 ms and 1.3 s. Voxtral 4B, in the earlier run: 517–849 ms and 3.7 s.
+
 **How list length behaves**, which differs by provider:
 
 | Behaviour | Providers | Effect of a long list |
 |---|---|---|
 | Ignored | Smallest.ai, Cohere, Voxtral 4B | Wasted |
-| Dilutes | Qwen3 | A 40-term list still fixed 5 of 6 |
+| Dilutes | Qwen3, Voxtral 3B | Qwen3: a 40-term list still fixed 5 of 6. Voxtral 3B: one term fixed *ureterolithiasis*, the 19-term list didn't |
 | Degrades | Reson8 | Worse transcripts, per upstream and measured: the 17-term list turned *hematochezia* into *hematemesis* |
 | Costs | ElevenLabs | Over 100 terms, a 20 s billing floor per take |
 
@@ -832,7 +852,9 @@ Each local preset runs its own `crispasr.exe --server` on its own port ([Part 5]
   - A June experiment conditioning Cohere's decoder on a prompt ("Route B") worked once and then broke controls. It's shelved.
 - **`voxtral-local` / `voxtral4b-local`:**
   - Upstream treats the 4B realtime checkpoint as a separate backend (`voxtral4b`).
-  - Only the 3B splices hotwords.
+  - Only the 3B splices hotwords. It puts them between `lang:en` and `[TRANSCRIBE]`. The Voxtral paper says transcribe mode was trained with no text prompt at all, so the model never learned to read this.
+  - **The 3B's tokenizer can emit token ids past the model's vocabulary** (CrispASR `src/voxtral.cpp`, v0.8.30 through `main` as of 2026-09-24; [10.2](#102-known-bugs-found-in-the-2026-09-23-audit)). Until that's fixed, a list containing such a word ("epigastric") breaks every take. `_scratch\biasing\_tekken_ids.ps1` checks a list against the GGUF.
+  - The 3B decodes long audio in one pass (the encoder works in 30 s windows, then one LLM decode over all of them), so the rest of the take is context for every word in it ([4.3](#43-context-biasing)).
 - **`granite-local`:**
   - `granite`, `granite-4.1` and `granite-4.1-plus` are one code path; plus is detected from the GGUF.
   - The glob is pinned to the plain 2B (`granite-speech-4.1-2b-q*.gguf`), and `RepairSupersededDefault` fixes old configs.
@@ -1212,7 +1234,9 @@ The fake server runs on loopback, so providers pointed at it get the **local** d
 | `_scratch\reson8\` (`dotnet run`) | Reson8 wire-format probe against a local listener (`127.0.0.1:8899`): 53 checks | Free |
 | `_scratch\reson8\run-clips.ps1` | The six clips × (no phrases, 3 terms, the full list) against the live API; CSV in `results\` | **Paid** |
 | `_scratch\reson8\setup-reson8.ps1` | Installs a Reson8 key. **It stops WhisperInk, rewrites config.json (with a backup), runs `run-clips`, and relaunches `_publish`** | **Paid** |
-| `_scratch\biasing\_local_bias_ab.ps1` | Granite (2b and 2b-plus) and Qwen3 × clips × no bias / the real list. Own servers on ports 18207–18212. PowerShell 7, CUDA | Free (GPU) |
+| `_scratch\biasing\_local_bias_ab.ps1` | Local models (Granite 2b and 2b-plus, Qwen3, Parakeet v3, Orukeet, Parakeet Ultra, Voxtral 3B and 4B) × the clips × no list / the real list. `-Only` picks runs, `-Extra` adds WAV files or folders, `-Drop` leaves terms out of the list. Own servers on ports 18207–18217. PowerShell 7, CUDA | Free (GPU) |
+| `_scratch\biasing\_join_clips.ps1` | Joins the clips into longer takes in `joined\` (all six, forwards and reversed; `neutral` then one clip), for `-Extra` | Free |
+| `_scratch\biasing\_tekken_ids.ps1` | Replays CrispASR's Voxtral 3B tokenizer on the bias list against a Voxtral GGUF's own vocabulary, and flags any term that gets a token id past the model's vocabulary ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) | Free |
 | `_scratch\biasing\_hotwords_ab.ps1`, `_boost_sweep.ps1`, `_cohere_baseline.ps1` | June's Cohere/Parakeet hotword and boost experiments (ports 8201–8213) | Free |
 | `_scratch\biasing\_routeb_gate.ps1` | The shelved "Route B" test. Needs a patched binary at a hardcoded path | Obsolete |
 
@@ -1270,6 +1294,7 @@ After touching any of these, deploy ([1.4](#14-build-test-deploy)) and have the 
   - a missed health check: the output, without an exit code;
   - a non-2xx answer: a body preview.
 - **A model copied into the model folder isn't offered under ➕.** The `[models]` lines say why: still being copied (⏳ in the menu, and offered once the copy ends), not a readable GGUF (⚠; a truncated download says "ends inside its header"), not speech-to-text (a voice, a punctuation or language-ID model), or a provider already loads it. That last one includes a loose glob: `cohere-gguf-server`'s `cohere-transcribe-*.gguf` takes any Cohere quant ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)). The menu shows the scanner's last result and asks for a new scan each time it opens, so reopening it helps.
+- **A local model returns a page of `<unk>`.** A bias term its tokenizer can't handle. Voxtral 3B does this on CrispASR v0.8.30 (the code is unchanged through v0.8.36) whenever the list contains "epigastric" ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)), and WhisperInk pastes it. `_scratch\biasing\_tekken_ids.ps1` names the terms; otherwise try the list without some terms (`_local_bias_ab.ps1 -Drop`), or switch provider.
 - **A model added from the menu didn't load.** Its `CrispAsr(local-…)` lines carry crispasr's own output; the usual cause is a model newer than the deployed CrispASR. WhisperInk switched back to the provider before it and kept the added one in the list; delete it in ⚙ Configure Providers, or update CrispASR ([5.2](#52-updating-prebuilt-releases-the-normal-path)) and switch to it again.
 
 ## 8.4 Config and settings
@@ -1358,7 +1383,8 @@ All 59 commits (as of `8c0a52d`) are linear on `main`; feature branches are fast
 - **Transcripts at rest.**
   - They sit in `debug.log` (`result:` and HTTP-preview lines), `history.json`, `unsent\`, the Desktop support bundle, and `MyRecordings\temp_audio.wav`. The last two are OneDrive-synced.
   - The options: a "no transcripts in the log" switch, redaction at bundle time, and moving the debug WAV out of OneDrive.
-- **A local model as the primary?** `qwen3-asr-1.7b-local` is the candidate. Measure it against ElevenLabs on real recordings first.
+- **A local model as the primary?** `qwen3-asr-1.7b-local` is the candidate, and `voxtral-local` (Voxtral Mini 3B) once its tokenizer is fixed ([4.3](#43-context-biasing)). Measure against ElevenLabs on real recordings first.
+- **Report the Voxtral 3B tokenizer bug to CrispASR?** The evidence and the fix are in [10.2](#102-known-bugs-found-in-the-2026-09-23-audit). Filing is public, so it needs the owner's go-ahead. Once a release has the fix (A/B it, [5.2](#52-updating-prebuilt-releases-the-normal-path)), re-run Voxtral 3B with the full list: it's the only local model that got the hard terms without one.
 - **Granite Speech 5.0 TurboCTC** (IBM, released 2026-08-25: 470M, English only, a CTC Conformer with no LLM head, 1.33% WER on LibriSpeech test-clean). The owner asked for it on 2026-09-24, and it **can't be a drop-in yet**:
   - CrispASR has no backend for its `general.architecture`, `granite_speech5_ctc`, in v0.8.36 or upstream `main`, and no issue asks for one.
   - [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) runs it (GGUFs at `handy-computer/granite-speech-5.0-470m-turboctc-gguf`, prebuilt Windows CUDA binaries) but has no server mode, so using it would mean a second local engine in WhisperInk.
@@ -1390,6 +1416,8 @@ Each was inferred from reading the code; none was reproduced. Line numbers are a
 | **Stale diagnostics** | `ProviderDiagnostics.cs:77`, `CrispGpuProbe.cs:10–12` | Checks for `cohere.dll`/`parakeet.dll`; the GPU probe's comment claims it runs crispasr |
 | **Computed properties saved to config.json** | `ApiProvider` has no `[JsonIgnore]` | Nine dead fields per provider (`IsElevenLabs`, `Resolved*`, …) |
 | **The health probe's port check leaks a faulted task** (seen 2026-09-24, not an audit inference) | `HealthProbe.IsPortListeningAsync` races `ConnectAsync` against a 300 ms `Task.Delay` and disposes the client when the delay wins | A refused connect to localhost takes Windows longer than 300 ms, so switching to a local provider whose server isn't up yet (every ➕ add) abandons the connect. Its faulted task (SocketException 995) reaches `debug.log` about 2 s later as `!!! TaskScheduler.UnobservedTaskException !!!`. Harmless but alarming. Fix: `ConnectAsync(host, port, token)` with the timeout on the token |
+| **CrispASR's Voxtral 3B tokenizer emits ids past the model's vocabulary** (upstream; found and reproduced 2026-09-24) | CrispASR `src/voxtral.cpp`, v0.8.30 through `main` on 2026-09-24. `tekken_build_reverse` makes all 150,000 serialized Tekken entries mergeable, but the model has embedding rows for the first 130,072 only. The August fix for the same bug (upstream #338, `voxtral_tekken_vocab.h`) went into `voxtral_tts.cpp` and `voxtral4b.cpp` only | A bias term whose merges reach the tail gets an id ≥ 131,072, and the embedding lookup reads out of bounds. "epigastric" → `astric` = 146,371: every take, `neutral` included, returns ~520 `<unk>` after ~6 s. "syncopal" → `opal` = 131,628 happened not to show, but it's the same read, and on CPU #338 hit an assertion. `_scratch\biasing\_tekken_ids.ps1` names the affected terms in a list. Upstream fix: use `active_bpe_count()` and `token_id_in_range()` in `src/voxtral.cpp` |
+| **A transcript of `<unk>` tokens is pasted as a success** (found 2026-09-24) | `CrispAsrServerTranscriber.PostMultipartAsync` returns any non-empty `text` | The bug above would paste 2,600 characters of `<unk>` into the chart with the Success tone, and the take would count as delivered. Fix: treat `<unk>` in the text as a failed request (Error, take kept for a retry) |
 | **`HttpTranscriber` has no separate client-timeout arm** | `HttpTranscriber.cs:87–97` | A client timeout logs as a generic `TaskCanceledException` (only reachable after the 2 h 10 min backstop) |
 | **Dead code** | `TextInjector.TypeTextTo`/`GetSelectedText`; MainWindow `ActiveApiKey`, `TryParsePortFromUrl`, `GetWavDurationMs(string)`, private `IsLocalProvider`; `HealthProbe.Last`; the `AppConfig` class | Delete |
 | **Stale comments and labels** | `AppConfig.cs` Parakeet RNNT (says null = beam-5); the `TextInjector` class comment (realtime/AI modes); comments calling it a "hook thread"; `BiasMechanism = "hotwords"` on the Cohere and Voxtral 4B presets, whose backends ignore it | Mislead readers |
