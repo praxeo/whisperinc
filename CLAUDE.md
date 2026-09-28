@@ -32,7 +32,7 @@ Its main use is **clinical dictation**: exam findings and notes pasted straight 
 
 | | |
 |---|---|
-| `main` | `origin` (`praxeo/whisperinc`, **public**) has everything up to `0411c65`. Everything since is on `main` locally, **not pushed**: the drop-in local models (2026-09-24), then the Voxtral 3B findings, the Qwen3 fix and the Voxtral brief (2026-09-25), then the CrispASR v0.8.38 update with its A/B tooling (2026-09-28). The owner asked for commits and deploys, not pushes |
+| `main` | Pushed: `origin` (`praxeo/whisperinc`, **public**) has everything, last pushed on 2026-09-28 with the CrispASR v0.8.38 update. Before that push, the Voxtral brief's local path to the CrispASR clone, which named the machine's user, was replaced with `..\CrispASR` (the brief is now `59dc0df`, not `8f1268a`). Commit and push only when the owner asks |
 | Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of the Qwen3 fix commit (2026-09-25). Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
 | Active provider (desktop) | `elevenlabs` (Scribe v2, streamed) on 2026-09-26 and 2026-09-28. Before that, briefly `local-orukeet-q4_k` (2026-09-24), which broke a control on the clinical clips ([4.3](#43-context-biasing)), and `elevenlabs-medical`. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
 | Vocabulary | 21 terms in the shared Context Bias list and 228 Scribe-only keyterms, so 249 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
