@@ -4,13 +4,15 @@
 //      TranscriptCoverage, UnsentTakes, SpeechDetector, and the drop-in
 //      model discovery (GGUF headers, LocalModels, LocalModelScanner)
 //   1. HttpTranscriber against a local fake server: the ElevenLabs request
-//      shape, response parsing, and the per-take deadline
+//      shape, response parsing, and the per-take deadline; then the streamed
+//      upload (1b) and OmiTranscriber's request, job polling and errors (1c)
 //   2. CrispAsrServerTranscriber against the REAL crispasr.exe (CPU only,
 //      unused ports)
 // `dotnet run -- fast` skips section 2 and the slower-than-15s server check.
 using System.Diagnostics;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using WhisperInk;
 
@@ -61,6 +63,72 @@ if (args.Contains("qwen-live"))
             if (!all) Console.WriteLine($"      {text}");
         }
     }
+    Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
+    return failures == 0 ? 0 : 1;
+}
+
+// `dotnet run -- omi-live`: both Omi presets against the LIVE API, through
+// OmiTranscriber, on the owner's six clips, the 32 s joined take and a 111 s
+// take (over 60 s, so it goes through Omi's job path). The flagship runs with
+// and without the shared list; Edge can't take one. Reads the key from the Omi
+// presets in config.json. Sends real audio (the owner's own test recordings,
+// no patient data) and uses Omi hours, so it's in neither `fast` nor the full run.
+if (args.Contains("omi-live"))
+{
+    string bias = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", "..", "..", "_scratch", "biasing"));
+    string cfgPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk", "config.json");
+    using var cfg = JsonDocument.Parse(File.ReadAllText(cfgPath));
+    var terms = cfg.RootElement.GetProperty("ContextBiasTerms").EnumerateArray()
+                   .Select(e => e.GetString() ?? "").Where(s => s.Length > 0).ToList();
+    string key = cfg.RootElement.GetProperty("Providers").EnumerateArray()
+                    .Where(p => p.GetProperty("Id").GetString() is "omi-medical" or "omi-medical-edge")
+                    .Select(p => p.TryGetProperty("ApiKey", out var k) ? k.GetString() ?? "" : "")
+                    .FirstOrDefault(k => k.Length > 0) ?? "";
+    if (key.Length == 0) { Console.WriteLine("No Omi key in config.json: paste it into an Omi preset in Configure Providers first."); return 2; }
+
+    var defaults = ApiProvider.CreateDefaults();
+    var flagship = defaults.Single(p => p.Id == "omi-medical");
+    var edgeLive = defaults.Single(p => p.Id == "omi-medical-edge");
+    flagship.ApiKey = edgeLive.ApiKey = key;
+    var liveHttp = new HttpClient { Timeout = TranscriptionDeadline.HttpBackstop };
+    var inputs = Directory.GetFiles(Path.Combine(bias, "clips"), "*.wav").OrderBy(f => f, StringComparer.Ordinal)
+        .Append(Path.Combine(bias, "joined", "all_six_joined.wav"))
+        .Append(Path.Combine(bias, "tails", "long_3x_six.wav"))
+        .Where(File.Exists).ToList();
+    // What each clip must contain to be right.
+    var expect = new Dictionary<string, string>
+    {
+        ["hematochezia_1"] = "hematochezia", ["hematochezia_2"] = "hematochezia", ["ureterolithiasis"] = "ureterolithiasis",
+        ["biliary_colic"] = "biliary colic", ["ureteral_colic"] = "ureteral colic", ["neutral"] = "stable condition",
+    };
+    Console.WriteLine($"{inputs.Count} takes, {terms.Count} list terms");
+    var runs = new (ApiProvider Prov, IReadOnlyList<string> List, string Label)[]
+    {
+        (edgeLive, Array.Empty<string>(), "Edge"),
+        (flagship, Array.Empty<string>(), "flagship, no list"),
+        (flagship, terms, "flagship + list"),
+    };
+    foreach (var (prov, list, label) in runs)
+    {
+        Console.WriteLine($"\n== {prov.TranscriptionModel} ({label}) ==");
+        var t = new OmiTranscriber(prov, liveHttp, Log);
+        int right = 0, scored = 0;
+        foreach (string f in inputs)
+        {
+            string name = Path.GetFileNameWithoutExtension(f);
+            byte[] wav = File.ReadAllBytes(f);
+            double seconds = (wav.Length - 44) / 32000.0;
+            using var cts = new CancellationTokenSource(TranscriptionDeadline.For(prov, seconds));
+            var sw = Stopwatch.StartNew();
+            string text = await t.TranscribeAsync(wav, list, cts.Token) ?? "<null>";
+            bool? ok = expect.TryGetValue(name, out var want) ? text.Contains(want, StringComparison.OrdinalIgnoreCase) : null;
+            if (ok != null) { scored++; if (ok == true) right++; }
+            Console.WriteLine($"   {(ok == null ? " " : ok == true ? "✓" : "✗")} {name,-18} {seconds,5:F1} s {sw.ElapsedMilliseconds,6} ms  {text}");
+            Check(text != "<null>", $"{label}: {name} came back");
+        }
+        Console.WriteLine($"   {right}/{scored} clips right");
+    }
+    Check(Logged(@"\[omi\] over 60 s: transcribing as job"), "the 111 s take went through Omi's job path");
     Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
     return failures == 0 ? 0 : 1;
 }
@@ -562,8 +630,12 @@ var requests = new List<FakeRequest>();
 string reply = "{}";
 int replyDelayMs = 0;
 int replyStatus = 200;
+// When set, answers by request instead of `reply`/`replyStatus`: a flow with
+// more than one step (Omi's 202 job and its polls). RetryAfter is seconds.
+Func<FakeRequest, (int Status, string Body, int? RetryAfter)>? route = null;
 var listener = new HttpListener();
 listener.Prefixes.Add(Prefix);
+listener.Prefixes.Add("http://localhost:18999/");   // a second host name, for "not Omi's host"
 listener.Start();
 _ = Task.Run(async () =>
 {
@@ -582,12 +654,14 @@ _ = Task.Run(async () =>
                 var (fields, file) = ParseMultipart(ctx.Request.ContentType ?? "", ms.ToArray());
                 var req = new FakeRequest(ctx.Request.Url!.AbsolutePath, ctx.Request.Headers["xi-api-key"],
                     ctx.Request.Headers["X-API-Key"], ctx.Request.Headers["Authorization"], fields, file,
-                    Chunked: ctx.Request.ContentLength64 < 0);
+                    Chunked: ctx.Request.ContentLength64 < 0, Method: ctx.Request.HttpMethod,
+                    Query: ctx.Request.Url.Query, Host: ctx.Request.Url.Host);
                 lock (requests) requests.Add(req);
-                string body = reply;
+                var (status, body, retryAfter) = route?.Invoke(req) ?? (replyStatus, reply, null);
                 if (replyDelayMs > 0) await Task.Delay(replyDelayMs);
                 byte[] buf = Encoding.UTF8.GetBytes(body);
-                ctx.Response.StatusCode = replyStatus;
+                if (retryAfter is int ra) ctx.Response.AddHeader("Retry-After", ra.ToString());
+                ctx.Response.StatusCode = status;
                 ctx.Response.ContentType = "application/json";
                 ctx.Response.ContentLength64 = buf.Length;
                 await ctx.Response.OutputStream.WriteAsync(buf);
@@ -770,6 +844,123 @@ for (int i = 0; i < 6; i++) s6.Append(minute, 0, minute.Length);   // six minute
 var o6 = await s6.FinishAsync(s6.BytesStreamed, CancellationToken.None);
 s6.Dispose();
 Check(o6.FallBack && o6.Reason.Contains("min"), $"past {StreamedTranscription.MaxStreamedAudio.TotalMinutes} min the stream is given up for the file ({o6.Reason})");
+
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 1c. OmiTranscriber vs the fake server ==");
+var omiDefaults = ApiProvider.CreateDefaults();
+var omiFlag = omiDefaults.First(p => p.Id == "omi-medical");
+var omiEdge = omiDefaults.First(p => p.Id == "omi-medical-edge");
+Check(omiFlag is { TranscriberKind: TranscriberKind.Omi, Language: "en", TranscriptionModel: "omi-medical-1", BiasMechanism: "omi_vocabulary" }
+      && omiEdge is { TranscriberKind: TranscriberKind.Omi, Language: "en", TranscriptionModel: "omi-medical-edge-1", BiasMechanism: "none" }
+      && omiFlag.ResolvedTranscriptionUrl == "https://api.omi.health/v1/audio/transcriptions" && omiFlag.RequiresApiKey,
+      "presets: omi-medical and omi-medical-edge, both English, one endpoint, a key required");
+// Pointed at the fake server from here on.
+foreach (var p in new[] { omiFlag, omiEdge })
+{
+    p.ApiKey = "omi-key";
+    p.BaseUrl = Prefix.TrimEnd('/');
+    p.TranscriptionEndpoint = Prefix + "v1/audio/transcriptions";
+}
+var omi = new OmiTranscriber(omiFlag, http, Log);
+reply = "{\"text\":\"  Bright red blood per rectum, consistent with hematochezia.  \"}";
+string? om1 = await omi.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis", "Hematochezia", new string('x', 100) });
+var oq1 = LastRequest();
+Console.WriteLine("   fields: " + string.Join(", ", oq1.Fields.Select(f => f.Name + "=" + f.Value)));
+Check(om1 == "Bright red blood per rectum, consistent with hematochezia.", $"inline 200: the text comes back trimmed (\"{om1}\")");
+Check(oq1.Path == "/v1/audio/transcriptions" && oq1.Authorization == "Bearer omi-key", "POST /v1/audio/transcriptions with Bearer auth");
+Check(oq1.Get("model") == "omi-medical-1" && oq1.Get("response_format") == "json" && oq1.Get("language") == "en",
+      "model=omi-medical-1, response_format=json (Omi's default is diarized_json), language=en");
+var omiVocab = oq1.Get("vocabulary") is string vj ? JsonSerializer.Deserialize<string[]>(vj) : null;
+Check(omiVocab != null && omiVocab.SequenceEqual(new[] { "hematochezia", "ureterolithiasis" }),
+      $"vocabulary is a JSON array, deduped, with a term over 96 characters dropped ({oq1.Get("vocabulary")})");
+Check(Logged(@"\[omi\] 1 bias term\(s\) over 96 characters dropped"), "the dropped term is logged");
+Check(oq1.Fields.Count > 0 && oq1.Fields[^1].Name == "file", "the file part is last");
+
+reply = "{\"text\":\"\"}";
+Check(await omi.TranscribeAsync(speech, Array.Empty<string>()) == "", "empty text is \"\" (nothing heard), not a failed request");
+
+omiFlag.Language = "auto";
+reply = "{\"text\":\"ok\"}";
+await omi.TranscribeAsync(speech, Array.Empty<string>());
+Check(LastRequest().Get("language") == null && LastRequest().Get("vocabulary") == null,
+      "Language=auto sends no language (dominant-language detection); an empty list sends no vocabulary");
+omiFlag.Language = "en";
+
+var edge = new OmiTranscriber(omiEdge, http, Log);
+omiEdge.Language = "auto";
+await edge.TranscribeAsync(speech, new[] { "hematochezia" });
+var oq2 = LastRequest();
+Check(oq2.Get("model") == "omi-medical-edge-1" && oq2.Get("language") == "en" && oq2.Get("vocabulary") == null,
+      "Edge: always language=en (it can't detect), never vocabulary (it rejects the field)");
+Check(Logged(@"\[omi\] omi-medical-edge-1 takes no vocabulary; 1 bias term\(s\) not sent"), "Edge logs the terms it couldn't send");
+omiEdge.Language = "en";
+
+// A take over 60 s: a 202 job, long-polled to the end.
+int polls = 0;
+route = r => r.Method switch
+{
+    "POST" => (202, $"{{\"id\":\"job_1\",\"object\":\"transcription.job\",\"status\":\"accepted\",\"poll_url\":\"{Prefix}v1/jobs/job_1\"}}", null),
+    _ when r.Path == "/v1/jobs/job_1" => ++polls < 3
+        ? (200, "{\"id\":\"job_1\",\"status\":\"running\"}", null)
+        : (200, "{\"id\":\"job_1\",\"status\":\"succeeded\",\"result\":{\"content\":{\"text\":\"A long take.\"}}}", null),
+    _ => (404, "{\"error\":{\"code\":\"not_found\",\"message\":\"no such job\"}}", null),
+};
+string? om3 = await omi.TranscribeAsync(speech, Array.Empty<string>());
+var poll = LastRequest();
+Check(om3 == "A long take." && polls == 3, $"202 -> the job is polled until it succeeds, and its text read from result.content (\"{om3}\", {polls} polls)");
+Check(poll.Method == "GET" && poll.Query.Contains("wait=20") && poll.Query.Contains("include_result=true") && poll.Authorization == "Bearer omi-key",
+      $"the polls are long polls asking for the result inline, with the key ({poll.Query})");
+
+// The result as a download link: the key goes to Omi's own host only.
+string resultHost = "";
+string? resultAuth = null;
+route = r => r switch
+{
+    { Method: "POST" } => (202, $"{{\"id\":\"job_2\",\"status\":\"accepted\",\"poll_url\":\"{Prefix}v1/jobs/job_2\"}}", null),
+    { Path: "/v1/jobs/job_2" } => (200, $"{{\"status\":\"succeeded\",\"result\":{{\"download_url\":\"http://{resultHost}:18999/results/r2\"}}}}", null),
+    { Path: "/results/r2" } => (200, (resultAuth = r.Authorization) == null ? "{\"text\":\"From storage.\"}" : "{\"text\":\"From Omi.\"}", null),
+    _ => (404, "{}", null),
+};
+resultHost = "127.0.0.1";
+string? om4 = await omi.TranscribeAsync(speech, Array.Empty<string>());
+Check(om4 == "From Omi." && resultAuth == "Bearer omi-key", $"a result link on Omi's own host is fetched with the key (\"{om4}\")");
+resultHost = "localhost";
+string? om5 = await omi.TranscribeAsync(speech, Array.Empty<string>());
+Check(om5 == "From storage." && resultAuth == null, $"a result link on any other host (signed storage) never gets the key (\"{om5}\")");
+
+route = r => r.Method == "POST"
+    ? (202, $"{{\"id\":\"job_3\",\"status\":\"accepted\",\"poll_url\":\"{Prefix}v1/jobs/job_3\"}}", null)
+    : (200, "{\"id\":\"job_3\",\"status\":\"failed\",\"error\":{\"code\":\"audio_decode_failed\",\"message\":\"could not decode\"}}", null);
+Check(await omi.TranscribeAsync(speech, Array.Empty<string>()) == null && Logged(@"\[omi\] job job_3 failed: \[audio_decode_failed\] could not decode"),
+      "a failed job -> null, logged with Omi's error code");
+
+// Errors, and the one retry on capacity.
+route = _ => (402, "{\"error\":{\"code\":\"billing_blocked\",\"message\":\"Usage is paused.\"}}", null);
+Check(await omi.TranscribeAsync(speech, Array.Empty<string>()) == null
+      && Logged(@"\[omi\] HTTP 402: \[billing_blocked\] Usage is paused\. \(Omi usage is paused for billing"),
+      "402 -> null, logged with Omi's code and what to do about it");
+int posts = 0;
+route = _ => ++posts == 1 ? (503, "{\"error\":{\"code\":\"capacity\",\"message\":\"busy\"}}", 1) : (200, "{\"text\":\"Second try.\"}", null);
+string? om6 = await omi.TranscribeAsync(speech, Array.Empty<string>());
+Check(om6 == "Second try." && posts == 2 && Logged(@"\[omi\] HTTP 503: \[capacity\] busy.*retrying once in 1 s"),
+      $"503 with Retry-After: 1 -> one retry, logged ({posts} posts)");
+posts = 0;
+route = _ => { posts++; return (503, "{\"error\":{\"code\":\"capacity\",\"message\":\"busy\"}}", 30); };
+Check(await omi.TranscribeAsync(speech, Array.Empty<string>()) == null && posts == 1,
+      "a Retry-After too long to wait inside a dictation -> no retry; the take fails and stays journaled");
+route = null;
+
+reply = "{\"text\":\"late\"}";
+replyDelayMs = 3000;
+var swo = Stopwatch.StartNew();
+using (var cto = new CancellationTokenSource(500))
+{
+    string? om7 = await omi.TranscribeAsync(speech, Array.Empty<string>(), cto.Token);
+    swo.Stop();
+    Check(om7 == null && swo.ElapsedMilliseconds < 2500 && Logged(@"OmiTranscriber\(omi-medical\): stopped at the take's deadline"),
+          $"the take's deadline ends a slow request, logged as the deadline ({swo.ElapsedMilliseconds} ms)");
+}
+replyDelayMs = 0;
 
 listener.Stop();
 
@@ -1069,7 +1260,8 @@ static (List<(string Name, string Value)> Fields, byte[]? File) ParseMultipart(s
 }
 
 record FakeRequest(string Path, string? XiApiKey, string? XApiKey, string? Authorization,
-                   List<(string Name, string Value)> Fields, byte[]? File, bool Chunked)
+                   List<(string Name, string Value)> Fields, byte[]? File, bool Chunked,
+                   string Method = "POST", string Query = "", string Host = "")
 {
     public string? Get(string name) => Fields.FirstOrDefault(f => f.Name == name).Value;
 }

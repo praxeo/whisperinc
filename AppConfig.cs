@@ -20,6 +20,7 @@ namespace WhisperInk
         Modulate,             // Modulate Velma 2 batch: multipart upload_file, X-API-Key, model-per-endpoint (ModulateTranscriber)
         Smallest,             // Smallest.ai Waves STT: raw-body POST, Bearer auth, query-param options (SmallestTranscriber)
         Reson8,               // Reson8 prerecorded STT: raw-body POST, "ApiKey" auth, query-param options, RFC 7807 errors (Reson8Transcriber)
+        Omi,                  // Omi Health medical STT: OpenAI-style multipart, JSON-array vocabulary, 202 job + long poll past 60 s (OmiTranscriber)
     }
 
     public class ApiProvider
@@ -97,6 +98,10 @@ namespace WhisperInk
         //                            NB: on this provider an over-long list
         //                            actively DEGRADES accuracy per upstream,
         //                            rather than being merely ignored.
+        //   "omi_vocabulary"       — Omi `vocabulary`, a JSON array string of up
+        //                            to 1,000 terms, of which Omi keeps the 50
+        //                            most relevant (handled natively; the
+        //                            omi-medical-1 flagship only).
         //
         // Blank → derived from the legacy ContextBiasMode via ResolvedBiasMechanism.
         public string BiasMechanism { get; set; } = "";
@@ -1043,6 +1048,49 @@ namespace WhisperInk
                 // vocabulary exists in the console — config.json only, no
                 // recompile.
                 Reson8ExtraParams = new(),
+            },
+            new ApiProvider
+            {
+                // Omi Health — the omi-medical-1 flagship (api.omi.health,
+                // OpenAI-style multipart). OmiTranscriber handles both Omi
+                // presets: it asks for response_format=json (the default is a
+                // diarized shape), sends the shared list as `vocabulary`, and
+                // polls the job Omi makes of a take over 60 s.
+                //
+                // Language is pinned to "en" at the owner's request, which is
+                // also the fastest path; "auto" would mean dominant-language
+                // detection.
+                Id = "omi-medical",
+                BiasMechanism = "omi_vocabulary",
+                Name = "Omi Medical",
+                BaseUrl = OmiTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = OmiTranscriber.DefaultBaseUrl + OmiTranscriber.PathTranscribe,
+                TranscriptionModel = OmiTranscriber.ModelFlagship,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Omi,
+            },
+            new ApiProvider
+            {
+                // Omi Health — omi-medical-edge-1: the open Omi Med STT v1
+                // weights (Parakeet TDT 0.6B v2 plus a medical adapter), hosted.
+                // Same endpoint; the model is the `model` field. English only,
+                // no vocabulary and no language detection, so BiasMechanism is
+                // "none" and Language "en". It measures the open model without
+                // running it, which CrispASR can't do yet.
+                Id = "omi-medical-edge",
+                BiasMechanism = "none",
+                Name = "Omi Medical Edge (open model)",
+                BaseUrl = OmiTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = OmiTranscriber.DefaultBaseUrl + OmiTranscriber.PathTranscribe,
+                TranscriptionModel = OmiTranscriber.ModelEdge,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.Omi,
             }
         };
 
@@ -1068,6 +1116,7 @@ namespace WhisperInk
                 or "modulate-multilingual-fast"                            => TranscriberKind.Modulate,
             "smallest-pulse-pro" or "smallest-pulse"                       => TranscriberKind.Smallest,
             "reson8"                                                       => TranscriberKind.Reson8,
+            "omi-medical" or "omi-medical-edge"                            => TranscriberKind.Omi,
             _                                                              => TranscriberKind.Http,
         };
     }

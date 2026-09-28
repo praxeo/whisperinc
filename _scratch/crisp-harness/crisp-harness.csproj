@@ -29,6 +29,7 @@
     <Compile Include="..\..\ModulateTranscriber.cs" />
     <Compile Include="..\..\SmallestTranscriber.cs" />
     <Compile Include="..\..\Reson8Transcriber.cs" />
+    <Compile Include="..\..\OmiTranscriber.cs" />
     <Compile Include="..\..\LocalModelDiscovery.cs" />
     <Compile Include="..\..\LocalTakeSplitter.cs" />
   </ItemGroup>

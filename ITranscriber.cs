@@ -8,7 +8,7 @@ namespace WhisperInk
     /// <summary>
     /// Common surface every batch-transcription backend exposes — cloud HTTP,
     /// local CrispASR server, Google Chirp 3, Soniox, Deepgram, Modulate,
-    /// Smallest.ai, Reson8. The dispatch site
+    /// Smallest.ai, Reson8, Omi. The dispatch site
     /// in MainWindow doesn't care which backend handled the audio; it just feeds
     /// WAV bytes in and gets text back.
     ///

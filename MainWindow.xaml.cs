@@ -1366,7 +1366,7 @@ namespace WhisperInk
         // Single entry point for every batch transcription — live takes and
         // retries alike. The factory hands back the right ITranscriber for the
         // provider (cloud HTTP, auto-spawned CrispASR server, Google Chirp 3,
-        // Soniox, Deepgram, Modulate, Smallest.ai, Reson8); we don't care which
+        // Soniox, Deepgram, Modulate, Smallest.ai, Reson8, Omi); we don't care which
         // it is. Adding a new model is a config-only change — no new branches
         // here.
 

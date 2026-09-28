@@ -54,6 +54,7 @@ namespace WhisperInk
             TranscriberKind.Modulate            => new ModulateTranscriber(provider, _http, _log),
             TranscriberKind.Smallest            => new SmallestTranscriber(provider, _http, _log),
             TranscriberKind.Reson8              => new Reson8Transcriber(provider, _http, _log),
+            TranscriberKind.Omi                 => new OmiTranscriber(provider, _http, _log),
             _                                   => new HttpTranscriber(provider, _http, _log),
         };
 
