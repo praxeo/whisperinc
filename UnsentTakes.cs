@@ -29,6 +29,14 @@ namespace WhisperInk
     /// bounded — 14 days, 50 takes — so a forgotten failure can't grow
     /// without limit.
     ///
+    /// With <see cref="ArchiveFolder"/> set (the owner's "Keep all audio"),
+    /// nothing here is ever deleted: a take that leaves the journal —
+    /// delivered, delivered by a retry, or past retention — is moved to
+    /// archive\yyyy-MM\ with its sidecar, which then also carries the text it
+    /// produced. That's every take that reached a provider, kept for good, so
+    /// models can later be compared on real dictation. A move that fails
+    /// leaves the take where it was, and says so.
+    ///
     /// Disk writes run off the dictation path; each take's later
     /// delete/update is chained after its own write, so the two can't race.
     /// </summary>
@@ -42,6 +50,8 @@ namespace WhisperInk
         // judgement was once wrong for real, quiet speech — and a take the
         // gate drops is otherwise gone. Listed apart from real failures.
         public const string Quiet = "quiet";
+        // Only ever seen in the archive: the take's text was delivered.
+        public const string DeliveredStatus = "delivered";
 
         public static readonly TimeSpan MaxAge = TimeSpan.FromDays(14);
         public const int MaxCount = 50;
@@ -56,6 +66,10 @@ namespace WhisperInk
             public double AudioSeconds { get; set; }
             public string Status { get; set; } = Pending;
             public string Reason { get; set; } = "";
+            // The text the take produced (delivered, or pasted but possibly
+            // incomplete), by ProviderName. Absent until there is one.
+            [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+            public string? Text { get; set; }
 
             [JsonIgnore] public string WavPath { get; set; } = "";
             [JsonIgnore] internal Task Saved { get; set; } = Task.CompletedTask;
@@ -76,6 +90,10 @@ namespace WhisperInk
         private readonly HashSet<string> _inFlight = new(StringComparer.Ordinal);
 
         public string Folder { get; }
+
+        /// <summary>Where takes go instead of being deleted, with their text.
+        /// Null (the default) deletes a take once its text is delivered.</summary>
+        public string? ArchiveFolder { get; set; }
 
         public UnsentTakes(string folder, Action<string>? log = null)
         {
@@ -118,8 +136,9 @@ namespace WhisperInk
             return take;
         }
 
-        /// <summary>The take's text was delivered: its audio is no longer needed.</summary>
-        public void Delivered(Take take)
+        /// <summary>The take's text was delivered: its audio leaves the journal
+        /// (to the archive when that's on, else deleted).</summary>
+        public void Delivered(Take take, string? text = null)
         {
             take.Resolved = true;
             take.Saved.ContinueWith(_ =>
@@ -127,14 +146,17 @@ namespace WhisperInk
                 lock (_gate)
                 {
                     _inFlight.Remove(take.Id);
-                    DeleteFiles(take.Id);
+                    take.Status = DeliveredStatus;
+                    take.Reason = "delivered";
+                    take.Text = text;
+                    Retire(take);
                 }
             }, TaskScheduler.Default);
         }
 
-        /// <summary>The take failed (or came back incomplete): keep its audio
-        /// for a retry, with the reason shown in the menu.</summary>
-        public void Keep(Take take, string status, string reason)
+        /// <summary>The take failed (or came back incomplete, its text given):
+        /// keep its audio for a retry, with the reason shown in the menu.</summary>
+        public void Keep(Take take, string status, string reason, string? text = null)
         {
             take.Resolved = true;
             take.Saved.ContinueWith(_ =>
@@ -144,6 +166,7 @@ namespace WhisperInk
                     _inFlight.Remove(take.Id);
                     take.Status = status;
                     take.Reason = reason;
+                    if (text != null) take.Text = text;
                     try
                     {
                         if (File.Exists(take.WavPath)) WriteMeta(take);
@@ -193,10 +216,18 @@ namespace WhisperInk
             }
         }
 
-        /// <summary>A retry delivered this take: forget it.</summary>
-        public void Remove(Take take)
+        /// <summary>A retry delivered this take, with <paramref name="provider"/>:
+        /// it leaves the journal like any delivered take.</summary>
+        public void Remove(Take take, string? text = null, ApiProvider? provider = null)
         {
-            lock (_gate) DeleteFiles(take.Id);
+            lock (_gate)
+            {
+                take.Status = DeliveredStatus;
+                take.Reason = "delivered by a retry";
+                if (text != null) take.Text = text;
+                if (provider != null) { take.ProviderId = provider.Id; take.ProviderName = provider.Name; }
+                Retire(take);
+            }
         }
 
         /// <summary>Startup: a take still marked pending was never finished
@@ -246,8 +277,8 @@ namespace WhisperInk
                     bool keep = t.RecordedAt >= cutoff &&
                                 (t.Status == Quiet ? keptQuiet++ < MaxQuietCount : kept++ < MaxCount);
                     if (keep) continue;
-                    _log($"[unsent] retention: removing {t.Id} ({t.RecordedAt:yyyy-MM-dd HH:mm}, {t.Reason})");
-                    DeleteFiles(t.Id);
+                    _log($"[unsent] retention: {(string.IsNullOrEmpty(ArchiveFolder) ? "removing" : "archiving")} {t.Id} ({t.RecordedAt:yyyy-MM-dd HH:mm}, {t.Reason})");
+                    Retire(t);
                 }
                 // A sidecar whose audio is gone has nothing left to retry.
                 foreach (var json in Directory.EnumerateFiles(Folder, "take-*.json"))
@@ -283,6 +314,43 @@ namespace WhisperInk
             take.Id = id;
             take.WavPath = wavPath;
             return take;
+        }
+
+        /// <summary>A take leaving the journal. With the archive on, its audio
+        /// moves to archive\yyyy-MM\ and its sidecar (status, provider, text)
+        /// is written beside it; if that fails, the take stays here and nothing
+        /// is deleted. With the archive off, both files are deleted.</summary>
+        private void Retire(Take take)
+        {
+            string? archive = ArchiveFolder;
+            if (string.IsNullOrEmpty(archive)) { DeleteFiles(take.Id); return; }
+
+            string wav = Path.Combine(Folder, take.Id + ".wav");
+            if (!File.Exists(wav)) { DeleteFiles(take.Id); return; }   // no audio left to keep
+            string dir = Path.Combine(archive, take.RecordedAt.ToString("yyyy-MM", CultureInfo.InvariantCulture));
+            try
+            {
+                Directory.CreateDirectory(dir);
+                // Audio first, as in Begin: a failure after this leaves
+                // archived audio with no sidecar, never a sidecar with no audio.
+                File.Move(wav, Path.Combine(dir, take.Id + ".wav"), overwrite: true);
+            }
+            catch (Exception ex)
+            {
+                _log($"[archive] could not archive {take.Id}: {ex.GetType().Name}: {ex.Message} — left in {Folder}");
+                return;
+            }
+            try
+            {
+                File.WriteAllText(Path.Combine(dir, take.Id + ".json"), JsonSerializer.Serialize(take, JsonOptions));
+                string json = Path.Combine(Folder, take.Id + ".json");
+                if (File.Exists(json)) File.Delete(json);
+                _log($"[archive] {take.Id} ({take.AudioSeconds:F1}s, {take.Status}) → {dir}");
+            }
+            catch (Exception ex)
+            {
+                _log($"[archive] {take.Id}: audio archived in {dir}, but its sidecar wasn't: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         private void DeleteFiles(string id)

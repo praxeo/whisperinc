@@ -117,7 +117,7 @@ if (args.Contains("omi-live"))
         {
             string name = Path.GetFileNameWithoutExtension(f);
             byte[] wav = File.ReadAllBytes(f);
-            double seconds = (wav.Length - 44) / 32000.0;
+            double seconds = WavSeconds(wav);   // from the header: the clips aren't 16 kHz, and not all have a 44-byte header
             using var cts = new CancellationTokenSource(TranscriptionDeadline.For(prov, seconds));
             var sw = Stopwatch.StartNew();
             string text = await t.TranscribeAsync(wav, list, cts.Token) ?? "<null>";
@@ -230,6 +230,56 @@ Check(!File.Exists(Path.Combine(ufolder, oldId + ".wav")), "retention: a take ol
 Check(afterRestart.Select(t => t.RecordedAt).SequenceEqual(afterRestart.Select(t => t.RecordedAt).OrderByDescending(x => x)), "listed newest first");
 foreach (var t in afterRestart) restarted.Remove(t);
 Check(restarted.List().Count == 0 && !Directory.EnumerateFiles(ufolder).Any(), "a retried take is removed with its sidecar");
+
+// ── The archive ("Keep all audio"): nothing leaves the journal by deletion ──
+string afolder = Path.Combine(dir, "unsent-archive-test");
+string aarchive = Path.Combine(dir, "archive-test");
+string blocker = Path.Combine(dir, "archive-blocked");
+foreach (var f in new[] { afolder, aarchive, blocker })
+{
+    if (Directory.Exists(f)) Directory.Delete(f, true);
+    if (File.Exists(f)) File.Delete(f);
+}
+var astore = new UnsentTakes(afolder, Log) { ArchiveFolder = aarchive };
+var arc1 = astore.Begin(speech, elevenStub, 4.3);
+astore.Delivered(arc1, "The patient denies chest pain.");
+string arc1Dir = Path.Combine(aarchive, arc1.RecordedAt.ToString("yyyy-MM"));
+Check(await WaitFor(() => File.Exists(Path.Combine(arc1Dir, arc1.Id + ".json")) && !File.Exists(arc1.WavPath)),
+      @"delivered with the archive on -> the audio moves to archive\yyyy-MM, not deleted");
+var arc1Json = JsonDocument.Parse(File.ReadAllText(Path.Combine(arc1Dir, arc1.Id + ".json"))).RootElement;
+Check(File.ReadAllBytes(Path.Combine(arc1Dir, arc1.Id + ".wav")).SequenceEqual(speech)
+      && arc1Json.GetProperty("Text").GetString() == "The patient denies chest pain."
+      && arc1Json.GetProperty("Status").GetString() == "delivered" && arc1Json.GetProperty("ProviderName").GetString() == "ElevenLabs Scribe",
+      "the archived WAV is byte-identical, and its sidecar has the text, status and provider");
+Check(!Directory.EnumerateFiles(afolder).Any(), @"nothing is left behind in unsent\");
+
+await Task.Delay(5);
+var arc2 = astore.Begin(speech, elevenStub, 4.3);
+astore.Keep(arc2, UnsentTakes.Incomplete, "incomplete: words stop at 20 s", "Partial text.");
+await WaitFor(() => astore.List().Count == 1);
+var arc2Kept = astore.List().Single();
+Check(arc2Kept.Text == "Partial text.", "an incomplete take keeps its pasted text in its sidecar");
+astore.Remove(arc2Kept, "The full text.", new ApiProvider { Id = "qwen3-asr-1.7b-local", Name = "Qwen3-ASR 1.7B Local" });
+var arc2Json = JsonDocument.Parse(File.ReadAllText(Path.Combine(aarchive, arc2.RecordedAt.ToString("yyyy-MM"), arc2.Id + ".json"))).RootElement;
+Check(arc2Json.GetProperty("Text").GetString() == "The full text." && arc2Json.GetProperty("ProviderName").GetString() == "Qwen3-ASR 1.7B Local"
+      && arc2Json.GetProperty("Reason").GetString() == "delivered by a retry",
+      "a take a retry delivered is archived with the retry's text and provider");
+
+string aOld = "take-20200101-000000-000";
+File.WriteAllBytes(Path.Combine(afolder, aOld + ".wav"), speech);
+File.WriteAllText(Path.Combine(afolder, aOld + ".json"),
+    $"{{\"Id\":\"{aOld}\",\"RecordedAt\":\"2020-01-01T00:00:00\",\"Status\":\"failed\",\"Reason\":\"old\"}}");
+new UnsentTakes(afolder, Log) { ArchiveFolder = aarchive }.Recover();
+Check(!File.Exists(Path.Combine(afolder, aOld + ".wav")) && File.Exists(Path.Combine(aarchive, "2020-01", aOld + ".wav"))
+      && Logged($@"\[unsent\] retention: archiving {aOld}"),
+      "a failed take past its 14 days is archived, not deleted, and the log says so");
+
+File.WriteAllText(blocker, "a file where the archive folder should be");
+var bstore = new UnsentTakes(afolder, Log) { ArchiveFolder = blocker };
+var blk1 = bstore.Begin(speech, elevenStub, 4.3);
+bstore.Delivered(blk1, "text");
+Check(await WaitFor(() => Logged($@"\[archive\] could not archive {blk1.Id}")) && File.Exists(blk1.WavPath),
+      @"an archive that can't be written leaves the take in unsent\, never deleted");
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 0f. SpeechDetector (the silence gate) ==");
@@ -1087,6 +1137,22 @@ return failures == 0 ? 0 : 1;
 // ── helpers ─────────────────────────────────────────────────────────────
 
 static string Esc(string s) => s.Replace("\r", "\\r").Replace("\n", "\\n");
+
+// A WAV's length in seconds, walking its chunks for `fmt ` (the byte rate) and
+// `data`, since recorders put other chunks (JUNK, LIST, …) before them.
+static double WavSeconds(byte[] wav)
+{
+    int byteRate = 0;
+    for (int pos = 12; pos + 8 <= wav.Length;)
+    {
+        string id = Encoding.ASCII.GetString(wav, pos, 4);
+        int size = BitConverter.ToInt32(wav, pos + 4);
+        if (id == "fmt ") byteRate = BitConverter.ToInt32(wav, pos + 16);
+        if (id == "data") return byteRate > 0 ? Math.Min(size, wav.Length - pos - 8) / (double)byteRate : 0;
+        pos += 8 + size + (size & 1);
+    }
+    return 0;
+}
 
 static string Describe(LocalTakeSplitter.Split? sp) => sp == null ? "sent whole"
     : string.Join(" + ", sp.Pieces.Select(p => sp.Seconds(p.Length).ToString("F1"))) + " s"

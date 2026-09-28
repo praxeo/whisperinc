@@ -32,18 +32,19 @@ Its main use is **clinical dictation**: exam findings and notes pasted straight 
 
 | | |
 |---|---|
-| `main` | **One commit ahead of `origin`** (`praxeo/whisperinc`, **public**): the Omi provider, 2026-09-28, not pushed. `origin` was last pushed on 2026-09-28 with the CrispASR v0.8.38 update. Before that push, the Voxtral brief's local path to the CrispASR clone, which named the machine's user, was replaced with `..\CrispASR` (the brief is now `59dc0df`, not `8f1268a`). Commit and push only when the owner asks |
-| Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of the Omi provider commit (2026-09-28). Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
-| Active provider (desktop) | `qwen3-asr-1.7b-local` from 14:18 on 2026-09-28, which gets only the 21 shared terms, not the Scribe keyterms. `elevenlabs` (Scribe v2, streamed) earlier that day and on 2026-09-26. Before that, briefly `local-orukeet-q4_k` (2026-09-24), which broke a control on the clinical clips ([4.3](#43-context-biasing)), and `elevenlabs-medical`. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
-| Vocabulary | 21 terms in the shared Context Bias list and 228 Scribe-only keyterms, so 249 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
+| `main` | **Two commits ahead of `origin`** (`praxeo/whisperinc`, **public**): the Omi provider and Keep all audio, both 2026-09-28, not pushed. `origin` was last pushed on 2026-09-28 with the CrispASR v0.8.38 update. Before that push, the Voxtral brief's local path to the CrispASR clone, which named the machine's user, was replaced with `..\CrispASR` (the brief is now `59dc0df`, not `8f1268a`). Commit and push only when the owner asks |
+| Running build (desktop) | `_publish\WhisperInk.exe`, a self-contained single-file publish of the Keep all audio commit (2026-09-28). Old test builds `%USERPROFILE%\WhisperInk-step0\` and `-step1\` are stale; launching one alongside `_publish` gives two apps answering Ctrl+Space |
+| Active provider (desktop) | `omi-medical-edge` at 15:45 on 2026-09-28, while it was being tested. Earlier that day the owner tried Gemma 4 E2B and Canary-Qwen with ➕, and before those `qwen3-asr-1.7b-local` (from 14:18), which gets only the shared list, not the Scribe keyterms. `elevenlabs` (Scribe v2, streamed) that morning and on 2026-09-26. Before that, briefly `local-orukeet-q4_k` (2026-09-24), which broke a control on the clinical clips ([4.3](#43-context-biasing)), and `elevenlabs-medical`. **Read `config.json` → `ActiveProviderId` rather than trusting this line**; it has changed often |
+| Vocabulary | 18 terms in the shared Context Bias list since 2026-09-28 (the owner added `Qwen3-ASR`, fixed `Unsloth` and dropped CUDA, Vulkan, GGUF and SJS/TEN; the measurements before then used 21) and 228 Scribe-only keyterms, so 246 go to ElevenLabs on every take. Over 100, ElevenLabs bills each take as at least 20 s |
 | Local ASR | CrispASR **v0.8.38** CUDA (prebuilt release) in `%APPDATA%\.WhisperInk\cohere-gguf\`, deployed 2026-09-28 after an A/B against v0.8.30 ([5.2](#52-updating-prebuilt-releases-the-normal-path)); v0.8.30 is in `.old-2026-09-28-1302\`. It carries upstream's fixes for both CrispASR bugs WhisperInk reported: Voxtral 3B no longer returns a page of `<unk>` with the bias list (#472), and the server no longer transcribes a piece of silence it cut from a long take (#471). Best local preset: `qwen3-asr-1.7b-local`, still the only one with all six clinical clips right with the list ([4.3](#43-context-biasing)). It runs in 60 s pieces, and WhisperInk cuts its longer takes at pauses itself (2026-09-24/25); keep that, since upstream's fix judges a piece by its loudest 100 ms ([10.3](#103-backlog)). Voxtral Mini 3B (the shipped `voxtral-local`) now works with the list, 5 of 6 clips: it misses *ureterolithiasis* on the clip alone. New models are added by dropping the GGUF in that folder and clicking ➕ ([6.1](#61-add-a-provider)); on 2026-09-24 the owner added Orukeet (8200) and Granite 2B Plus (8201) that way, and parakeet-ultra is downloaded and offered |
-| In progress | The Omi Health presets `omi-medical` and `omi-medical-edge` ([4.13](#413-omi-health)), committed and deployed 2026-09-28. The harness passes; `omi-live` waits on the owner's Omi key |
+| Audio archive (desktop) | **Keep all audio is on** since 2026-09-28 (`KeepAudio: true`): every take's audio and text goes to `%APPDATA%\.WhisperInk\archive\` for good. Before then, delivered takes' audio was deleted, so there's no real dictation audio from earlier ([3.5](#35-reliability-never-lose-a-dictation)) |
+| Omi | The Omi Health presets `omi-medical` and `omi-medical-edge` ([4.13](#413-omi-health)), committed and deployed 2026-09-28, keys set, measured live the same day: neither is fit for charting, and the open model isn't worth running locally |
 | Machines | Desktop: 2× RTX 3090 (`nvidia-smi` on 2026-09-24 listed only these two; the RTX 3080 noted earlier didn't show), CUDA. Laptop: 8-core Ryzen 5825U on CPU, still a pre-v0.7 CrispASR. `config.json` is per machine |
 | Open work | [Part 10](#part-10--roadmap-and-open-questions) |
 
 ## 1.3 The rules that don't bend
 
-1. **Never lose a dictation.** Every take that passes the guards is journaled to `%APPDATA%\.WhisperInk\unsent\` (the WAV and a sidecar, queued before transcription starts). It is deleted only once its text is delivered, and kept with a reason on every other outcome, including a crash (see [3.5](#35-reliability-never-lose-a-dictation)). The newest few takes the silence guard drops are kept too, in case one was quiet speech. A change to the stop path that can drop a take is a bug, even on an error path.
+1. **Never lose a dictation.** Every take that passes the guards is journaled to `%APPDATA%\.WhisperInk\unsent\` (the WAV and a sidecar, queued before transcription starts). It is deleted only once its text is delivered, and kept with a reason on every other outcome, including a crash (see [3.5](#35-reliability-never-lose-a-dictation)). With **Keep all audio** on, "deleted" becomes "moved to `archive\` with its text": the journal then never deletes audio at all. The newest few takes the silence guard drops are kept too, in case one was quiet speech. A change to the stop path that can drop a take is a bug, even on an error path.
 2. **Never paste into the wrong place.** Text is pasted only when the window the take *started* in is verifiably in front. Otherwise it goes to the clipboard with a warning. Log window handles, never titles, because titles can carry patient names.
 3. **Fail loudly.** Every failure gets the Error tone, a status and a `debug.log` line. "Delivered, but check it" gets the Warn tone. `Success` means *all of it, pasted where you were typing* and nothing less. A silent failure, such as a backend returning empty text or a mic that quietly stopped, has been the worst bug class in this codebase.
 4. **Nothing slow on the hotkey path, or on the UI thread at all.**
@@ -217,6 +218,7 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 | `debug.log`, `debug.previous.log` | This session's log and the one before. They contain transcript text |
 | `history.json` | The last 100 delivered transcripts, newest first, **in plain text** (`{Timestamp, Text, TimeStr}`) |
 | `unsent\` | `take-yyyyMMdd-HHmmss-fff.wav` plus a `.json` sidecar for every undelivered take |
+| `archive\yyyy-MM\` | With Keep all audio on: every take that reached a provider, its WAV plus a sidecar with the text it produced, the provider and the outcome. Kept for good, about 2 MB a minute ([3.5](#35-reliability-never-lose-a-dictation)) |
 | `cohere-gguf\` | `crispasr.exe`, its DLLs, every `*.gguf` model, and `.old-*` backups from CrispASR updates |
 | `google-chirp3-sa.json` | The Chirp 3 service-account credential; `config.json` points to it |
 
@@ -281,7 +283,7 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 
 `config.json` is read by hand in `MainWindow.LoadConfig` (`JsonDocument`, one try/catch around everything) and written by `SaveConfig`, whole-file, with enums as strings.
 
-**Root keys.** All 18 are read and written.
+**Root keys.** All 19 are read and written.
 
 | Key | Default | Notes |
 |---|---|---|
@@ -298,6 +300,7 @@ A typical 3–10 s take: capture 5–45 ms (the post-roll wait), transcription ~
 | `SilenceThreshold` | 0.003 | Whole-take RMS under which a take *may* be silent: it's dropped only if `SpeechDetector` also finds no sustained speech. Clamped 0–0.5; 0 disables the gate |
 | `ClipboardRestoreMs` | 1000 | How long after a paste the old clipboard is put back ([3.7](#37-delivery-textinjectorcs-mainwindowdeliverasync)). Clamped 250–10000; read only if it's a JSON number |
 | `StreamUpload` | true | Read only if it's a JSON bool |
+| `KeepAudio` | false | "🗄 Audio archive ▸ Keep all audio". Keeps every take's audio and text in `archive\` for good. Read only if it's a JSON bool |
 | `CrispGpuBackend` | `auto` | Normalized to auto/cpu/vulkan/cuda/metal. The menu doesn't offer metal |
 | `QuitOnClose` | false | |
 | `LaunchAtStartup` | false | The registry value wins at startup |
@@ -409,6 +412,12 @@ This was ported from `praxeo/elevenlabs-web`, the clinical web app (`worker.js`:
   - At startup, `Recover()` turns anything still `pending` into `interrupted` (the app closed, crashed or rebooted mid-take) and prunes to 14 days / 50 takes. A balloon says how many are waiting.
   - Takes the silence gate drops are kept too, with status `quiet`: the newest 5 (`MaxQuietCount`), on their own allowance so they can never push a real failure out. They're listed under ↻ Unsent → 🔇 Judged silent and left out of the startup count. A retry of one that comes back empty stays there ("Nothing heard", Dismissed) instead of becoming a failure, and one whose retry fails also keeps its place.
   - The folder is deliberately not OneDrive-synced, because this is clinical audio.
+- **The archive** (`UnsentTakes.ArchiveFolder`, set by `KeepAudio`; since 2026-09-28, at the owner's request, to compare models on real dictation later).
+  - With it on, every place the journal would delete a take moves it to `%APPDATA%\.WhisperInk\archive\yyyy-MM\` instead (`Retire`): a delivered take, one a retry delivered, and one past the 14-day / 50-take retention, the judged-silent ones included.
+  - The sidecar written beside the WAV carries `Text` (what was pasted, or copied by a retry), the provider that produced it, `Status` (`delivered`, or the status it had) and `Reason`. An `incomplete` take keeps its pasted text in its unsent sidecar too, so the text survives until it's archived.
+  - The audio moves first, then the sidecar is written. If the move fails, the take stays in `unsent\` and `[archive] could not archive …` is logged: the archive never costs a take.
+  - Taps and discarded takes never reach the journal, so they aren't archived. Nothing prunes the archive.
+  - Like `unsent\`, it's under `%APPDATA%`, not OneDrive, and the support bundle leaves it out.
 - **↻ Unsent dictations** (both menus) lists the newest 10 takes, each with:
   - *Retry with {active provider}*;
   - *Retry on {local model} (local fallback)*, for each local preset whose exe and GGUF are on disk;
@@ -500,6 +509,7 @@ Safety rules:
 | 🎯 Context Bias Terms | Both | Modal editor for the shared list |
 | 📋 History | Both | The history window: HH:mm times only, Copy and Delete per row, no search |
 | ↻ Unsent dictations (N) ▸ | Both | The newest 10 takes, each with Retry with {active}, Retry on {local} (local fallback) and Show audio file; then an overflow line, 🔇 Judged silent (M) ▸ with the same actions for the takes the silence gate dropped (not counted in N), and 📂 Open unsent folder |
+| 🗄 Audio archive ▸ Keep all audio ✓ / 📂 Open archive folder | Both | `SetKeepAudio`: saves `KeepAudio` and points the journal at `archive\` (or away from it) at once. Turning it off leaves the archive as it is |
 | 🖥 Local GPU backend ▸ Auto / Vulkan / CUDA / CPU | Both | Tooltip = the GPU probe. A change runs `DropAll()` |
 | 📂 Open config folder / Open debug log / Open model folder | Both | "Model folder" is always `cohere-gguf`, even if a preset sets `LocalModelFolder` |
 | Copy support bundle | Both | See below |
@@ -557,6 +567,7 @@ Safety rules:
 | `[stream]` | The streamed upload | `[stream] elevenlabs-medical: 110400 bytes streamed (3.5 s); waiting for the transcript` |
 | `[mic]` | The capture device | `[mic] released after 180s idle` |
 | `[unsent]`, `[retry]` | The journal and retries | `[unsent] kept take-… (1.0s, …) for a retry: …` |
+| `[archive]` | Takes moved to the archive, and the toggle | `[archive] take-… (3.5s, delivered) → …\archive\2026-09`, `[archive] could not archive take-…: … — left in …\unsent` |
 | `[models]` | The model folder and models added from it. Files already there at startup are only mentioned if something is wrong with them | `[models] new model file: orukeet-q4_k.gguf · 384 MB · Parakeet (parakeet)`, `[models] added provider local-orukeet-q4_k on port 8200: …`, `[models] local-orukeet-q4_k loaded in 2100 ms` |
 | `[keyterms]`, `[scribe]` | The ElevenLabs request | `[keyterms] sending 249 terms`, `[scribe] last word ends at 10.5 s; decoded 11.0 s of audio` |
 | `[hook-watchdog]` | Hook reinstalled | Some after quiet periods are false positives ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)) |
@@ -607,8 +618,8 @@ The shipped presets (`ApiProvider.CreateDefaults()`). "Status" is the desktop as
 | `modulate`, `modulate-english-fast`, `modulate-multilingual-fast` | `Modulate` | Velma 2 batch; the model is the endpoint path | Key set. **Rejected 2026-08-29**: a 6× latency variance spike, 0/5 first-word capitalization, and English Fast discards bias terms |
 | `smallest-pulse-pro`, `smallest-pulse` | `Smallest` | Waves Pulse Pro (English) and Pulse (multilingual) | Key set. **No biasing surface at all.** Pulse Pro wrote *hematemesis* for *hematochezia* — avoid for clinical work |
 | `reson8` | `Reson8` | Prerecorded, `phrases` biasing, `custom_model_id` | Key set. **Live-tested 2026-08-29**: fixed 3/3 hard terms with a 3-term list, but the full 17-term list turned one *hematochezia* into *hematemesis*. Warm latency 686–926 ms. Keep its list tight |
-| `omi-medical` | `Omi` | Omi Health `omi-medical-1`: medical ASR, `vocabulary` biasing, $0.29/audio-hour batch | Added 2026-09-28. No key yet, not measured ([4.13](#413-omi-health)) |
-| `omi-medical-edge` | `Omi` | Omi Health `omi-medical-edge-1`: the open Omi Med STT v1 weights, hosted. English only, no biasing, $0.10/audio-hour | Added with `omi-medical`. The way to measure the open model before running it locally |
+| `omi-medical` | `Omi` | Omi Health `omi-medical-1`: medical ASR, `vocabulary` biasing, $0.29/audio-hour batch | Added and key set 2026-09-28. **Not for charting**: 5/6 clips with the list but a broken control, *haematemesis* without it, and the list silently dropped on a 111 s take ([4.13](#413-omi-health)) |
+| `omi-medical-edge` | `Omi` | Omi Health `omi-medical-edge-1`: the open Omi Med STT v1 weights, hosted. English only, no biasing, $0.10/audio-hour | Added with `omi-medical`. 3/6 clips: the hard terms missed as Parakeet v3 misses them. Slow (0.7–2.1 s a clip) |
 | `mistral` | `Http` | Voxtral batch, `context_bias` (≤100) | No key on the desktop |
 | `openai` | `Http` | `whisper-1`, prompt glossary | No key on the desktop |
 | `cohere-api` | `Http` | Cohere Transcribe v2 cloud, temp 0.1, **no biasing field** | No key on the desktop |
@@ -630,6 +641,7 @@ GGUFs on the desktop, in `cohere-gguf\`:
 - voxtral-mini-3b-2507 q4_k (downloaded 2026-09-24 with `get-model.ps1`, 2.5 GB, from `cstr/voxtral-mini-3b-2507-GGUF`; Apache-2.0). The shipped `voxtral-local`'s glob matches it, so it isn't offered under ➕. How it did: [4.3](#43-context-biasing);
 - gemma4-e2b-it q8_0 (a general model; crispasr runs it as `gemma4-e2b`, so it's offered under ➕ too). **Not for dictation**: on the clips it invented six sentences of history after one of them and ignored the list ([4.3](#43-context-biasing));
 - orukeet q4_k (downloaded 2026-09-24 with `get-model.ps1`, 402 MB, from `cstr/orukeet-GGUF`; a Parakeet TDT 0.6b v3 fine-tune, CC-BY-SA-4.0). The owner added it with ➕ as `local-orukeet-q4_k`, port 8200. On the clinical clips it's no better than its base on the hard terms and breaks a control ([4.3](#43-context-biasing));
+- vibevoice-asr q8_0 (downloaded 2026-09-28 with `get-model.ps1`, 9.4 GB, from `cstr/vibevoice-asr-GGUF`; Microsoft, MIT). **Removed the same day** at the owner's request, both the file (to the Recycle Bin) and the `local-vibevoice-asr-q8_0` provider the owner had added with ➕. It's **not for push-to-talk**: it turns short takes into "[Unintelligible Speech]", "[Music]" or invented sentences. It takes the list only as `--context` at server start, which a ➕ provider doesn't pass ([4.3](#43-context-biasing));
 - canary-qwen-2.5b q8_0 (downloaded 2026-09-28 with `get-model.ps1`, 4.4 GB, from `cstr/canary-qwen-2.5b-GGUF`; NVIDIA, CC-BY-4.0; the only size NVIDIA released). Offered under ➕. Worse than Qwen3 with the list on the clips, and it can't take the list at all ([4.3](#43-context-biasing));
 - parakeet-ultra q4_k (downloaded 2026-09-24, 402 MB, from `cstr/parakeet-ultra-GGUF`; moondream's post-trained v3, CC-BY-4.0, better than v3 on every general benchmark its card lists). Offered under ➕. On the clinical clips it matches its base exactly: no gain on the hard terms, no harm to the controls.
 
@@ -705,6 +717,11 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 | Voxtral 4B Realtime (`voxtral4b-local`) ± the 21-term list, same day (09-24) | ✗ "hematokinesia" ×2 | ✗ "be reader with ISIS" | ✓; the list changed nothing. 520–850 ms a clip |
 | Gemma 4 E2B q8_0 (`gemma4-e2b`), no hint, ± the 21-term list, on CPU (09-28) | ✓✓ natively, but **`hematochezia_1` came back with six invented sentences** ("The patient had a history of chronic constipation. …"), numbered | ✗ "a reruatitis" | ✗ "ureteral colic" → "ocular"; `neutral` numbered "1..". The list changed nothing. 7–17 s a clip on CPU |
 | **Canary-Qwen 2.5B** q8_0 (`canary-qwen`, no hint), ± the 21-term list, CUDA (09-28) | ✗ "hematychosis" / "haemorrhage" | ✗ "uretero with ISIS" | ✓ all three. The list changed nothing: its backend reads neither `hotwords` nor `prompt`. In the 32 s takes it got *hematochezia* 3 of 4 times but split *ureterolithiasis* ("uretero lithiasis"), and it ran sentences together ("pain.On"). 190–320 ms a clip, Qwen3's speed |
+| **VibeVoice-ASR 7B** q8_0 (`vibevoice`, no hint), no list, GPU (09-28) | ✗ "menorrhea", "hematemesis" | ✗ "[Unintelligible Speech]" | ✗ `biliary_colic` → "[Unintelligible Speech]"; "ureteral colic" → "Hey, reports a very original colleague right heading to the grind". 1/6. 550–850 ms a clip |
+| VibeVoice-ASR 7B + the 18-term list as `--context` at server start (09-28) | ✗ "metachasia" / ✓ in a garbled sentence ("Alexander was bright red blood, correct, and consistent with hematochezia") | ✗ "[Unintelligible Speech]" | ✗ "irritable colic, right? I need to get to the groin". 3/6. The 16 kHz copies of the clips did no better: "[Music]" for a whole clip, invented text ("To take it from your radio with us, it's on the website"). **On the 111 s take in one pass (`chunk_seconds=0`) with the list it was perfect**: 3/3 sentences, 6/6 *hematochezia*, 3/3 *ureterolithiasis*, no tags. In the server's 30 s pieces it wrote *menorrhea* and *hematemesis* and a "[Music]" tag. Without the list, *hematemesis* throughout. 2.6 s for 32 s, 9 s for 111 s |
+| **Omi Edge** (`omi-medical-edge-1`: the open Omi Med STT v1, hosted), live API (09-28) | ✗ "hematochesia" ×2, like its base family | ✗ "uretherethiasis" | ✓ all three. Same misses in the 32 s and 111 s takes. 0.7–2.1 s a clip, 4.1 s for the first |
+| **Omi flagship** (`omi-medical-1`), no list, live API (09-28) | ✗ **"haematemesis" ×2** (clinically opposite, British spelling) | ✗ "ureteral atresia" | ✗ "ureteral colic" → "urticarial colic". 300–430 ms a clip |
+| **Omi flagship** + the 18-term list, live API (09-28) | ✓✓ | ✓ | ✗ "ureteral colic" → "uricrol colic". The 32 s take was all right; **in the 111 s take Omi dropped the list** (its safety fallback) and wrote *hematemesis* for every *hematochezia*, all lowercase ([4.13](#413-omi-health)) |
 | `cohere-local-q6k` (06-14) | ✗ "hematokesia" | ✗ "ureter with Isis" | ✓; biasing byte-identical |
 | `smallest-pulse-pro` (08-29) | ✗ **hematemesis** (clinically opposite) | ✗ | ✓ |
 | `smallest-pulse` (08-29) | ✗ "hematochesia" | ✗ "ureterithiasis" | ✓ |
@@ -917,7 +934,13 @@ Each local preset runs its own `crispasr.exe --server` on its own port ([Part 5]
 - Processing is in the EU (eu-central-1). Uploaded audio is deleted once processed. A job's result is kept until the expiry set in the console (24 h default, 1–72 h).
 - **For patient audio, Omi asks for its self-serve BAA to be signed in the console first.** A GDPR DPA is accepted at signup.
 
-**Proof so far.** Harness section 1c (20 checks against the fake server): the field set, vocabulary, Edge's limits, the job flow, the result-link host rule, errors, the retry and the deadline. Not yet run against the live API.
+**Proof so far.** Harness section 1c (20 checks against the fake server): the field set, vocabulary, Edge's limits, the job flow, the result-link host rule, errors, the retry and the deadline. Live (2026-09-28, `omi-live`, 25/25 checks): every take came back, and the 111 s take went through a job (4.7–8.1 s after upload). The accuracy is in the clips table ([4.3](#43-context-biasing)).
+
+**Verdict (2026-09-28): not for charting.**
+- **The flagship's list is dropped on long takes, and nothing tells WhisperInk.** On `long_3x_six` (111 s) with the 18-term list, Omi's own audit (`response_format=verbose_json`, field `vocabulary`) reported `"safety_fallback": true`: "hinted output was not retained; safety fallback returned the plain transcript". All 18 terms were dropped, and the plain transcript wrote *hematemesis* for every *hematochezia*, in lowercase. On a 5 s clip the same list was prompted and applied. `OmiTranscriber` asks for `json`, which doesn't carry the audit, so such a take is pasted with the Success tone. Using Omi for real would need `verbose_json` and a Warn when `safety_fallback` is true.
+- **Without the list** it wrote *haematemesis*, the clinically opposite term, for *hematochezia*.
+- **With or without the list** it broke the `ureteral_colic` control.
+- **Edge**, the open model, is no better than Parakeet v3 on the hard terms, so it isn't worth running locally ([10.1](#101-waiting-on-the-owners-call)). It was also slow, at 0.7–2.1 s a clip (4.1 s for the first).
 
 ---
 
@@ -1288,8 +1311,8 @@ The harnesses compile the **shipping source files directly** (each csproj `Compi
 ```powershell
 cd _scratch\crisp-harness
 .\make-speech.ps1               # once per machine: writes speech.wav (TTS). It's git-ignored, and every run reads it, even `fast`
-dotnet run -c Release -- fast   # 198 checks, ~30 s, no API calls, no crispasr
-dotnet run -c Release           # full: 219 checks, adds the real crispasr.exe on CPU and a 16 s slow-server check
+dotnet run -c Release -- fast   # 205 checks, ~30 s, no API calls, no crispasr
+dotnet run -c Release           # full: 226 checks, adds the real crispasr.exe on CPU and a 16 s slow-server check
 dotnet run -c Release -- qwen-live   # the shipped Qwen3 preset on the GPU over _join_clips.ps1 -Tails takes (needs the owner's clips)
 dotnet run -c Release -- omi-live    # both Omi presets on the LIVE API: the clips, the 32 s joined take, a 111 s take (the job path). Uses Omi hours
 ```
@@ -1299,7 +1322,7 @@ dotnet run -c Release -- omi-live    # both Omi presets on the LIVE API: the cli
 | 0a | 9 | `TranscriptionDeadline` values and caps |
 | 0b | 7 | ElevenLabs transcript cleanup |
 | 0c | 11 | `TranscriptCoverage` on synthetic WAVs |
-| 0d | 12 | `UnsentTakes`: deliver, keep, crash recovery, orphan WAV, retention, ordering |
+| 0d | 19 | `UnsentTakes`: deliver, keep, crash recovery, orphan WAV, retention, ordering; and the archive: a delivered take moved (byte-identical, with its text, status and provider), an incomplete take's text kept, a retry's text and provider, retention archiving instead of deleting, and an archive that can't be written leaving the take in `unsent\` |
 | 0e | 23 | Provider resolution (ElevenLabs auth, model field, bias), `InheritFromSibling`, the Granite glob and its repair, Qwen3's 60 s pieces and their repair |
 | 0f | 12 | `SpeechDetector` on synthetic audio over a noise floor. Dropped as silent: the 2026-09-23 silent take, a fan, clicks. Sent: quiet speech at that evening's level (RMS under 0.003), a cold-mic take with no pre-roll, a short phrase in a 30 s hold, and loud steady noise. Also fail-open, digital zero, and a disabled gate |
 | 0g | 4 | Takes judged silent: only the newest 5 kept, never pushing out a real failure, and left out of the startup count |
@@ -1435,7 +1458,7 @@ After touching any of these, deploy ([1.4](#14-build-test-deploy)) and have the 
 
 ## 9.1 Timeline
 
-All 71 commits (as of the Omi provider, 2026-09-28) are linear on `main`; feature branches are fast-forwarded.
+All 72 commits (as of Keep all audio, 2026-09-28) are linear on `main`; feature branches are fast-forwarded.
 
 | Date | Commit(s) | What changed |
 |---|---|---|
@@ -1458,7 +1481,8 @@ All 71 commits (as of the Omi provider, 2026-09-28) are linear on `main`; featur
 | 09-24 | `29b2c79` | **Drop-in local models**: a GGUF copied into the model folder is offered under 🔌 Provider ▸ ➕ and becomes a provider in one click, loaded at once (`LocalModelDiscovery.cs`, `WarmUpAsync`); `scripts\get-model.ps1`; crispasr's backend detection checked for every model on disk, so added models pass no `--backend` |
 | 09-25 | the two commits after `ecd81e2` | Voxtral Mini 3B measured: the best local model without a list, and a CrispASR tokenizer bug that breaks it with the owner's list. **Qwen3 no longer recites the bias list into long takes**: 60 s pieces, and WhisperInk cuts a longer take at its own pauses (`LocalTakeSplitter`); [CrispASR#471](https://github.com/CrispStrobe/CrispASR/issues/471) filed |
 | 09-28 | the commit after `59dc0df` (no app code changed) | **CrispASR v0.8.38 deployed** after an A/B against v0.8.30 ([5.2](#52-updating-prebuilt-releases-the-normal-path)): upstream's fixes for #471 and #472, so Voxtral 3B works with the list and no server-cut piece of silence reaches a model; Parakeet v3's encoder scaling fixed. With it, the A/B tooling: `_local_bias_ab.ps1 -Exe/-Csv`, `_ab_compare.ps1`, `update-crispasr.ps1 -Zip` (and `-Tag` required), `restore-crispasr.ps1` |
-| 09-28 | the commit after `c1ae9b2` | **Omi Health provider** (`OmiTranscriber`, presets `omi-medical` and `omi-medical-edge`, both English): `vocabulary` as a JSON array, takes over 60 s through Omi's job path, one retry on capacity; harness section 1c and `omi-live`. With it, the local-model survey: Canary-Qwen 2.5B and Gemma 4 E2B measured and rejected, 249 list terms measured on Qwen3, and the candidates still untested (VibeVoice-ASR, MedASR, Omi Med STT) |
+| 09-28 | `474c4f0` | **Omi Health provider** (`OmiTranscriber`, presets `omi-medical` and `omi-medical-edge`, both English): `vocabulary` as a JSON array, takes over 60 s through Omi's job path, one retry on capacity; harness section 1c and `omi-live`. With it, the local-model survey: Canary-Qwen 2.5B and Gemma 4 E2B measured and rejected, 249 list terms measured on Qwen3, and the candidates still untested (VibeVoice-ASR, MedASR, Omi Med STT) |
+| 09-28 | the commit after `474c4f0` | **Keep all audio**: with `KeepAudio` on, the journal moves every take it would delete to `archive\yyyy-MM\` with its text and provider (`UnsentTakes.ArchiveFolder`, `Retire`), and never deletes audio. With it, the live results: both Omi models rejected for charting (the flagship dropped the list on a 111 s take), VibeVoice-ASR rejected for push-to-talk; `omi-live` reads WAV lengths from the header |
 
 ## 9.2 Decided against: don't re-propose without new evidence
 
@@ -1477,6 +1501,9 @@ All 71 commits (as of the Omi provider, 2026-09-28) are linear on `main`; featur
 | `file_format=pcm_s16le_16` without streaming | 09-23 | Measured no gain |
 | A regional ElevenLabs host | 09-23 | Global routing already lands in `us-central1` |
 | Granite as a biased local option | 09-23 | Biasing rewrote a correct term; lowercase output |
+| Canary-Qwen 2.5B, Gemma 4 E2B | 09-28 | Canary-Qwen: 0/3 hard terms and can't take the list. Gemma: invented six sentences after a clip |
+| VibeVoice-ASR 7B for dictation | 09-28 | Short takes come back as "[Unintelligible Speech]", "[Music]" or invented text, with or without the list. Only good on long recordings in one pass |
+| Omi Health (flagship or Edge) for charting | 09-28 | Flagship: *haematemesis* without the list, a broken control with it, and the list silently dropped on a 111 s take. Edge, the open model: Parakeet v3's misses, slowly. The presets stay in the code |
 
 ---
 
@@ -1488,15 +1515,16 @@ All 71 commits (as of the Omi provider, 2026-09-28) are linear on `main`; featur
   - accept it;
   - switch back to `elevenlabs`;
   - add a deterministic "end with a period" rule. That's post-processing, so ask first.
-- **The keyterm list.** 249 terms bill every take as at least 20 s, and Medical got the clinical clips right with none. Trim it below 100 (keep names, brands and wound-care products) after a few days on Medical? The shared list also has a typo, "Unslolth".
+- **The keyterm list.** 249 terms bill every take as at least 20 s, and Medical got the clinical clips right with none. Trim it below 100 (keep names, brands and wound-care products) after a few days on Medical?
 - **Transcripts at rest.**
   - They sit in `debug.log` (`result:` and HTTP-preview lines), `history.json`, `unsent\`, the Desktop support bundle, and `MyRecordings\temp_audio.wav`. The last two are OneDrive-synced.
+  - With Keep all audio on (the owner's choice, 2026-09-28), `archive\` also holds every take's audio and text for good, unencrypted, on this PC only.
   - The options: a "no transcripts in the log" switch, redaction at bundle time, and moving the debug WAV out of OneDrive.
 - **A local model as the primary?** `qwen3-asr-1.7b-local` is the candidate: 6 of 6 clips with the list. `voxtral-local` (Voxtral Mini 3B) works with the list since CrispASR v0.8.38 (2026-09-28) and uses a take's context best, but misses *ureterolithiasis* on the clip alone ([4.3](#43-context-biasing)). Measure against ElevenLabs on real recordings first.
-  - **Nothing open beats it yet (survey, 2026-09-28).** Qwen3-ASR 1.7B leads the Open ASR Leaderboard's open models on general English (4.31% average WER), and no open model has third-party medical numbers. The cloud lead is medical training data. Canary-Qwen and Gemma 4 E2B were measured on the clips and lost ([4.3](#43-context-biasing)). Still untested, in order:
-    - **VibeVoice-ASR 7B** (Microsoft, Jan 2026; `cstr/vibevoice-asr-GGUF`, q8_0 9.45 GB): a CrispASR drop-in (`vibevoice`), and the only open model trained to read a keyword list. CrispASR takes the list only as `--context` at server start (`params.context`; there's no per-request field, checked in v0.8.38's `crispasr_server.cpp`), so using it for real means a respawn when the list changes. General WER 5.58%.
+  - **Nothing open beats it (survey, 2026-09-28).** Qwen3-ASR 1.7B leads the Open ASR Leaderboard's open models on general English (4.31% average WER), and no open model has third-party medical numbers. The cloud lead is medical training data. Canary-Qwen, Gemma 4 E2B, VibeVoice-ASR and Omi Med STT (hosted) were measured on the clips and lost ([4.3](#43-context-biasing)). The candidates:
+    - **VibeVoice-ASR 7B** (Microsoft, Jan 2026; `cstr/vibevoice-asr-GGUF`, q8_0 9.45 GB): a CrispASR drop-in (`vibevoice`), and the only open model trained to read a keyword list. CrispASR takes the list only as `--context` at server start (`params.context`; there's no per-request field, checked in v0.8.38's `crispasr_server.cpp`), so using it for real means a respawn when the list changes. General WER 5.58%. **Measured 2026-09-28: built for long recordings, unfit for push-to-talk.** On 5 s clips it scored 1/6 without the list and 3/6 with it, turning whole clips into "[Unintelligible Speech]", "[Music]" or invented sentences, at 16 kHz too. On a 111 s take in one pass with the list it was perfect; in 30 s pieces it wasn't.
     - **Google MedASR** (105M CTC, Dec 2025, HAI-DEF terms): the only open model trained on physician dictation, with self-reported WER far below Whisper's on Google's private dictation sets. But CrispASR can't run it (only transcribe.cpp, which has no server), it has no biasing, it writes spoken punctuation as `{period}` and no casing, and its general English is poor (17.9% on LibriSpeech clean).
-    - **Omi Med STT v1** (Omi Health, Sept 2026; `omi-health/omi-med-stt-v1`, CC-BY-4.0): Parakeet TDT 0.6B v2 plus a medical adapter, a rank-128 bottleneck added after every Conformer layer. Self-reported on a private 1,513-clip GP-consultation set: 6.5% WER, 97.8% medical-term recall, 95% on drugs. CrispASR can't run it: its GGUF (`omi-health/omi-med-stt-v1-gguf`, q8_0 929 MB) is for a patched `parakeet.cpp`, and CrispASR's Parakeet engine has no adapter. **Keep the file out of `cohere-gguf\`**: its architecture is `parakeet`, so ➕ would offer it, and a load that ignored the adapter would be plain Parakeet v2 under the Omi name. Omi's patch is about 40 lines of C++. **Omi also hosts it** as `omi-medical-edge-1`, now the `omi-medical-edge` preset ([4.13](#413-omi-health)): measure it there on the clips before building anything local.
+    - **Omi Med STT v1** (Omi Health, Sept 2026; `omi-health/omi-med-stt-v1`, CC-BY-4.0): Parakeet TDT 0.6B v2 plus a medical adapter, a rank-128 bottleneck added after every Conformer layer. Self-reported on a private 1,513-clip GP-consultation set: 6.5% WER, 97.8% medical-term recall, 95% on drugs. CrispASR can't run it: its GGUF (`omi-health/omi-med-stt-v1-gguf`, q8_0 929 MB) is for a patched `parakeet.cpp`, and CrispASR's Parakeet engine has no adapter. **Keep the file out of `cohere-gguf\`**: its architecture is `parakeet`, so ➕ would offer it, and a load that ignored the adapter would be plain Parakeet v2 under the Omi name. Omi's patch is about 40 lines of C++. **Measured through Omi's hosted copy** (`omi-medical-edge`, 2026-09-28): no better than Parakeet v3 on the clips ("hematochesia" ×2, "uretherethiasis"), so **not worth running locally** ([4.3](#43-context-biasing)).
     - Not worth it: Voxtral Small 24B (no CrispASR support, no biasing), Granite Speech 3.3 8B, Kyutai STT, Phi-4-multimodal, Whisper large-v3 (`prompt` only, which WhisperInk doesn't send).
   - Both upstream bugs the owner filed on 2026-09-25 ([CrispStrobe/CrispASR#471](https://github.com/CrispStrobe/CrispASR/issues/471), [#472](https://github.com/CrispStrobe/CrispASR/issues/472)) are fixed in the deployed v0.8.38; `plans/voxtral-3b-tokenizer-fix.md` is history.
 - **Granite Speech 5.0 TurboCTC** (IBM, released 2026-08-25: 470M, English only, a CTC Conformer with no LLM head, 1.33% WER on LibriSpeech test-clean). The owner asked for it on 2026-09-24, and it **can't be a drop-in yet**:

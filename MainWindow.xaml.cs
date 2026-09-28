@@ -185,6 +185,9 @@ namespace WhisperInk
 
         // Where crispasr.exe and the shipped presets' GGUFs live.
         private static readonly string DefaultModelFolder = Path.Combine(ConfigFolder, "cohere-gguf");
+        // Every take's audio and text, when "Keep all audio" is on. Under
+        // %APPDATA%, not OneDrive-synced, like unsent\: it's clinical audio.
+        private static readonly string ArchiveFolder = Path.Combine(ConfigFolder, "archive");
 
         // Keeps the list of .gguf files in the model folder current, so a
         // model copied in shows in 🔌 Provider as "➕ <name>", one click from
@@ -263,6 +266,10 @@ namespace WhisperInk
         // waits only for the transcript (StreamedTranscription). Off = every
         // take is uploaded as a WAV after release, as before 2026-09.
         private bool _streamUpload = true;
+        // Keep every take's audio and text in archive\ instead of deleting it
+        // once delivered (UnsentTakes.ArchiveFolder), to compare models on real
+        // dictation later. Off by default: it's clinical audio kept for good.
+        private bool _keepAudio = false;
 
         // The take currently being streamed, if any. UI thread only: set when
         // a take starts, taken over (finished or cancelled) when it stops.
@@ -398,6 +405,11 @@ namespace WhisperInk
             WarmMic();
 
             _unsent = new UnsentTakes(Path.Combine(ConfigFolder, "unsent"), Log);
+            if (_keepAudio)
+            {
+                _unsent.ArchiveFolder = ArchiveFolder;
+                Log($"[archive] keeping every take's audio and text in {ArchiveFolder}");
+            }
 
             // Factory owns one ITranscriber per provider. The GPU-backend
             // delegate lets it pick up live edits from the settings dialog
@@ -616,6 +628,8 @@ namespace WhisperInk
                     if (root.TryGetProperty("WarmMicEnabled", out var wm)) _warmMicEnabled = wm.GetBoolean();
                     if (root.TryGetProperty("StreamUpload", out var su) && su.ValueKind is JsonValueKind.True or JsonValueKind.False)
                         _streamUpload = su.GetBoolean();
+                    if (root.TryGetProperty("KeepAudio", out var ka) && ka.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                        _keepAudio = ka.GetBoolean();
                     if (root.TryGetProperty("WarmMicIdleSeconds", out var wmi)) _warmMicIdleSeconds = Math.Max(0, wmi.GetInt32());
                     if (root.TryGetProperty("PreRollMs", out var pr)) _preRollMs = Math.Clamp(pr.GetInt32(), 0, 3000);
                     if (root.TryGetProperty("PostRollMs", out var po)) _postRollMs = Math.Clamp(po.GetInt32(), 0, 1000);
@@ -850,7 +864,8 @@ namespace WhisperInk
                     MinHoldMs          = _minHoldMs,
                     SilenceThreshold   = _silenceThreshold,
                     ClipboardRestoreMs = _clipboardRestoreMs,
-                    StreamUpload       = _streamUpload
+                    StreamUpload       = _streamUpload,
+                    KeepAudio          = _keepAudio
                 };
                 // Serialize the TranscriberKind enum as a string so config.json
                 // both stays human-readable AND round-trips through LoadConfig
@@ -1157,8 +1172,8 @@ namespace WhisperInk
                     // another provider) may get the part that's missing.
                     if (take != null)
                     {
-                        if (shortfall is { } sf) _unsent!.Keep(take, UnsentTakes.Incomplete, "incomplete: " + sf.Describe());
-                        else _unsent!.Delivered(take);
+                        if (shortfall is { } sf) _unsent!.Keep(take, UnsentTakes.Incomplete, "incomplete: " + sf.Describe(), text);
+                        else _unsent!.Delivered(take, text);
                     }
 
                     // One cue per outcome. Text that needs a second look gets
@@ -1587,8 +1602,8 @@ namespace WhisperInk
                 var shortfall = CheckCoverage(wav, audioMs, result);
                 _injector.CopyToClipboard(text);
                 HistoryService.Add(text);
-                if (shortfall is { } sf) _unsent?.Keep(take, UnsentTakes.Incomplete, "retry incomplete: " + sf.Describe());
-                else _unsent?.Remove(take);
+                if (shortfall is { } sf) _unsent?.Keep(take, UnsentTakes.Incomplete, "retry incomplete: " + sf.Describe(), text);
+                else _unsent?.Remove(take, text, provider);
                 Log($"[retry] {take.Id}: {text.Length} chars on the clipboard{(localFallback ? " (LOCAL FALLBACK)" : "")}{(shortfall != null ? " (incomplete)" : "")}");
 
                 string who = localFallback
@@ -1792,6 +1807,21 @@ namespace WhisperInk
             },
             new MenuNode { Header = "📋 History", Action = () => new HistoryWindow().Show() },
             BuildUnsentMenu(),
+            new MenuNode
+            {
+                Header = "🗄 Audio archive",
+                Children = new List<MenuNode>
+                {
+                    new MenuNode
+                    {
+                        Header = "Keep all audio",
+                        IsChecked = _keepAudio,
+                        ToolTip = "Keep every dictation's audio and text for good, in the archive folder, instead of deleting it once pasted. About 2 MB a minute. Not synced: it stays on this PC.",
+                        Action = () => SetKeepAudio(!_keepAudio),
+                    },
+                    new MenuNode { Header = "📂 Open archive folder", ToolTip = ArchiveFolder, Action = () => OpenFolder(ArchiveFolder) },
+                },
+            },
             MenuNode.Separator(),
             BuildGpuBackendMenu(),
             MenuNode.Separator(),
@@ -2328,6 +2358,17 @@ namespace WhisperInk
             if (_quitOnClose == enabled) return;
             _quitOnClose = enabled;
             SaveConfig();
+        }
+
+        public void SetKeepAudio(bool enabled)
+        {
+            if (_keepAudio == enabled) return;
+            _keepAudio = enabled;
+            if (_unsent != null) _unsent.ArchiveFolder = enabled ? ArchiveFolder : null;
+            SaveConfig();
+            Log(enabled
+                ? $"[archive] keeping every take's audio and text in {ArchiveFolder}"
+                : "[archive] off: delivered takes' audio is deleted again (the archive itself is left alone)");
         }
 
         public void SetLaunchAtStartup(bool enabled)
