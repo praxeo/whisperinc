@@ -666,7 +666,7 @@ Switching providers is one click (🔌 Provider in either menu). The outgoing lo
 | `reson8_phrases` | Reson8 | Comma-joined `phrases` query param. ≤250 terms, 4000-char budget, commas in terms become spaces | Real. A tight list fixed 3/3; **the 17-term list degraded a hard term into its opposite** |
 | `mistral_context_bias` | Mistral | Comma-joined `context_bias`. ≤100 | Not measured |
 | `whisper_prompt` | OpenAI | `prompt` = "Glossary: a, b, c." | Not measured |
-| `hotwords` | Local CrispASR | Comma-joined `hotwords` form field. **Two different mechanisms:** a boost trie on Parakeet (`HotwordsBoost`, off by default: ≥8 garbles neighbours), and prompt text on the speech-LLMs (Qwen3-ASR: "The following words may appear in the audio: …" in the system turn; Voxtral 3B: "The following words may appear: …" between `lang:en` and `[TRANSCRIBE]`, where its transcribe mode was trained to see no text at all; Granite: " Keywords: …") | Qwen3: real and safe, in 60 s pieces (a piece of silence gets the whole list back; CrispASR v0.8.38 no longer sends the model one, [4.3](#43-context-biasing)). Voxtral 3B: real but weak (one term fixed *ureterolithiasis*, the 19- and 21-term lists didn't). On v0.8.30–v0.8.37 **one term its tokenizer mishandled broke every take** ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)); fixed in the deployed v0.8.38. Granite: real, unsafe. Parakeet: weak. Cohere and Voxtral 4B: ignored |
+| `hotwords` | Local CrispASR | Comma-joined `hotwords` form field. **Two different mechanisms:** a boost trie on Parakeet (`HotwordsBoost`, off by default: ≥8 garbles neighbours), and prompt text on the speech-LLMs (Qwen3-ASR: "The following words may appear in the audio: …" in the system turn; Voxtral 3B: "The following words may appear: …" between `lang:en` and `[TRANSCRIBE]`, where its transcribe mode was trained to see no text at all; Granite: " Keywords: …") | Qwen3: real and safe, in 60 s pieces (a piece of silence gets the whole list back; CrispASR v0.8.38 no longer sends the model one, [4.3](#43-context-biasing)). Voxtral 3B: real but weak (one term fixed *ureterolithiasis*, the 19- and 21-term lists didn't). On v0.8.30–v0.8.37 **one term its tokenizer mishandled broke every take** ([10.2](#102-known-bugs-found-in-the-2026-09-23-audit)); fixed in the deployed v0.8.38. Granite: real, unsafe. Parakeet: no effect at the default boost or at 5 (the 21-term list changed none of 24 transcripts on either CrispASR version, 2026-09-28), and it garbles from 8 up. Cohere and Voxtral 4B: ignored |
 | `none` | Smallest.ai, Cohere cloud | — | Terms can't be routed anywhere. A mis-heard term on these can't be corrected |
 
 **How much `BiasMechanism` actually controls:** only `HttpTranscriber` reads it.
@@ -740,7 +740,7 @@ Voxtral 3B uses the rest of a take. With any speech before it, it got *ureteroli
 
 | Behaviour | Providers | Effect of a long list |
 |---|---|---|
-| Ignored | Smallest.ai, Cohere, Voxtral 4B | Wasted |
+| Ignored | Smallest.ai, Cohere, Voxtral 4B, and Parakeet below a boost of 8 | Wasted |
 | Dilutes | Qwen3, Voxtral 3B | Qwen3: a 40-term list still fixed 5 of 6. Voxtral 3B: one term fixed *ureterolithiasis*, the 19- and 21-term lists didn't |
 | Degrades | Reson8 | Worse transcripts, per upstream and measured: the 17-term list turned *hematochezia* into *hematemesis* |
 | Costs | ElevenLabs | Over 100 terms, a 20 s billing floor per take |
@@ -871,7 +871,7 @@ Each local preset runs its own `crispasr.exe --server` on its own port ([Part 5]
   - With v0.8.30, RNNT plus punctuation got 2.3× faster (749 → 325 ms).
 - **`parakeet-local`** (TDT 0.6b):
   - The glob `parakeet-tdt-*` is pinned because `parakeet-*` would match RNNT first.
-  - The boost trie never flipped a hard term. ≥8 garbles, so `HotwordsBoost` is off (null = server default 2.0, inert).
+  - The boost trie never flipped a hard term. ≥8 garbles, so `HotwordsBoost` is off (null = server default 2.0, inert). On 2026-09-28 the 21-term list changed none of 24 transcripts at the default boost, and none of 22 at 5, the boost this desktop's config gives `parakeet-local`; RNNT, Orukeet and Ultra were the same at the default. In practice Parakeet ignores the list.
   - Its GGUF (v3) predates the `parakeet.xscaling` key, and every CrispASR before v0.8.38 took a missing key as true, scaling the encoder input by 32 before layer 0. Upstream's stage diff against NeMo: cos 0.594 at the encoder output, 0.99995 once fixed (`e82b8bbf`). v0.8.38 takes a missing key as false and says so in the server output (`GGUF has no parakeet.xscaling key - assuming false`); `CRISPASR_PARAKEET_XSCALING=1` would restore the old behaviour. Orukeet and Ultra record the key as false and RNNT 1.1b as true, so only this model changed (2026-09-28).
 - **`cohere-local-q6k` / `cohere-gguf-server`:**
   - The backend hint `cohere` is required (metadata doesn't auto-detect).
