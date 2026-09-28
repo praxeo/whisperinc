@@ -12,20 +12,28 @@
 # break the parser.
 #
 # Usage:
-#   .\update-crispasr.ps1                          # pinned tag, CUDA build
-#   .\update-crispasr.ps1 -Tag v0.7.1 -Asset crispasr-windows-x86_64-vulkan.zip
-#   .\update-crispasr.ps1 -Tag v0.8.0              # future release, CUDA build
+#   .\update-crispasr.ps1 -Tag v0.8.30             # CUDA build
+#   .\update-crispasr.ps1 -Tag v0.8.30 -Asset crispasr-windows-x86_64-vulkan.zip
+#   .\update-crispasr.ps1 -Tag v0.8.38 -Zip <path>\crispasr-windows-x86_64-cuda.zip
+#                                                  # deploy the zip already downloaded
+#                                                  # and A/B'd, byte for byte
 #
-# On smoke-test failure the previous binaries are restored automatically.
+# -Tag is required: it used to default to v0.7.1, below the v0.8.30 floor,
+# so a bare run downgraded. -DeployDir is for testing the script on a copy.
+# On smoke-test failure the previous binaries are restored automatically;
+# restore-crispasr.ps1 puts them back later if needed.
 
 param(
-    [string]$Tag   = "v0.7.1",
-    [string]$Asset = "crispasr-windows-x86_64-cuda.zip"
+    [Parameter(Mandatory = $true)][string]$Tag,
+    [string]$Asset     = "crispasr-windows-x86_64-cuda.zip",
+    [string]$Zip       = "",
+    [string]$DeployDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 
-$deployDir = Join-Path $env:APPDATA ".WhisperInk\cohere-gguf"
+$deployDir = $DeployDir
+if (-not $deployDir) { $deployDir = Join-Path $env:APPDATA ".WhisperInk\cohere-gguf" }
 $stamp     = Get-Date -Format "yyyy-MM-dd-HHmm"
 $tmp       = Join-Path $env:TEMP ("crispasr-update-" + $stamp)
 
@@ -35,13 +43,19 @@ if (-not (Test-Path $deployDir)) {
 
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
-# --- 1. Download the release asset ---------------------------------
-Write-Host "Downloading $Asset from CrispStrobe/CrispASR $Tag ..."
-gh release download $Tag --repo CrispStrobe/CrispASR --pattern $Asset --dir $tmp
-if ($LASTEXITCODE -ne 0) { throw "gh release download failed (tag=$Tag asset=$Asset)" }
+# --- 1. Download the release asset (or use the one given) ----------
+if ($Zip) {
+    if (-not (Test-Path $Zip)) { throw "Zip not found: $Zip" }
+    $zipPath = (Resolve-Path $Zip).Path
+    Write-Host "Using $zipPath for $Tag"
+} else {
+    Write-Host "Downloading $Asset from CrispStrobe/CrispASR $Tag ..."
+    gh release download $Tag --repo CrispStrobe/CrispASR --pattern $Asset --dir $tmp
+    if ($LASTEXITCODE -ne 0) { throw "gh release download failed (tag=$Tag asset=$Asset)" }
 
-$zipPath = Join-Path $tmp $Asset
-if (-not (Test-Path $zipPath)) { throw "Downloaded asset not found at $zipPath" }
+    $zipPath = Join-Path $tmp $Asset
+    if (-not (Test-Path $zipPath)) { throw "Downloaded asset not found at $zipPath" }
+}
 
 # --- 2. Stop any crispasr servers running from the deploy dir ------
 # WhisperInk respawns its server on the next dictation, so this is safe
@@ -125,7 +139,7 @@ if (-not $smokeOk) {
 
 # --- 7. Report -------------------------------------------------------
 Write-Host ""
-Write-Host "Deployed $Tag ($Asset):"
+Write-Host "Deployed $Tag ($(Split-Path $zipPath -Leaf)):"
 Get-ChildItem $deployDir | Where-Object { $_.Name -eq "crispasr.exe" -or $_.Extension -eq ".dll" } |
     Select-Object Name, @{n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) } }, LastWriteTime |
     Format-Table -AutoSize

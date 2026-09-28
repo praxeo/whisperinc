@@ -4,6 +4,18 @@ Written 2026-09-25 for the next session. The owner wants to fix this bug in
 CrispASR themselves and propose the fix to its maintainer. Read CLAUDE.md
 Part 1 first, as always, then this.
 
+**Update, later on 2026-09-25:** the owner filed the bug instead, as
+[CrispStrobe/CrispASR#472](https://github.com/CrispStrobe/CrispASR/issues/472),
+with the jfk.wav repro and the suggested fix below. Before doing anything
+else, read #472's thread: the maintainer may already have fixed it (they did
+#338 within a day). If they have, go to "After it's released". The rest of
+this brief is for sending the fix as a pull request, if the owner still wants
+to; link it to #472.
+
+**Update, 2026-09-26:** the maintainer fixed it on `main` in `471fb14d`
+and closed #472. There's no pull request to send. Go straight to "After it's
+released" (CLAUDE.md 5.1 lists what else that release changes).
+
 ## Goal
 
 1. Fix the bug in CrispASR's Voxtral 3B speech-to-text runtime
