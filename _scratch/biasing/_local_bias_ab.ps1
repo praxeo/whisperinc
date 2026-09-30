@@ -36,10 +36,15 @@
            pwsh .\_local_bias_ab.ps1 -Fields chunk_seconds=30   # extra form fields for every run (k=v;k=v)
            pwsh .\_local_bias_ab.ps1 -Exe <stage>\crispasr.exe -Csv new.csv -Label new-
                                                          # another binary; rows to a CSV; server logs as new-*.txt
+           pwsh .\_local_bias_ab.ps1 -Reps 1             # one request per clip and condition instead of two (greedy decoding
+                                                         # made the two identical for every local model)
+           pwsh .\_local_bias_ab.ps1 -OutDir <dir>       # server logs here instead of .\results\. Use it, under %APPDATA%,
+                                                         # for real dictations: the logs name each file it was sent
+                                                         # (see _score_corpus.ps1)
   NEEDS    the user's own recordings in .\clips\ (see RECORD_THESE.md), and
            the listed GGUFs in %APPDATA%\.WhisperInk\cohere-gguf\
 #>
-param([string[]]$Only, [string[]]$Extra, [string[]]$Drop, [string]$Fields, [string]$Exe, [string]$Csv, [string]$Label)
+param([string[]]$Only, [string[]]$Extra, [string[]]$Drop, [string]$Fields, [string]$Exe, [string]$Csv, [string]$Label, [string]$OutDir, [int]$Reps = 2)
 $ErrorActionPreference = 'Stop'
 $dir   = Join-Path $env:APPDATA '.WhisperInk\cohere-gguf'
 $exe   = if ($Exe) { (Resolve-Path $Exe).Path } else { Join-Path $dir 'crispasr.exe' }
@@ -55,7 +60,7 @@ $Drop  = @($Drop | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $cfg   = Get-Content (Join-Path $env:APPDATA '.WhisperInk\config.json') -Raw | ConvertFrom-Json
 $terms = @($cfg.ContextBiasTerms | Where-Object { $_ -and $_ -notin $Drop })
 $hot   = $terms -join ','
-$out   = Join-Path $PSScriptRoot 'results'
+$out   = if ($OutDir) { $OutDir } else { Join-Path $PSScriptRoot 'results' }
 New-Item -ItemType Directory -Force $out | Out-Null
 "exe: $exe"
 "hotwords ($($terms.Count) terms): $hot"
@@ -106,7 +111,7 @@ foreach ($run in $runs) {
     "`n=== $($run.Name)  ($($run.Model), backend $backend$shown, ready in $([int]$sw.Elapsed.TotalSeconds) s)"
     :clips foreach ($clip in $clips) {
       foreach ($bias in $false, $true) {
-        foreach ($rep in 1, 2) {
+        foreach ($rep in 1..$Reps) {
           $form = @{ language = 'en'; response_format = 'json'; file = Get-Item $clip.FullName }
           if ($bias) { $form.hotwords = $hot }
           foreach ($e in $sent.GetEnumerator()) { $form[$e.Key] = $e.Value }

@@ -95,6 +95,10 @@ if (args.Contains("omi-live"))
         .Append(Path.Combine(bias, "joined", "all_six_joined.wav"))
         .Append(Path.Combine(bias, "tails", "long_3x_six.wav"))
         .Where(File.Exists).ToList();
+    // `omi-live long`: only the 111 s take, only on the flagship with the list:
+    // the case where Omi has dropped the list.
+    bool longOnly = args.Contains("long");
+    if (longOnly) inputs = inputs.Where(f => f.EndsWith("long_3x_six.wav", StringComparison.Ordinal)).ToList();
     // What each clip must contain to be right.
     var expect = new Dictionary<string, string>
     {
@@ -108,6 +112,7 @@ if (args.Contains("omi-live"))
         (flagship, Array.Empty<string>(), "flagship, no list"),
         (flagship, terms, "flagship + list"),
     };
+    if (longOnly) runs = runs[^1..];
     foreach (var (prov, list, label) in runs)
     {
         Console.WriteLine($"\n== {prov.TranscriptionModel} ({label}) ==");
@@ -124,6 +129,7 @@ if (args.Contains("omi-live"))
             bool? ok = expect.TryGetValue(name, out var want) ? text.Contains(want, StringComparison.OrdinalIgnoreCase) : null;
             if (ok != null) { scored++; if (ok == true) right++; }
             Console.WriteLine($"   {(ok == null ? " " : ok == true ? "✓" : "✗")} {name,-18} {seconds,5:F1} s {sw.ElapsedMilliseconds,6} ms  {text}");
+            if (t.LastWarning is { } warn) Console.WriteLine($"     ⚠ {prov.Name} {warn}");
             Check(text != "<null>", $"{label}: {name} came back");
         }
         Console.WriteLine($"   {right}/{scored} clips right");
@@ -131,6 +137,50 @@ if (args.Contains("omi-live"))
     Check(Logged(@"\[omi\] over 60 s: transcribing as job"), "the 111 s take went through Omi's job path");
     Console.WriteLine(failures == 0 ? "\nALL CHECKS PASSED" : $"\n{failures} CHECK(S) FAILED");
     return failures == 0 ? 0 : 1;
+}
+
+// `dotnet run -- guard-csv <file.csv>...`: the guard over what real systems wrote (a CSV from _local_bias_ab.ps1 or corpus-cloud:
+// Run, Clip, Bias, Text), with the shared list from config.json. Prints counts and WHICH rows tripped it, never a transcript.
+if (args.Contains("guard-csv"))
+{
+    string cfgPathG = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), ".WhisperInk", "config.json");
+    using var cfgG = JsonDocument.Parse(File.ReadAllText(cfgPathG));
+    var termsG = cfgG.RootElement.GetProperty("ContextBiasTerms").EnumerateArray().Select(e => e.GetString() ?? "").Where(s => s.Length > 0).ToList();
+    static List<List<string>> ReadCsv(string path)
+    {
+        var rows = new List<List<string>>(); var row = new List<string>(); var sb = new StringBuilder(); bool q = false;
+        string s = File.ReadAllText(path);
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (q) { if (c == '"') { if (i + 1 < s.Length && s[i + 1] == '"') { sb.Append('"'); i++; } else q = false; } else sb.Append(c); }
+            else if (c == '"') q = true;
+            else if (c == ',') { row.Add(sb.ToString()); sb.Clear(); }
+            else if (c == '\n' || c == '\r') { if (c == '\r' && i + 1 < s.Length && s[i + 1] == '\n') i++; row.Add(sb.ToString()); sb.Clear(); rows.Add(row); row = new List<string>(); }
+            else sb.Append(c);
+        }
+        if (sb.Length > 0 || row.Count > 0) { row.Add(sb.ToString()); rows.Add(row); }
+        return rows;
+    }
+    int total = 0, recital = 0, inText = 0;
+    var flagged = new List<string>();
+    foreach (string path in args.Where(a => a.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)))
+    {
+        var rows = ReadCsv(path);
+        var head = rows[0]; int iRun = head.IndexOf("Run"), iClip = head.IndexOf("Clip"), iBias = head.IndexOf("Bias"), iText = head.IndexOf("Text");
+        foreach (var r in rows.Skip(1))
+        {
+            if (r.Count <= iText) continue;
+            total++;
+            var v = TranscriptGuard.Inspect(r[iText], termsG);
+            if (v.Kind == TranscriptGuard.Kind.None) continue;
+            if (v.Kind == TranscriptGuard.Kind.ListRecital) recital++; else inText++;
+            flagged.Add($"   {v.Kind,-11} {r[iRun],-24} {r[iClip],-16} [{r[iBias]}]  {v.Terms} terms, {v.Share:P0} of the text");
+        }
+    }
+    Console.WriteLine($"{total} transcripts checked against the {termsG.Count}-term list in config.json: {recital} ListRecital, {inText} ListInText");
+    flagged.ForEach(Console.WriteLine);
+    return 0;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -674,6 +724,42 @@ BitConverter.GetBytes((short)2).CopyTo(stereo, 22); BitConverter.GetBytes(64000)
 Check(LocalTakeSplitter.Cut(stereo, maxPiece) == null, "a stereo WAV (not what the app records) is sent whole");
 
 // ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0j. TranscriptGuard: the bias list coming back as the transcript ==");
+var gTerms = new[] { "ascites", "syncopal", "pleuritic", "dorsal", "CVA", "epigastric", "paronychia", "ureterolithiasis", "melena",
+                     "hematochezia", "hematemesis", "MVC", "COPD", "Unsloth", "Algidex Ag", "debridement", "periwound", "Qwen3-ASR" };
+string gRecital = "Ascites, syncopal, pleuritic, dorsal, CVA, epigastric, paronychia, ureterolithiasis, melena, hematochezia, hematemesis, MVC, COPD, Unsloth, Algidex Ag, debridement, periwound, Qwen3-ASR.";
+string GK(string? text, params string[] terms) => TranscriptGuard.Inspect(text, terms.Length > 0 ? terms : gTerms).Kind.ToString();
+// what a real note sounds like: 60 words that name a few list terms, in no list order
+string gNote = "The patient is a 58-year-old man with a history of COPD who presented after an MVC with epigastric pain and one syncopal episode. " +
+               "He denies hematemesis, melena, or hematochezia. On exam there is no ascites. The foot wound has periwound erythema and needs debridement. " +
+               "Discharge home in stable condition with close follow up and strict return precautions.";
+Check(GK(gRecital) == "ListRecital", "the whole list, as Qwen3 wrote it for a cough, is a recital");
+Check(GK("The following words may appear in the audio: " + gRecital) == "ListRecital", "the same with the prompt's own frame in front is still a recital");
+Check(GK(gRecital.ToLowerInvariant().Replace(",", "").Replace(".", "")) == "ListRecital", "case and punctuation don't matter");
+Check(GK("Ascites, syncopal, pleuritic, dorsal, CVA, epigastric.") == "ListRecital", "a recital that stops after six terms is still one");
+Check(GK("Ascites, syncopal, pleuritic, CVA, epigastric") == "ListRecital", "a recital that misses a term (dorsal) is still one");
+Check(GK("Unsloth, Algidex Ag, debridement, periwound, Qwen3-ASR") == "ListRecital", "multi-word and hyphenated terms are matched as the words they are");
+var gv = TranscriptGuard.Inspect(gRecital, gTerms);
+Check(gv.Terms == 18 && gv.Share > 0.99, $"the verdict says how many terms and how much of the text ({gv.Terms} terms, {gv.Share:P0})");
+Check(GK(gNote) == "None", "a real note that names six list terms, out of order and with words between them, is not touched");
+Check(GK("He denies hematemesis, melena, or hematochezia.") == "None", "denies hematemesis, melena or hematochezia (the list's order reversed) is not touched");
+Check(GK("Melena, hematochezia, hematemesis.") == "None", "three terms in list order and adjacent: under the four-term run, not touched");
+Check(GK("Hematemesis, hematochezia, melena, ureterolithiasis.") == "None", "four terms in the wrong order are not a recital");
+Check(GK("Ascites on exam. Later a syncopal episode, then pleuritic pain, and a dorsal foot wound with CVA tenderness.") == "None", "the first five terms scattered through a note, with words between them, are not a recital");
+Check(GK("Ascites, syncopal, pleuritic, dorsal", "ascites", "syncopal", "pleuritic") == "None", "a list of fewer than four terms can't be told from speech: the guard is off");
+Check(GK(gRecital, "ascites", "syncopal") == "None" && TranscriptGuard.Inspect(gRecital, Array.Empty<string>()).Kind == TranscriptGuard.Kind.None && TranscriptGuard.Inspect(gRecital, null).Kind == TranscriptGuard.Kind.None, "no list, or a two-term list: nothing to compare with");
+Check(GK("") == "None" && GK("   ") == "None" && TranscriptGuard.Inspect(null, gTerms).Kind == TranscriptGuard.Kind.None, "empty or missing text is never a verdict");
+Check(GK("Thank you.") == "None" && GK("Cough.") == "None", "the short made-up words other models write are not this guard's business");
+string gAppended = gNote + " " + gRecital;
+var gva = TranscriptGuard.Inspect(gAppended, gTerms);
+Check(gva.Kind == TranscriptGuard.Kind.ListInText && gva.Terms == 18 && gva.Share < 0.6, $"a recital after a real dictation is delivered with a warning, not dropped ({gva.Share:P0} of the text)");
+var gvp = TranscriptGuard.Inspect("Ascites syncopal pleuritic dorsal " + gNote + " " + gNote, gTerms);
+Check(gvp.Kind == TranscriptGuard.Kind.ListInText && gvp.Terms == 4, "four terms in list order inside a long note: a warning, never a drop");
+Check(GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic", "dorsal") == "ListRecital"
+      && GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic") == "None", "a term listed twice counts once: five entries, four distinct is a recital, five entries, three distinct is off");
+
+
+// ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");
 const string Prefix = "http://127.0.0.1:18999/";
 var requests = new List<FakeRequest>();
@@ -918,13 +1004,29 @@ var oq1 = LastRequest();
 Console.WriteLine("   fields: " + string.Join(", ", oq1.Fields.Select(f => f.Name + "=" + f.Value)));
 Check(om1 == "Bright red blood per rectum, consistent with hematochezia.", $"inline 200: the text comes back trimmed (\"{om1}\")");
 Check(oq1.Path == "/v1/audio/transcriptions" && oq1.Authorization == "Bearer omi-key", "POST /v1/audio/transcriptions with Bearer auth");
-Check(oq1.Get("model") == "omi-medical-1" && oq1.Get("response_format") == "json" && oq1.Get("language") == "en",
-      "model=omi-medical-1, response_format=json (Omi's default is diarized_json), language=en");
+Check(oq1.Get("model") == "omi-medical-1" && oq1.Get("response_format") == "verbose_json" && oq1.Get("language") == "en",
+      "model=omi-medical-1, language=en, response_format=verbose_json with a list (a job's `json` has no audit; Omi's default is diarized_json)");
 var omiVocab = oq1.Get("vocabulary") is string vj ? JsonSerializer.Deserialize<string[]>(vj) : null;
 Check(omiVocab != null && omiVocab.SequenceEqual(new[] { "hematochezia", "ureterolithiasis" }),
       $"vocabulary is a JSON array, deduped, with a term over 96 characters dropped ({oq1.Get("vocabulary")})");
 Check(Logged(@"\[omi\] 1 bias term\(s\) over 96 characters dropped"), "the dropped term is logged");
 Check(oq1.Fields.Count > 0 && oq1.Fields[^1].Name == "file", "the file part is last");
+
+// Omi's own audit of the list: a dropped list is flagged (ITranscriptWarning), a used one isn't.
+var omiWarn = (ITranscriptWarning)omi;
+Check(omiWarn.LastWarning == null, "no warning on a transcript without an audit");
+reply = "{\"text\":\"Bright red blood per rectum, consistent with hematemesis.\",\"vocabulary\":{\"enabled\":true,\"requested_terms\":2,"
+      + "\"prompted_terms\":0,\"safety_fallback\":true,\"coverage_summary\":\"hinted output was not retained; safety fallback returned the plain transcript\"}}";
+string? ow1 = await omi.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis" });
+Check(ow1 == "Bright red blood per rectum, consistent with hematemesis." && omiWarn.LastWarning?.Contains("dropped your term list") == true
+      && Logged(@"\[omi\] response: dropped your term list.*safety fallback returned the plain transcript"),
+      $"a safety fallback in Omi's audit -> the text still comes back, with a warning, logged with Omi's summary ({omiWarn.LastWarning})");
+reply = "{\"text\":\"ok\",\"vocabulary\":{\"enabled\":true,\"requested_terms\":2,\"prompted_terms\":2,\"safety_fallback\":false,\"application_status\":\"partial\"}}";
+await omi.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis" });
+Check(omiWarn.LastWarning == null, "a list that was used -> no warning, though Omi calls it \"partial\"; the last take's warning is cleared");
+reply = "{\"text\":\"ok\",\"vocabulary\":{\"enabled\":true,\"requested_terms\":2,\"prompted_terms\":0,\"safety_fallback\":false}}";
+await omi.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis" });
+Check(omiWarn.LastWarning?.Contains("didn't use your term list") == true, "none of the list prompted -> a warning too");
 
 reply = "{\"text\":\"\"}";
 Check(await omi.TranscribeAsync(speech, Array.Empty<string>()) == "", "empty text is \"\" (nothing heard), not a failed request");
@@ -932,8 +1034,8 @@ Check(await omi.TranscribeAsync(speech, Array.Empty<string>()) == "", "empty tex
 omiFlag.Language = "auto";
 reply = "{\"text\":\"ok\"}";
 await omi.TranscribeAsync(speech, Array.Empty<string>());
-Check(LastRequest().Get("language") == null && LastRequest().Get("vocabulary") == null,
-      "Language=auto sends no language (dominant-language detection); an empty list sends no vocabulary");
+Check(LastRequest().Get("language") == null && LastRequest().Get("vocabulary") == null && LastRequest().Get("response_format") == "json",
+      "Language=auto sends no language (dominant-language detection); no list sends no vocabulary, and plain json");
 omiFlag.Language = "en";
 
 var edge = new OmiTranscriber(omiEdge, http, Log);
@@ -960,6 +1062,14 @@ var poll = LastRequest();
 Check(om3 == "A long take." && polls == 3, $"202 -> the job is polled until it succeeds, and its text read from result.content (\"{om3}\", {polls} polls)");
 Check(poll.Method == "GET" && poll.Query.Contains("wait=20") && poll.Query.Contains("include_result=true") && poll.Authorization == "Bearer omi-key",
       $"the polls are long polls asking for the result inline, with the key ({poll.Query})");
+
+route = r => r.Method == "POST"
+    ? (202, $"{{\"id\":\"job_4\",\"status\":\"accepted\",\"poll_url\":\"{Prefix}v1/jobs/job_4\"}}", null)
+    : (200, "{\"id\":\"job_4\",\"status\":\"succeeded\",\"result\":{\"content\":{\"text\":\"the patient presented with hematemesis.\","
+            + "\"vocabulary\":{\"requested_terms\":2,\"prompted_terms\":0,\"safety_fallback\":true}}}}", null);
+string? ow4 = await omi.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis" });
+Check(ow4 == "the patient presented with hematemesis." && omiWarn.LastWarning?.Contains("dropped your term list") == true,
+      "... and the same on a long take's job result, the case measured live");
 
 // The result as a download link: the key goes to Omi's own host only.
 string resultHost = "";

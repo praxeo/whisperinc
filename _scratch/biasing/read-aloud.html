@@ -1,0 +1,379 @@
+<title>Read-Aloud Script</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one working column. A slim header with overall progress, a strip of set tabs, then a single large card
+   holding the current line and its controls. Type is Atkinson Hyperlegible (built so 1, l and I, and drug names,
+   stay unambiguous at reading distance); IDs and counts are set in a mono face. */
+:root {
+  --bg: #ecf0f3;
+  --surface: #ffffff;
+  --ink: #121c25;
+  --muted: #56636f;
+  --line: #c9d2da;
+  --accent: #0a6a72;
+  --accent-ink: #ffffff;
+  --accent-soft: #d8ecee;
+  --done: #2b7a58;
+  --warn: #8f5500;
+  --font-text: "Atkinson Hyperlegible", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e151b; --surface: #17222b; --ink: #e7edf1; --muted: #98a6b1; --line: #2c3a45;
+    --accent: #5cc4cb; --accent-ink: #062226; --accent-soft: #163a40; --done: #63c497; --warn: #e0a24a;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e151b; --surface: #17222b; --ink: #e7edf1; --muted: #98a6b1; --line: #2c3a45;
+  --accent: #5cc4cb; --accent-ink: #062226; --accent-soft: #163a40; --done: #63c497; --warn: #e0a24a;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-text); line-height: 1.45; }
+.wrap { max-width: 62rem; margin-inline: auto; padding-inline: clamp(16px, 4vw, 40px); padding-block: 18px 56px; display: grid; gap: 18px; }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+header { display: grid; gap: 10px; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 16px; }
+h1 { margin: 0; font-size: 1.15rem; font-weight: 700; letter-spacing: 0.01em; }
+.overall { font-family: var(--font-mono); font-size: 0.95rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); width: 0; }
+
+.tabs { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.tab { flex: 0 0 auto; min-width: 5.6rem; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 9px; cursor: pointer; display: grid; gap: 3px; }
+.tab .k { font-family: var(--font-mono); font-weight: 500; font-size: 0.95rem; display: flex; justify-content: space-between; gap: 10px; }
+.tab .n { font-size: 0.82rem; color: var(--muted); white-space: nowrap; }
+.tab .m { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.tab .m > i { display: block; height: 100%; background: var(--done); width: 0; }
+.tab[aria-current="true"] { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: clamp(18px, 3.4vw, 34px); display: grid; gap: 18px; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; color: var(--muted); font-size: 0.95rem; }
+.id { font-family: var(--font-mono); font-weight: 500; font-size: 1.05rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 2px 9px; }
+.chip { font-size: 0.85rem; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line); }
+.chip[data-s="done"], .chip[data-s="manual"] { color: var(--done); border-color: var(--done); }
+.chip[data-s="skipped"] { color: var(--warn); border-color: var(--warn); }
+.chip[hidden] { display: none; }
+
+.line { margin: 0; text-wrap: pretty; max-width: 40ch; font-weight: 400; }
+.line.s { font-size: clamp(2.1rem, 6.4vw, 3.6rem); line-height: 1.18; }
+.line.m { font-size: clamp(1.55rem, 3.8vw, 2.25rem); line-height: 1.32; max-width: 46ch; }
+.line.l { font-size: clamp(1.2rem, 2.3vw, 1.55rem); line-height: 1.6; max-width: 62ch; }
+.line.silent { font-style: italic; color: var(--muted); }
+.hint { margin: 0; color: var(--muted); max-width: 62ch; }
+
+.status { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 0.95rem; min-height: 1.5em; }
+.ear { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+.ear i { width: 9px; height: 9px; border-radius: 50%; background: var(--line); }
+.ear[data-on="true"] { color: var(--ink); }
+.ear[data-on="true"] i { background: var(--done); }
+#msg[data-k="ok"] { color: var(--done); font-weight: 700; }
+#msg[data-k="warn"] { color: var(--warn); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 10px; }
+.btn { min-height: 48px; padding: 0 20px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); cursor: pointer; font-weight: 700; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); flex: 1 1 10rem; font-size: 1.1rem; }
+.opt { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.opt input { width: 20px; height: 20px; accent-color: var(--accent); }
+
+.tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.tools .note { color: var(--muted); font-size: 0.92rem; }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px; }
+summary { cursor: pointer; font-weight: 700; }
+details ul { margin: 10px 0 0; padding-left: 1.2rem; display: grid; gap: 6px; max-width: 68ch; }
+kbd { font-family: var(--font-mono); font-size: 0.85em; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; background: var(--bg); }
+#logbox { width: 100%; min-height: 9rem; font-family: var(--font-mono); font-size: 0.8rem; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+#logbox[hidden] { display: none; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="top">
+      <h1>Read-aloud script</h1>
+      <div class="overall" id="overall" aria-live="polite">0 / 0</div>
+    </div>
+    <div class="bar" aria-hidden="true"><i id="overallbar"></i></div>
+    <nav class="tabs" id="tabs" aria-label="Sets"></nav>
+  </header>
+
+  <main class="card" id="card">
+    <div class="meta">
+      <span class="id" id="lid"></span>
+      <span id="lset"></span>
+      <span id="lpos"></span>
+      <span class="chip" id="lstat" hidden></span>
+    </div>
+    <p class="line" id="ltext"></p>
+    <p class="hint" id="lhint"></p>
+    <div class="status" aria-live="polite">
+      <span class="ear" id="ear" data-on="false"><i></i><span id="eartext">Click this page once so it can hear your dictation.</span></span>
+      <span id="msg"></span>
+    </div>
+    <div class="controls">
+      <button class="btn" id="back" type="button">Back</button>
+      <button class="btn" id="redo" type="button">Read it again</button>
+      <button class="btn" id="skip" type="button">Skip</button>
+      <button class="btn primary" id="next" type="button">Next</button>
+    </div>
+    <label class="opt"><input type="checkbox" id="auto" checked> Move on by itself when the dictation lands</label>
+  </main>
+
+  <section class="tools" aria-label="Session">
+    <button class="btn" id="copylog" type="button">Copy session log</button>
+    <button class="btn" id="erase" type="button">Erase progress</button>
+    <span class="note" id="toolmsg" aria-live="polite"></span>
+  </section>
+  <textarea id="logbox" hidden readonly aria-label="Session log"></textarea>
+
+  <details>
+    <summary>How to record</summary>
+    <ul>
+      <li>One line is one take. Hold <kbd>Ctrl</kbd>+<kbd>Space</kbd>, read it at the pace you normally dictate, release. The page catches the paste, shows a check, and moves on.</li>
+      <li>This page does not show what was transcribed, on purpose: seeing it would tempt you to read again until it comes out right, and the test needs the plain first attempt. Read again only when you actually stumbled.</li>
+      <li>If you stumble, use <em>Read it again</em>. The last attempt of a line is the one that counts.</li>
+      <li>If the paste never arrives (a "Copied, paste it" flash, or a take with no words), press <em>Next</em> yourself. Arrow keys work too: right for next, left for back, <kbd>R</kbd> to read again, <kbd>S</kbd> to skip.</li>
+      <li>Read units the way you say them: mg is milligrams, 2.4 ATA is "two point four A-T-A", 96 over 58 is "ninety-six over fifty-eight".</li>
+      <li>Record only when no patient conversation is audible in the background.</li>
+      <li>When you are done, or want to stop, press <em>Copy session log</em> and paste it to Claude. Progress is kept in this browser.</li>
+    </ul>
+  </details>
+</div>
+
+<script>
+(function () {
+  var LINES = [{"id":"A01","set":"A","text":"Hematemesis."},{"id":"A02","set":"A","text":"Hematochezia."},{"id":"A03","set":"A","text":"Melena."},{"id":"A04","set":"A","text":"Ascites."},{"id":"A05","set":"A","text":"Syncopal episode."},{"id":"A06","set":"A","text":"Pleuritic chest pain."},{"id":"A07","set":"A","text":"Epigastric pain."},{"id":"A08","set":"A","text":"Paronychia."},{"id":"A09","set":"A","text":"Ureterolithiasis."},{"id":"A10","set":"A","text":"Positive CVA tenderness."},{"id":"A11","set":"A","text":"COPD exacerbation."},{"id":"A12","set":"A","text":"MVC."},{"id":"A13","set":"A","text":"Periwound erythema."},{"id":"A14","set":"A","text":"Debridement."},{"id":"A15","set":"A","text":"Algidex Ag."},{"id":"A16","set":"A","text":"Hemoptysis."},{"id":"A17","set":"A","text":"Hematuria."},{"id":"A18","set":"A","text":"Hematoma."},{"id":"A19","set":"A","text":"Hemorrhoids."},{"id":"A20","set":"A","text":"Melanoma."},{"id":"A21","set":"A","text":"Syncope."},{"id":"A22","set":"A","text":"Pleural effusion."},{"id":"A23","set":"A","text":"Ascending cholangitis."},{"id":"A24","set":"A","text":"Onychomycosis."},{"id":"A25","set":"A","text":"Ureteral colic."},{"id":"A26","set":"A","text":"Dorsalis pedis pulse."},{"id":"A27","set":"A","text":"Cellulitis."},{"id":"A28","set":"A","text":"Right ankle sprain."},{"id":"A29","set":"A","text":"Community-acquired pneumonia."},{"id":"A30","set":"A","text":"Pulmonary embolism."},{"id":"A31","set":"A","text":"Diabetic ketoacidosis."},{"id":"A32","set":"A","text":"No acute distress."},{"id":"B01","set":"B","text":"Wound measures 3.2 by 2.1 by 0.4 cm with 60% granulation tissue and 40% slough."},{"id":"B02","set":"B","text":"There is 1 cm of undermining at 12 o'clock and 2 cm of tunneling at 6 o'clock."},{"id":"B03","set":"B","text":"Periwound skin is macerated with serosanguineous drainage."},{"id":"B04","set":"B","text":"The wound bed shows hypergranulation, and there is epibole at the edges."},{"id":"B05","set":"B","text":"Eschar was removed with selective sharp debridement without complication."},{"id":"B06","set":"B","text":"Biofilm and bioburden are suspected, so we will cleanse with Vashe and use quarter strength Dakin's."},{"id":"B07","set":"B","text":"Applied Hydrofera Blue Classic to the wound bed and covered it with Mepilex Border Flex."},{"id":"B08","set":"B","text":"Packed with Aquacel Ag ribbon and covered with an ABD pad and Coban."},{"id":"B09","set":"B","text":"Algidex Ag hydrogel gauze to the wound bed, then Xeroform and a Medipore dressing."},{"id":"B10","set":"B","text":"Santyl was applied for enzymatic debridement, and we will consider NexoBrid."},{"id":"B11","set":"B","text":"EpiFix was applied and covered with Endoform and Mepilex Ag."},{"id":"B12","set":"B","text":"Apply Triad paste to the periwound and cover with Xtrasorb for the heavy drainage."},{"id":"B13","set":"B","text":"Drawtex to the draining wound, and Prisma for the stalled wound."},{"id":"B14","set":"B","text":"Multilayer compression with Profore for the venous stasis ulcer, or an Unna boot if tolerated."},{"id":"B15","set":"B","text":"Lipodermatosclerosis with hemosiderin staining, consistent with chronic venous insufficiency."},{"id":"B16","set":"B","text":"Venous duplex shows no DVT, and the ankle-brachial index is 1.1."},{"id":"B17","set":"B","text":"Dorsalis pedis and posterior tibial pulses are nonpalpable on the left."},{"id":"B18","set":"B","text":"Diabetic foot ulcer, Wagner grade 3, with positive probe-to-bone."},{"id":"B19","set":"B","text":"Concern for calcaneal osteomyelitis, MRI ordered."},{"id":"B20","set":"B","text":"Offloading with a TCC, and a Darco shoe for the other foot."},{"id":"B21","set":"B","text":"Negative pressure wound therapy with black foam at 125 mmHg, changed three times a week."},{"id":"B22","set":"B","text":"The STSG is 95% adherent, and we will continue NPWT."},{"id":"B23","set":"B","text":"HBO at 2.4 ATA for 90 minutes, treatment 12 of 30."},{"id":"B24","set":"B","text":"Pyoderma gangrenosum versus a Marjolin's ulcer, biopsy sent."},{"id":"B25","set":"B","text":"Hidradenitis suppurativa with multiple draining tunnels in the axilla and groin."},{"id":"B26","set":"B","text":"Bullous pemphigoid and leukocytoclastic vasculitis are on the differential."},{"id":"B27","set":"B","text":"Stage 3 sacral pressure injury in a patient with incomplete paraplegia after a spinal cord injury."},{"id":"B28","set":"B","text":"She has a suprapubic catheter for a neurogenic bladder and a baclofen pump for spasticity."},{"id":"B29","set":"B","text":"History of a right BKA and a left hip disarticulation."},{"id":"B30","set":"B","text":"Prosthetic joint infection after a TKA, and the THA on the other side is fine."},{"id":"B31","set":"B","text":"Triple negative breast cancer with soft tissue radionecrosis of the chest wall."},{"id":"B32","set":"B","text":"Perianal fistula in the setting of Crohn's disease."},{"id":"B33","set":"B","text":"Mupirocin to the nares, gentamicin ointment to the wound, nystatin to the groin folds, and triamcinolone to the stasis dermatitis."},{"id":"C01","set":"C","text":"This is a 58-year-old man with a history of COPD and alcohol use who presented with three days of epigastric pain. This morning he had two episodes of hematemesis and then a syncopal episode at home. He denies hematochezia or chest pain. He takes ibuprofen daily for back pain. He has never had an endoscopy and does not take a blood thinner. On arrival his blood pressure was 96 over 58, heart rate 118, and oxygen saturation 94% on room air. He is pale and diaphoretic. Abdomen is soft with epigastric tenderness, no rebound, and no ascites. Rectal exam shows melena. His skin is cool and his capillary refill is delayed. Hemoglobin is 8.9, down from 13 last month, with BUN 46 and lactate 3.2. Two large-bore IVs were placed, and he received a liter of lactated Ringer's, pantoprazole 80 mg IV, and ondansetron 4 mg. Two units of blood were crossmatched, and a repeat hemoglobin will be drawn in four hours. I suspect an upper GI bleed from a peptic ulcer. I discussed the case with gastroenterology, who will scope him this afternoon. He will be admitted to the ICU. Critical care time was 40 minutes."},{"id":"C02","set":"C","text":"This is a 67-year-old man with type 2 diabetes and peripheral neuropathy who returns for a diabetic foot ulcer on the plantar aspect of the right first metatarsal head. Since the last visit he has been offloaded in a total contact cast. He denies fever, chills, or increased drainage. On exam the wound measures 2.8 by 1.9 by 0.6 cm, which is smaller than 3.4 by 2.2 by 0.8 cm two weeks ago. The wound bed is 70% granulation tissue and 30% slough, with no exposed bone and negative probe-to-bone. There is 0.5 cm of undermining at 3 o'clock and no tunneling. Drainage is scant and serosanguineous. The periwound skin has mild maceration and callus, without erythema or warmth. Dorsalis pedis and posterior tibial pulses are palpable, and the ankle-brachial index was 1.1 last month. Sharp debridement of the slough and callus was performed with a curette and scalpel to the level of subcutaneous tissue, with minimal bleeding. Hemostasis was achieved with pressure. We applied Algidex Ag hydrogel gauze to the wound bed, covered it with Mepilex Border Flex, and placed him back in a total contact cast. Continue offloading and glycemic control; his A1c was 7.9 last week. If the wound does not improve by 4 weeks, we will consider EpiFix or an STSG. Return in one week, sooner for fever, drainage, or a red streak up the leg."},{"id":"D01","set":"D","text":"Ondansetron 4 mg IV and a 1 liter normal saline bolus."},{"id":"D02","set":"D","text":"Ketorolac 15 mg IV for the flank pain."},{"id":"D03","set":"D","text":"Hydromorphone 0.5 mg IV, repeat in 15 minutes if needed."},{"id":"D04","set":"D","text":"Ceftriaxone 1 g IV and azithromycin 500 mg by mouth for the pneumonia."},{"id":"D05","set":"D","text":"Piperacillin-tazobactam 4.5 g IV and vancomycin per pharmacy."},{"id":"D06","set":"D","text":"Enoxaparin 1 mg per kg subcutaneously."},{"id":"D07","set":"D","text":"Tranexamic acid 1 g IV over 10 minutes."},{"id":"D08","set":"D","text":"Diltiazem 15 mg IV for the atrial fibrillation with rapid ventricular response."},{"id":"D09","set":"D","text":"Labetalol 10 mg IV for the blood pressure."},{"id":"D10","set":"D","text":"Levetiracetam 1000 mg IV load for the seizure."},{"id":"D11","set":"D","text":"Naloxone 0.4 mg IV with improvement in his respiratory rate."},{"id":"D12","set":"D","text":"Epinephrine 0.3 mg intramuscular for anaphylaxis."},{"id":"D13","set":"D","text":"Norepinephrine started at 5 mcg per minute."},{"id":"D14","set":"D","text":"Methylprednisolone 125 mg IV with albuterol and ipratropium nebulizers."},{"id":"D15","set":"D","text":"Pantoprazole 40 mg IV for suspected upper GI bleeding."},{"id":"D16","set":"D","text":"Acetaminophen 1 g by mouth and ibuprofen 600 mg."},{"id":"D17","set":"D","text":"Nitrofurantoin 100 mg twice daily for 5 days."},{"id":"D18","set":"D","text":"Amoxicillin-clavulanate 875 mg twice daily for 7 days."},{"id":"D19","set":"D","text":"Hydralazine 10 mg IV."},{"id":"D20","set":"D","text":"Hydroxyzine 25 mg by mouth for itching."},{"id":"D21","set":"D","text":"Clonidine 0.1 mg by mouth."},{"id":"D22","set":"D","text":"Clonazepam 0.5 mg twice daily as needed."},{"id":"D23","set":"D","text":"Cephalexin 500 mg four times daily for 7 days."},{"id":"D24","set":"D","text":"Prednisone 40 mg daily for 5 days."},{"id":"D25","set":"D","text":"Zofran, Toradol, and Dilaudid were given."},{"id":"D26","set":"D","text":"Home medications include Eliquis, Lasix, Zoloft, and Synthroid."},{"id":"D27","set":"D","text":"TNKase was given for the STEMI."},{"id":"D28","set":"D","text":"Hold the Ozempic, and hold metformin for 48 hours after the contrast."},{"id":"E01","set":"E","text":"Potassium is 2.9, consistent with hypokalemia."},{"id":"E02","set":"E","text":"Potassium is 6.1, consistent with hyperkalemia."},{"id":"E03","set":"E","text":"Blood glucose is 48, and he is hypoglycemic."},{"id":"E04","set":"E","text":"Blood glucose is 512, and he is hyperglycemic."},{"id":"E05","set":"E","text":"She is hypotensive at 82 over 50."},{"id":"E06","set":"E","text":"He is hypertensive at 196 over 112."},{"id":"E07","set":"E","text":"The terminal ileum is thickened on CT."},{"id":"E08","set":"E","text":"There is a nondisplaced fracture of the right ilium."},{"id":"E09","set":"E","text":"Findings are most consistent with an ileus."},{"id":"E10","set":"E","text":"There is an obstructing stone in the left ureter."},{"id":"E11","set":"E","text":"Urethral discharge was noted."},{"id":"E12","set":"E","text":"Peroneal nerve palsy."},{"id":"E13","set":"E","text":"Perineal abscess."},{"id":"E14","set":"E","text":"Tender to palpation."},{"id":"E15","set":"E","text":"Reports palpitations."},{"id":"E16","set":"E","text":"Reports dysphagia to solids."},{"id":"E17","set":"E","text":"Expressive dysphasia was noted."},{"id":"E18","set":"E","text":"Swelling of the left knee."},{"id":"E19","set":"E","text":"Swelling of the right knee."},{"id":"E20","set":"E","text":"Left lower quadrant tenderness."},{"id":"E21","set":"E","text":"Right lower quadrant tenderness."},{"id":"E22","set":"E","text":"He denies chest pain, shortness of breath, or fever."},{"id":"E23","set":"E","text":"No history of diabetes."},{"id":"E24","set":"E","text":"Negative for cough."},{"id":"E25","set":"E","text":"The patient is a 16-year-old male."},{"id":"E26","set":"E","text":"The patient is a 60-year-old male."},{"id":"E27","set":"E","text":"Heart rate is 115 and blood pressure is 150 over 90."},{"id":"E28","set":"E","text":"Heart rate is 50 and blood pressure is 115 over 60."},{"id":"E29","set":"E","text":"He denies hematemesis, melena, or hematochezia."},{"id":"E30","set":"E","text":"She denies hemoptysis, hematuria, or hematochezia."},{"id":"E31","set":"E","text":"He coughed up a small amount of blood, consistent with hemoptysis."},{"id":"E32","set":"E","text":"Rectal exam showed melena."},{"id":"F01","set":"F","text":"This is a 58-year-old male with a history of COPD who presents with two days of pleuritic chest pain and cough. He had a syncopal episode this morning. He denies fever, hemoptysis, or leg swelling. He has been using his albuterol inhaler with little relief."},{"id":"F02","set":"F","text":"The patient reports epigastric pain for three days, with two episodes of hematemesis this morning and black stools yesterday. He denies hematochezia. He takes ibuprofen daily for back pain and drinks about six beers a week."},{"id":"F03","set":"F","text":"On exam he is pale and diaphoretic, with mild tachycardia. Abdomen is soft with epigastric tenderness, no rebound, and no guarding. There is no ascites. Rectal exam shows melena. Dorsalis pedis pulses are 2 plus bilaterally."},{"id":"F04","set":"F","text":"Differential diagnosis includes peptic ulcer disease, gastritis, and a Mallory-Weiss tear. Hemoglobin is 9.8, down from 13 last month. Will start pantoprazole 80 mg IV, transfuse if hemoglobin falls below 7, and consult gastroenterology for endoscopy."},{"id":"F05","set":"F","text":"A 4 cm laceration to the right forearm was irrigated with 500 mL of normal saline. Anesthesia was obtained with 1% lidocaine with epinephrine. The wound was closed with five simple interrupted 4-0 nylon sutures. Tetanus was updated with Tdap. Sutures to be removed in 10 days."},{"id":"F06","set":"F","text":"CT of the abdomen and pelvis with IV contrast shows a 5 mm obstructing ureterolithiasis at the left ureterovesical junction with mild hydronephrosis and perinephric stranding. There is no free air. The appendix is normal."},{"id":"F07","set":"F","text":"Right lateral malleolus wound measures 3.2 by 2.1 by 0.4 cm with 60% granulation tissue and 40% slough. There is 1 cm of undermining at 12 o'clock. Periwound skin shows maceration. We performed debridement of the slough with a curette, applied Hydrofera Blue Classic, and covered with Mepilex Border Flex. Follow up in one week."},{"id":"F08","set":"F","text":"Hyperbaric session 12 of 30 was completed at 2.4 ATA for 90 minutes without ear or sinus barotrauma. The wound is smaller with healthy granulation. Continue HBO and NPWT, and offload with a CROW boot."},{"id":"F09","set":"F","text":"I personally saw and examined the patient, and I agree with the documentation of the scribe. Critical care time was 35 minutes, exclusive of procedures and teaching, for a high probability of imminent life-threatening deterioration due to acute gastrointestinal hemorrhage."},{"id":"F10","set":"F","text":"Patient feels much better after ondansetron and a liter of fluids and is tolerating oral intake. Repeat abdominal exam is benign. Given his stability, I think it is appropriate to discharge him home with close follow-up and strict return precautions."},{"id":"G01","set":"G","text":"Can you check the debug log and tell me why the Qwen3-ASR server restarted?"},{"id":"G02","set":"G","text":"Update CrispASR to the latest release and rerun the comparison on the corpus."},{"id":"G03","set":"G","text":"I want to try Unsloth Studio for fine-tuning."},{"id":"G04","set":"G","text":"Compare Voxtral, Parakeet, and Granite on the clinical clips."},{"id":"G05","set":"G","text":"Set the language to English and turn the context bias list off."},{"id":"G06","set":"G","text":"The RTX 3090 has 24 GB of VRAM, so use CUDA and keep the model resident."}];
+
+  var SETS = [
+    { k: 'A', name: 'Short terms', hint: 'One term per take. Say it the way you would dictate it.' },
+    { k: 'B', name: 'Wound care', hint: 'Read the whole line as one take.' },
+    { k: 'C', name: 'Long takes', hint: 'One take that runs over a minute. Keep the key held through the whole passage and read at your normal pace.' },
+    { k: 'D', name: 'Drugs and doses', hint: 'Read units the way you say them: mg is milligrams.' },
+    { k: 'E', name: 'Look-alikes', hint: 'Read the whole line as one take.' },
+    { k: 'F', name: 'Passages', hint: 'One take each, 10 to 25 seconds.' },
+    { k: 'G', name: 'Everyday', hint: 'Read it the way you would say it to Claude.' },
+    { k: 'Z', name: 'Extras', hint: '' }
+  ];
+  var EXTRA_HINT = {
+    N: 'Noise take. Read it at your workstation with its usual background noise. No patient conversation should be audible.',
+    Q: 'Quiet take. Read it very quietly, as if someone were asleep nearby.',
+    X: 'No words in this take. Nothing should be written for it, so the page may not catch a paste: press Next when you have released the key.'
+  };
+
+  // Extras repeat lines from A and B under other conditions, and add three takes with no words.
+  var ALL = LINES.slice();
+  LINES.filter(function (l) { return /^A(0[1-9]|10)$/.test(l.id); }).forEach(function (l, i) {
+    ALL.push({ id: 'N' + String(i + 1).padStart(2, '0'), set: 'Z', kind: 'N', text: l.text });
+  });
+  LINES.filter(function (l) { return /^B0[1-5]$/.test(l.id); }).forEach(function (l, i) {
+    ALL.push({ id: 'Q' + String(i + 1).padStart(2, '0'), set: 'Z', kind: 'Q', text: l.text });
+  });
+  [['X01', 'Clear your throat, then release the key.'], ['X02', 'Cough once, then release the key.'], ['X03', 'Hold the key for 3 seconds and say nothing.']].forEach(function (x) {
+    ALL.push({ id: x[0], set: 'Z', kind: 'X', silent: true, text: x[1] });
+  });
+
+  var KEY = 'read-aloud-script-2';
+  var S = { i: -1, auto: true, startedAt: null, log: {} };
+  try {
+    var raw = localStorage.getItem(KEY);
+    if (raw) { var o = JSON.parse(raw); if (o && o.log) { S = Object.assign(S, o); } }
+  } catch (e) {}
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} }
+
+  var $ = function (id) { return document.getElementById(id); };
+  var timer = null;
+
+  function entry(id) { return S.log[id]; }
+  function isDone(id) { var e = entry(id); return !!e && (e.status === 'done' || e.status === 'manual'); }
+  function setOf(l) { return SETS.filter(function (s) { return s.k === l.set; })[0]; }
+  function firstOpen() {
+    for (var i = 0; i < ALL.length; i++) { if (!entry(ALL[i].id)) return i; }
+    return 0;
+  }
+  if (typeof S.i !== 'number' || S.i < 0 || S.i >= ALL.length) S.i = firstOpen();
+  $('auto').checked = S.auto !== false;
+
+  function two(n) { return String(n).padStart(2, '0'); }
+  function localIso(d) {
+    var off = -d.getTimezoneOffset(), sign = off >= 0 ? '+' : '-', a = Math.abs(off);
+    return d.getFullYear() + '-' + two(d.getMonth() + 1) + '-' + two(d.getDate()) + 'T' + two(d.getHours()) + ':' + two(d.getMinutes()) + ':' + two(d.getSeconds()) +
+      '.' + String(d.getMilliseconds()).padStart(3, '0') + sign + two(Math.floor(a / 60)) + ':' + two(a % 60);
+  }
+
+  function say(text, kind) { var m = $('msg'); m.textContent = text || ''; m.dataset.k = kind || ''; }
+
+  // Tabs: built once, counts refreshed on every render.
+  var tabs = $('tabs');
+  SETS.forEach(function (s) {
+    var b = document.createElement('button');
+    b.type = 'button'; b.className = 'tab'; b.dataset.k = s.k;
+    b.innerHTML = '<span class="k"><span>' + (s.k === 'Z' ? '+' : s.k) + '</span><span class="n"></span></span><span class="n nm"></span><span class="m"><i></i></span>';
+    b.querySelector('.nm').textContent = s.name;
+    b.addEventListener('click', function () {
+      var idxs = ALL.map(function (l, i) { return i; }).filter(function (i) { return ALL[i].set === s.k; });
+      var open = idxs.filter(function (i) { return !isDone(ALL[i].id); })[0];
+      go(open !== undefined ? open : idxs[0]);
+    });
+    tabs.appendChild(b);
+  });
+
+  function render() {
+    var l = ALL[S.i], set = setOf(l), e = entry(l.id);
+    var inSet = ALL.filter(function (x) { return x.set === l.set; });
+    $('lid').textContent = l.id;
+    $('lset').textContent = set.name;
+    $('lpos').textContent = (inSet.indexOf(l) + 1) + ' of ' + inSet.length;
+    var stat = $('lstat');
+    if (e && e.status !== 'todo') {
+      stat.hidden = false; stat.dataset.s = e.status;
+      stat.textContent = e.status === 'done' ? 'caught' : e.status === 'manual' ? 'moved on by hand' : 'skipped';
+    } else { stat.hidden = true; }
+    var t = $('ltext');
+    t.textContent = l.text;
+    var n = l.text.length;
+    t.className = 'line ' + (l.silent ? 'silent ' : '') + (n <= 60 ? 's' : n <= 150 ? 'm' : 'l');
+    $('lhint').textContent = l.kind ? EXTRA_HINT[l.kind] : set.hint;
+    var done = ALL.filter(function (x) { return isDone(x.id); }).length;
+    $('overall').textContent = done + ' / ' + ALL.length + ' lines';
+    $('overallbar').style.width = (100 * done / ALL.length) + '%';
+    Array.prototype.forEach.call(tabs.children, function (b) {
+      var ls = ALL.filter(function (x) { return x.set === b.dataset.k; });
+      var d = ls.filter(function (x) { return isDone(x.id); }).length;
+      b.querySelector('.k .n').textContent = d + '/' + ls.length;
+      b.querySelector('.m i').style.width = (100 * d / ls.length) + '%';
+      b.setAttribute('aria-current', b.dataset.k === l.set ? 'true' : 'false');
+    });
+    $('back').disabled = S.i === 0;
+    $('next').textContent = S.i === ALL.length - 1 ? 'Finish' : 'Next';
+    var cur = tabs.querySelector('[aria-current="true"]');
+    if (cur && cur.scrollIntoView) { try { cur.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (x) {} }
+    save();
+  }
+
+  function go(i) {
+    clearTimeout(timer);
+    S.i = Math.max(0, Math.min(ALL.length - 1, i));
+    say('');
+    render();
+    window.scrollTo(0, 0);
+  }
+  function next(byHand) {
+    var l = ALL[S.i];
+    if (byHand && !entry(l.id)) S.log[l.id] = { status: 'manual', attempts: [] };
+    else if (byHand && entry(l.id).status === 'todo') entry(l.id).status = 'manual';
+    if (S.i === ALL.length - 1) { render(); say('That was the last line. Press Copy session log and paste it to Claude.', 'ok'); return; }
+    go(S.i + 1);
+  }
+
+  function caught(text) {
+    var l = ALL[S.i];
+    var e = entry(l.id) || (S.log[l.id] = { status: 'todo', attempts: [] });
+    if (!S.startedAt) S.startedAt = localIso(new Date());
+    e.attempts.push({ at: localIso(new Date()), heard: text });
+    e.status = 'done';
+    render();
+    clearTimeout(timer);
+    if (S.auto && S.i < ALL.length - 1) { say('Caught. Next line coming up.', 'ok'); timer = setTimeout(function () { go(S.i + 1); }, 900); }
+    else if (S.i === ALL.length - 1) { say('Caught. That was the last line. Press Copy session log.', 'ok'); }
+    else { say('Caught. Press Next when you are ready.', 'ok'); }
+  }
+
+  // WhisperInk pastes with Ctrl+V into whatever window is in front, so the page listens for the paste itself.
+  document.addEventListener('paste', function (ev) {
+    if (ev.target && ev.target.closest && ev.target.closest('textarea')) return;
+    var t = ((ev.clipboardData && ev.clipboardData.getData('text/plain')) || '').trim();
+    if (!t) return;
+    ev.preventDefault();
+    caught(t);
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+    var k = ev.key;
+    if (k === 'ArrowRight') { ev.preventDefault(); next(true); }
+    else if (k === 'ArrowLeft') { ev.preventDefault(); go(S.i - 1); }
+    else if (k === 'r' || k === 'R') { redo(); }
+    else if (k === 's' || k === 'S') { skip(); }
+  });
+
+  function redo() {
+    clearTimeout(timer);
+    var l = ALL[S.i], e = entry(l.id);
+    if (e) e.status = 'todo';
+    render();
+    say('Ready. Read it again; the last attempt counts.');
+  }
+  function skip() {
+    var l = ALL[S.i];
+    var e = entry(l.id) || (S.log[l.id] = { status: 'todo', attempts: [] });
+    e.status = 'skipped';
+    next(false);
+  }
+
+  $('next').addEventListener('click', function () { next(true); });
+  $('back').addEventListener('click', function () { go(S.i - 1); });
+  $('redo').addEventListener('click', redo);
+  $('skip').addEventListener('click', skip);
+  $('auto').addEventListener('change', function () { S.auto = $('auto').checked; save(); });
+
+  // The session log: every line touched, with when each paste arrived and what came in. The times match the archive.
+  function buildLog() {
+    return JSON.stringify({
+      script: 'RECORD_THESE_2', startedAt: S.startedAt, copiedAt: localIso(new Date()),
+      lines: ALL.filter(function (l) { return entry(l.id); }).map(function (l) {
+        var e = entry(l.id); return { id: l.id, status: e.status, attempts: e.attempts };
+      })
+    }, null, 1);
+  }
+  $('copylog').addEventListener('click', function () {
+    var json = buildLog(), box = $('logbox'), msg = $('toolmsg');
+    function fallback() {
+      box.value = json; box.hidden = false; box.focus(); box.select();
+      msg.textContent = 'Select all and copy from the box below.';
+    }
+    try {
+      navigator.clipboard.writeText(json).then(function () {
+        box.hidden = true; msg.textContent = 'Copied. Paste it to Claude.';
+      }, fallback);
+    } catch (e) { fallback(); }
+  });
+  var armed = false, armTimer = null;
+  $('erase').addEventListener('click', function () {
+    var b = $('erase');
+    if (!armed) {
+      armed = true; b.textContent = 'Press again to erase';
+      armTimer = setTimeout(function () { armed = false; b.textContent = 'Erase progress'; }, 4000);
+      return;
+    }
+    clearTimeout(armTimer); armed = false; b.textContent = 'Erase progress';
+    S = { i: 0, auto: S.auto, startedAt: null, log: {} };
+    $('logbox').hidden = true; $('toolmsg').textContent = 'Progress erased.';
+    render();
+  });
+
+  // Whether the page can hear the paste depends on it having keyboard focus.
+  function focusState() {
+    var on = document.hasFocus();
+    $('ear').dataset.on = on ? 'true' : 'false';
+    $('eartext').textContent = on ? 'Listening. Hold Ctrl+Space and read.' : 'Click this page once so it can hear your dictation.';
+  }
+  window.addEventListener('focus', focusState);
+  window.addEventListener('blur', focusState);
+  document.addEventListener('click', focusState);
+  setInterval(focusState, 1500);
+
+  // Keep the screen on while reading, where the viewer allows it.
+  function wake() { try { if (navigator.wakeLock && document.visibilityState === 'visible') navigator.wakeLock.request('screen').catch(function () {}); } catch (e) {} }
+  document.addEventListener('visibilitychange', wake);
+  wake();
+
+  focusState();
+  render();
+})();
+</script>

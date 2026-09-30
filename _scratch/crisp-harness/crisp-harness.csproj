@@ -32,6 +32,7 @@
     <Compile Include="..\..\OmiTranscriber.cs" />
     <Compile Include="..\..\LocalModelDiscovery.cs" />
     <Compile Include="..\..\LocalTakeSplitter.cs" />
+    <Compile Include="..\..\TranscriptGuard.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- TranscriptCoverage reads WAVs with NAudio's WaveFileReader. -->

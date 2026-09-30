@@ -45,6 +45,9 @@ namespace WhisperInk
         public const string Pending = "pending";
         public const string Failed = "failed";
         public const string Incomplete = "incomplete";
+        // Delivered, but the provider itself said the text needs checking
+        // (ITranscriptWarning: Omi dropping the term list). Kept for a retry.
+        public const string Unchecked = "unchecked";
         public const string Interrupted = "interrupted";
         // Judged silent and never sent. Kept (the newest few) because that
         // judgement was once wrong for real, quiet speech — and a take the

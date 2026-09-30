@@ -1170,9 +1170,11 @@ namespace WhisperInk
 
                     // An incomplete transcript keeps its audio: a retry (or
                     // another provider) may get the part that's missing.
+                    // So does one the provider says needs checking.
                     if (take != null)
                     {
                         if (shortfall is { } sf) _unsent!.Keep(take, UnsentTakes.Incomplete, "incomplete: " + sf.Describe(), text);
+                        else if (result.Warning is { } w) _unsent!.Keep(take, UnsentTakes.Unchecked, "check the terms: " + w, text);
                         else _unsent!.Delivered(take, text);
                     }
 
@@ -1183,6 +1185,9 @@ namespace WhisperInk
                     if (shortfall is { } missing)
                         WarnDelivered("⚠ Check the end!", "Transcript may be incomplete",
                             $"{result.ProviderName} {missing.Describe()}. {(pasted ? "It was pasted" : "It's on the clipboard")} — check the end of the note. The audio is saved: ↻ Unsent dictations can retry it.");
+                    else if (result.Warning is { } warning)
+                        WarnDelivered("⚠ Check terms!", "Check the medical terms",
+                            $"{result.ProviderName} {warning}. {(pasted ? "It was pasted" : "It's on the clipboard")} — check the medical terms before it goes in a chart. The audio is saved: ↻ Unsent dictations can retry it with another provider.");
                     else if (micCutOut)
                         WarnDelivered("⚠ Mic cut out!", "Microphone stopped mid-dictation",
                             $"Only the first {audioMs / 1000.0:F0}s of a {holdMs / 1000.0:F0}s hold were recorded. {(pasted ? "That part was pasted" : "That part is on the clipboard")} — anything said after it is missing.");
@@ -1234,10 +1239,21 @@ namespace WhisperInk
                     // easy to miss when you're already looking at the chart.
                     if (take != null) _unsent!.Keep(take, UnsentTakes.Failed, result.FailReason);
                     PlayUiSound(UiSound.Error);
-                    FlashStatus(result.DeadlineHit ? "Timed out — saved ↻" : "Failed — saved ↻", 3000);
-                    _tray?.ShowBalloon("Dictation not transcribed",
-                        $"{result.ProviderName}: {result.FailReason}. The audio is saved — right-click the tray icon → ↻ Unsent dictations to retry.",
-                        warning: true);
+                    if (result.Rejected != null)
+                    {
+                        // Not an outage: the provider answered with the bias list, which is what a speech model does
+                        // with a take that has no speech in it. The same loud cue as "No text!", and no balloon: a
+                        // cough during a hold shouldn't pop one. Kept as a failure, not under Judged silent, because
+                        // that shelf has a small allowance and a real dictation misjudged here must not fall off it.
+                        FlashStatus("List only! Saved ↻", 3000);
+                    }
+                    else
+                    {
+                        FlashStatus(result.DeadlineHit ? "Timed out — saved ↻" : "Failed — saved ↻", 3000);
+                        _tray?.ShowBalloon("Dictation not transcribed",
+                            $"{result.ProviderName}: {result.FailReason}. The audio is saved — right-click the tray icon → ↻ Unsent dictations to retry.",
+                            warning: true);
+                    }
                 }
 
                 Log("[diag] StopBatchDictation: exit");
@@ -1393,7 +1409,11 @@ namespace WhisperInk
             bool DeadlineHit,
             string FailReason,
             double? LastWordEndSeconds,
-            double? DecodedAudioSeconds);
+            double? DecodedAudioSeconds,
+            string? Warning = null,
+            // Set when the provider answered, but with its own prompt (the bias list) instead of speech.
+            // Text is then null and FailReason says why; nothing may be pasted (TranscriptGuard).
+            string? Rejected = null);
 
         private async Task<TakeTranscription> TranscribeTakeAsync(ApiProvider provider, byte[] wavBytes, double audioMs,
                                                                  StreamedTranscription? streamed = null)
@@ -1424,6 +1444,7 @@ namespace WhisperInk
             var sw = System.Diagnostics.Stopwatch.StartNew();
             string? result;
             string how = "";
+            bool fromStream = false;   // the text came from the stream, not TranscribeAsync
             // A take streamed while it was spoken is finished through the
             // transcriber that opened it, only if that is still this
             // provider's (a provider switch or a settings save during the hold
@@ -1442,6 +1463,7 @@ namespace WhisperInk
                 {
                     result = outcome.Text;
                     how = " after release (streamed)";
+                    fromStream = true;
                 }
             }
             else
@@ -1467,8 +1489,32 @@ namespace WhisperInk
             string failReason = result != null ? ""
                 : deadlineHit ? $"no answer within its {deadline.TotalSeconds:F0}s deadline"
                 : "the request failed (details in debug.log)";
+            // A streamed take's text didn't come through TranscribeAsync, so
+            // the transcriber's warning (if any) belongs to an older call.
+            string? warning = result != null && !fromStream ? (transcriber as ITranscriptWarning)?.LastWarning : null;
+            // A speech model given a take with no speech in it (a cough, a throat clear) can answer with its own prompt:
+            // the bias list. That is judged from the text alone, so it holds for a streamed take too. A recital is
+            // never pasted (the take is kept and the caller says so); a recital tacked onto real text is delivered
+            // with a warning, like any other transcript that needs a second look.
+            if (result != null)
+            {
+                var guard = TranscriptGuard.Inspect(result, _contextBiasTerms);
+                if (guard.Kind == TranscriptGuard.Kind.ListRecital)
+                {
+                    const string why = "the term list came back instead of speech";
+                    Log($"[error] {transcriber.DisplayName} returned your term list, not speech ({guard.Terms} of its terms in list order, {guard.Share:P0} of the text) — nothing pasted; the audio is kept for a retry. A take with no speech in it (a cough, a throat clear) does this to a speech model");
+                    return new TakeTranscription(null, transcriber.DisplayName, false, why, null, null, null, why);
+                }
+                if (guard.Kind == TranscriptGuard.Kind.ListInText)
+                {
+                    const string inText = "put your term list into the text";
+                    warning = warning == null ? inText : warning + "; " + inText;
+                }
+            }
+            if (warning != null)
+                Log($"[warn] {transcriber.DisplayName} {warning}. Delivered anyway, audio kept for a retry");
             return new TakeTranscription(result, transcriber.DisplayName, deadlineHit, failReason,
-                coverage?.LastWordEndSeconds, coverage?.DecodedAudioSeconds);
+                coverage?.LastWordEndSeconds, coverage?.DecodedAudioSeconds, warning);
         }
 
         /// <summary>The incomplete-transcript check (TranscriptCoverage),
@@ -1602,20 +1648,25 @@ namespace WhisperInk
                 var shortfall = CheckCoverage(wav, audioMs, result);
                 _injector.CopyToClipboard(text);
                 HistoryService.Add(text);
+                string? warning = result.Warning;
                 if (shortfall is { } sf) _unsent?.Keep(take, UnsentTakes.Incomplete, "retry incomplete: " + sf.Describe(), text);
+                else if (warning != null) _unsent?.Keep(take, UnsentTakes.Unchecked, "retry: check the terms: " + warning, text);
                 else _unsent?.Remove(take, text, provider);
-                Log($"[retry] {take.Id}: {text.Length} chars on the clipboard{(localFallback ? " (LOCAL FALLBACK)" : "")}{(shortfall != null ? " (incomplete)" : "")}");
+                Log($"[retry] {take.Id}: {text.Length} chars on the clipboard{(localFallback ? " (LOCAL FALLBACK)" : "")}{(shortfall != null ? " (incomplete)" : "")}{(warning != null ? " (check the terms)" : "")}");
 
                 string who = localFallback
                     ? $"Transcribed by {result.ProviderName} — a LOCAL FALLBACK, not your usual provider. Check it before it goes in a chart."
                     : $"Transcribed by {result.ProviderName}.";
                 string body = $"{who} It's on the clipboard — paste it where it belongs."
-                              + (shortfall is { } s ? $" It may be incomplete: {s.Describe()}." : "");
-                if (localFallback || shortfall != null)
+                              + (shortfall is { } s ? $" It may be incomplete: {s.Describe()}." : "")
+                              + (warning != null ? $" {result.ProviderName} {warning}: check the medical terms." : "");
+                if (localFallback || shortfall != null || warning != null)
                 {
                     PlayUiSound(UiSound.Warn);
-                    FlashStatus(localFallback ? "Fallback — copied" : "⚠ Copied — check end", 4000);
-                    _tray?.ShowBalloon(shortfall != null ? "Recovered — may be incomplete" : "Recovered with a local fallback", body, warning: true);
+                    FlashStatus(localFallback ? "Fallback — copied" : shortfall != null ? "⚠ Copied — check end" : "⚠ Copied — check terms", 4000);
+                    _tray?.ShowBalloon(shortfall != null ? "Recovered — may be incomplete"
+                                       : warning != null ? "Recovered — check the terms"
+                                       : "Recovered with a local fallback", body, warning: true);
                 }
                 else
                 {

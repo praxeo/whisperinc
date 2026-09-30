@@ -61,4 +61,19 @@ namespace WhisperInk
         /// <summary>Seconds of audio the service says it decoded.</summary>
         double? DecodedAudioSeconds { get; }
     }
+
+    /// <summary>
+    /// Optional, for transcribers whose provider reports that a transcript it
+    /// returned needs checking: why, for the LAST
+    /// <see cref="ITranscriber.TranscribeAsync"/> call, or null. The text is
+    /// still delivered, with the Warn cue and the take kept for a retry, the
+    /// way an incomplete transcript is. Omi's is the first: its own audit says
+    /// when it dropped the term list for a take (OmiTranscriber).
+    /// </summary>
+    public interface ITranscriptWarning
+    {
+        /// <summary>Why the last transcript needs checking, completing
+        /// "{provider name} …"; null when there's no concern.</summary>
+        string? LastWarning { get; }
+    }
 }

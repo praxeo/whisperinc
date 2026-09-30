@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Runs the real-dictation corpus (%APPDATA%\.WhisperInk\ab-corpus\) through
+       the cloud providers (see Program.cs). Links the SHIPPING transcriber
+       classes, so every request is exactly what WhisperInk sends. Every run
+       uploads clinical audio to those providers and bills it. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <PropertyGroup>
+    <Repo>$(MSBuildThisFileDirectory)..\..</Repo>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(Repo)\HttpTranscriber.cs" />
+    <Compile Include="$(Repo)\StreamedTranscription.cs" />
+    <Compile Include="$(Repo)\TranscriptionDeadline.cs" />
+    <Compile Include="$(Repo)\TranscriptCoverage.cs" />
+    <Compile Include="$(Repo)\AppConfig.cs" />
+    <Compile Include="$(Repo)\ITranscriber.cs" />
+    <Compile Include="$(Repo)\ModulateTranscriber.cs" />
+    <Compile Include="$(Repo)\SmallestTranscriber.cs" />
+    <Compile Include="$(Repo)\Reson8Transcriber.cs" />
+    <Compile Include="$(Repo)\OmiTranscriber.cs" />
+    <Compile Include="$(Repo)\DeepgramTranscriber.cs" />
+    <Compile Include="$(Repo)\SonioxTranscriber.cs" />
+    <Compile Include="$(Repo)\GoogleChirp3Transcriber.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- TranscriptCoverage reads WAVs with NAudio's WaveFileReader; Chirp 3 gets its OAuth token from Google.Apis.Auth. -->
+    <PackageReference Include="NAudio.Core" Version="2.2.1" />
+    <PackageReference Include="Google.Apis.Auth" Version="1.69.0" />
+  </ItemGroup>
+</Project>

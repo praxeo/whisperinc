@@ -5,7 +5,7 @@
 // The request is OpenAI-style multipart, but three things keep it out of
 // HttpTranscriber:
 //   - the default response_format is diarized_json, not {"text": …}, so
-//     `response_format=json` must be sent explicitly;
+//     `json` (or, with a list, `verbose_json`) must be sent explicitly;
 //   - biasing is a `vocabulary` field holding a JSON ARRAY string, which none of
 //     HttpTranscriber's mechanisms produce;
 //   - audio over 60.000 s (or any request with a webhook) is answered 202 with a
@@ -48,6 +48,17 @@
 // 429 and 503 mean capacity (Edge yields to the flagship and may be turned away
 // briefly), so the first POST is retried once after Retry-After, capped at 3 s;
 // anything else fails the take, which stays journaled for ↻ retry.
+//
+// ── The list can be dropped, and Omi says so ─────────────────────────────
+// A transcript sent with a `vocabulary` comes back with Omi's audit of it,
+// but a job's (a take over 60 s) only in `verbose_json`, so that's what a
+// take with a list asks for. On a 111 s take (2026-09-28) the audit reported
+// "safety_fallback": true, "hinted output was not retained": every list term
+// dropped, and the plain transcript wrote hematemesis for every
+// hematochezia. Such a take is still delivered, but through
+// ITranscriptWarning: the Warn cue, "⚠ Check terms!", and the take kept for a
+// retry. application_status reads "partial" even on a right transcript, so
+// it isn't a signal.
 
 using System;
 using System.Collections.Generic;
@@ -61,7 +72,7 @@ using System.Threading.Tasks;
 
 namespace WhisperInk
 {
-    public sealed class OmiTranscriber : ITranscriber
+    public sealed class OmiTranscriber : ITranscriber, ITranscriptWarning
     {
         // Public so AppConfig.CreateDefaults builds its presets from the same
         // strings this class posts to.
@@ -92,6 +103,9 @@ namespace WhisperInk
         private readonly Action<string> _log;
 
         public string DisplayName => _provider.Name;
+
+        /// <summary>Set when Omi's audit says the last take's list wasn't used.</summary>
+        public string? LastWarning { get; private set; }
 
         public OmiTranscriber(ApiProvider provider, HttpClient http, Action<string> log)
         {
@@ -127,6 +141,7 @@ namespace WhisperInk
 
         public async Task<string?> TranscribeAsync(byte[] wavBytes, IReadOnlyList<string> biasTerms, CancellationToken ct = default)
         {
+            LastWarning = null;
             if (wavBytes == null || wavBytes.Length == 0) return null;
 
             try
@@ -168,17 +183,19 @@ namespace WhisperInk
 
         private List<(string Name, string Value)> BuildFields(IReadOnlyList<string> biasTerms)
         {
-            // String fields first, file last, as everywhere else.
+            // String fields first, file last, as everywhere else. With a list,
+            // verbose_json: a job's `json` result (a take over 60 s) carries
+            // only the text, not the audit that says whether the list was used.
+            string? vocabulary = BuildVocabulary(biasTerms);
             var fields = new List<(string, string)>
             {
                 ("model", Model),
-                ("response_format", "json"),
+                ("response_format", vocabulary != null ? "verbose_json" : "json"),
             };
 
             string? lang = ResolveLanguage();
             if (lang != null) fields.Add(("language", lang));
 
-            string? vocabulary = BuildVocabulary(biasTerms);
             if (vocabulary != null) fields.Add(("vocabulary", vocabulary));
 
             return fields;
@@ -376,9 +393,30 @@ namespace WhisperInk
         {
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+            {
+                NoteVocabularyAudit(doc.RootElement, what);
                 return (text.GetString() ?? "").Trim();
+            }
             _log($"[omi] {what} had no transcript: {Preview(json)}");
             return null;
+        }
+
+        /// <summary>Reads the `vocabulary` audit Omi returns with a transcript
+        /// sent with a list, and sets <see cref="LastWarning"/> when the list
+        /// wasn't used: a safety fallback, or nothing of it prompted.</summary>
+        private void NoteVocabularyAudit(JsonElement root, string what)
+        {
+            if (!root.TryGetProperty("vocabulary", out var v) || v.ValueKind != JsonValueKind.Object) return;
+            static int Int(JsonElement el, string name) =>
+                el.TryGetProperty(name, out var n) && n.ValueKind == JsonValueKind.Number && n.TryGetInt32(out int i) ? i : 0;
+
+            if (v.TryGetProperty("safety_fallback", out var sf) && sf.ValueKind == JsonValueKind.True)
+                LastWarning = "dropped your term list for this take (its safety fallback), so none of the terms were applied";
+            else if (Int(v, "requested_terms") > 0 && Int(v, "prompted_terms") == 0)
+                LastWarning = "didn't use your term list for this take";
+            else
+                return;
+            _log($"[omi] {what}: {LastWarning} (Omi: {Str(v, "coverage_summary") ?? "no summary"})");
         }
 
         /// <summary>"HTTP 402 [billing_blocked] message (hint) request …".</summary>
