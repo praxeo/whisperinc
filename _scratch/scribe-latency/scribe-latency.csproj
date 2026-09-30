@@ -21,6 +21,7 @@
     <Compile Include="$(Repo)\ModulateTranscriber.cs" />
     <Compile Include="$(Repo)\SmallestTranscriber.cs" />
     <Compile Include="$(Repo)\Reson8Transcriber.cs" />
+    <Compile Include="$(Repo)\OmiTranscriber.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="NAudio.Core" Version="2.2.1" />
