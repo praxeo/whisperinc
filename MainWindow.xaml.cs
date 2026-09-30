@@ -894,15 +894,27 @@ namespace WhisperInk
 
         private void StartBatchDictation(IntPtr target)
         {
+            // Every early return below MUST release the modifiers. The hook
+            // turned suppression on at Space-down, so it swallows the user's
+            // physical Ctrl key-up: without a synthetic release the OS keeps
+            // Ctrl down and every later keystroke is Ctrl+<key> (2026-09-29:
+            // a keyless Mistral left Ctrl stuck until a reboot didn't help).
             var startProvider = GetActiveProvider();
             if (startProvider != null && startProvider.RequiresApiKey && string.IsNullOrWhiteSpace(startProvider.ApiKey))
             {
-                lblStatus.Content = "No API key!";
+                _injector.ReleaseAllModifierKeys();
+                Log($"[error] {startProvider.Name} has no API key — nothing recorded (🔌 Provider → ⚙ Configure Providers)");
+                PlayUiSound(UiSound.Error);
+                FlashStatus("No API key!", 3000);
+                _tray?.ShowBalloon("No API key",
+                    $"{startProvider.Name} has no API key, so nothing was recorded. Add one in 🔌 Provider → ⚙ Configure Providers, or switch provider.",
+                    warning: true);
                 return;
             }
 
             if (Interlocked.CompareExchange(ref _recState, 1, 0) != 0)
             {
+                _injector.ReleaseAllModifierKeys();
                 // The previous take (or a retry) is still transcribing. Used to
                 // be silent — and with deadlines that scale to long takes, the
                 // wait can be long enough to start talking into a press that

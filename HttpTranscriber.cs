@@ -169,11 +169,21 @@ namespace WhisperInk
             switch (_provider.ResolvedBiasMechanism)
             {
                 case "mistral_context_bias" when biasTerms is { Count: > 0 }:
-                    // Mistral Voxtral batch: comma-joined, NO space, <=100 terms.
-                    // (The API schema also lists array<string>; the documented
-                    // examples use this comma string form, so prefer it.)
-                    content.Add(new StringContent(string.Join(",", biasTerms.Take(100))), "context_bias");
+                {
+                    // Mistral Voxtral Transcribe 2: context_bias is an array of
+                    // up to 100 words or phrases, which multipart carries as one
+                    // `context_bias` field per term (what Mistral's own SDK
+                    // sends). It used to go as ONE comma-joined field: a single
+                    // "phrase" made of the whole list.
+                    var terms = MistralContextBias(biasTerms);
+                    if (terms.Count > 0)
+                    {
+                        _log($"[context_bias] sending {terms.Count} terms");
+                        foreach (var term in terms)
+                            content.Add(new StringContent(term), "context_bias");
+                    }
                     break;
+                }
 
                 case "whisper_prompt" when biasTerms is { Count: > 0 }:
                     // OpenAI Whisper / local prompt-conditioned servers. A labeled
@@ -284,6 +294,25 @@ namespace WhisperInk
                 _log($"[scribe] last word ends at {Fmt(LastWordEndSeconds)} s; decoded {Fmt(DecodedAudioSeconds)} s of audio");
             }
             catch (Exception ex) { _log($"[scribe] word timing unreadable: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Mistral's cap on context_bias entries.</summary>
+        internal const int MistralMaxBiasTerms = 100;
+
+        /// <summary>The shared list as Mistral takes it: trimmed, blanks and
+        /// repeats (any case) dropped, the first 100 kept.</summary>
+        internal static List<string> MistralContextBias(IEnumerable<string> terms)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var result = new List<string>();
+            foreach (var raw in terms)
+            {
+                string t = raw?.Trim() ?? "";
+                if (t.Length == 0 || !seen.Add(t)) continue;
+                result.Add(t);
+                if (result.Count == MistralMaxBiasTerms) break;
+            }
+            return result;
         }
 
         private static string Fmt(double? s) => s?.ToString("F1", CultureInfo.InvariantCulture) ?? "?";

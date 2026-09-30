@@ -82,8 +82,8 @@ namespace WhisperInk
         //   "none"                 — provider has no biasing field
         //   "whisper_prompt"       — labeled glossary in the "prompt" form field
         //                            (OpenAI Whisper, local prompt-conditioned servers)
-        //   "mistral_context_bias" — comma-joined string in the "context_bias" field
-        //                            (Mistral Voxtral batch; <=100 terms)
+        //   "mistral_context_bias" — one "context_bias" field per term
+        //                            (Mistral Voxtral Transcribe 2; <=100 terms)
         //   "elevenlabs_keyterms"  — repeated "keyterms" form fields (ElevenLabs Scribe v2)
         //   "hotwords"             — comma-joined "hotwords" form field (CrispASR local)
         //   "phrase_sets"          — Google Chirp 3 inline phraseSets (handled natively)

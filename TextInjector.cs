@@ -36,6 +36,8 @@ namespace WhisperInk
 
         private const uint WM_CHAR = 0x0102;
         private const byte VK_CONTROL = 0x11;
+        private const byte VK_RCONTROL = 0xA3;
+        private const byte KEYEVENTF_EXTENDEDKEY_BYTE = 0x01;
         private const byte VK_LMENU = 0xA4;
         private const byte VK_RMENU = 0xA5;
         private const byte VK_LWIN = 0x5B;
@@ -271,6 +273,8 @@ namespace WhisperInk
         public void ReleaseAllModifierKeys()
         {
             keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP_BYTE, SyntheticMarker);
+            // VK_CONTROL releases the LEFT Ctrl only; the hotkey takes either.
+            keybd_event(VK_RCONTROL, 0, KEYEVENTF_KEYUP_BYTE | KEYEVENTF_EXTENDEDKEY_BYTE, SyntheticMarker);
             keybd_event(0xA0, 0, KEYEVENTF_KEYUP_BYTE, SyntheticMarker);
             keybd_event(0xA1, 0, KEYEVENTF_KEYUP_BYTE, SyntheticMarker);
             keybd_event(VK_LMENU, 0, KEYEVENTF_KEYUP_BYTE, SyntheticMarker);

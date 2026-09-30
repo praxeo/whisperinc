@@ -871,6 +871,28 @@ Check(!q2.Fields.Any(f => f.Name is "language_code" or "diarize" or "num_speaker
       "and none of the ElevenLabs-only fields (it used to get tag_audio_events/no_verbatim and lose `language`)");
 Check(r2 == "hello ... world", "its text is returned as-is (the cleanup is ElevenLabs-only)");
 
+// Mistral: context_bias is an array, one form field per term (as Mistral's
+// SDK sends it). It used to be a single comma-joined field.
+var mistralP = new ApiProvider
+{
+    Id = "mistral", Name = "Mistral", ApiKey = "mk", BaseUrl = Prefix.TrimEnd('/'),
+    TranscriptionModel = "voxtral-mini-latest", Language = "en", BiasMechanism = "mistral_context_bias",
+};
+reply = "{\"text\":\"Hematochezia.\"}";
+var mistralTerms = new List<string> { " hematochezia ", "Mag citrate", "HEMATOCHEZIA", "", "melena" };
+for (int i = 0; i < 120; i++) mistralTerms.Add($"term{i}");
+await new HttpTranscriber(mistralP, http, Log).TranscribeAsync(speech, mistralTerms);
+var qm = LastRequest();
+var cb = qm.Fields.Where(f => f.Name == "context_bias").Select(f => f.Value).ToList();
+Check(qm.Authorization == "Bearer mk" && qm.Get("model") == "voxtral-mini-latest" && qm.Get("language") == "en",
+      "Mistral: Bearer auth, model, language=en");
+Check(cb.Count == 100 && cb[0] == "hematochezia" && cb[1] == "Mag citrate" && cb[2] == "melena" && !cb.Contains(""),
+      $"Mistral: one context_bias field per term, trimmed, deduped in any case, blanks dropped, capped at 100 ({cb.Count}: {string.Join(" | ", cb.Take(3))} …)");
+Check(!qm.Fields.Any(f => f.Name is "timestamp_granularities" or "keyterms" or "language_code" or "diarize"),
+      "Mistral: no timestamp_granularities (refused together with language) and no ElevenLabs fields");
+Check(qm.Fields.Count > 0 && qm.Fields[^1].Name == "file" && Logged(@"\[context_bias\] sending 100 terms"),
+      "Mistral: the file part is last, and the term count is logged");
+
 // Deadline: the per-take token ends a slow request, loudly.
 reply = "{\"text\":\"late\",\"words\":[]}";
 replyDelayMs = 3000;
