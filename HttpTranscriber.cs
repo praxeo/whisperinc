@@ -147,8 +147,10 @@ namespace WhisperInk
                 if (!string.Equals(language, "auto", StringComparison.OrdinalIgnoreCase))
                     content.Add(new StringContent(language), "language_code");
             }
-            else
+            else if (!string.Equals(language, "auto", StringComparison.OrdinalIgnoreCase))
             {
+                // "auto" isn't a language code: OpenAI-style APIs detect the
+                // language when the field is left out, which is what it means.
                 content.Add(new StringContent(language), "language");
             }
 
@@ -299,15 +301,19 @@ namespace WhisperInk
         /// <summary>Mistral's cap on context_bias entries.</summary>
         internal const int MistralMaxBiasTerms = 100;
 
-        /// <summary>The shared list as Mistral takes it: trimmed, blanks and
-        /// repeats (any case) dropped, the first 100 kept.</summary>
+        /// <summary>The shared list as Mistral takes it: a phrase's spaces as
+        /// underscores, blanks and repeats (any case) dropped, the first 100
+        /// kept. Mistral refuses the WHOLE request (400, code 3051: "must not
+        /// contain commas or whitespace") when one term holds a space or a
+        /// comma, so "Algidex Ag" failed every take (2026-09-29, live); its
+        /// docs write a phrase as "American_people".</summary>
         internal static List<string> MistralContextBias(IEnumerable<string> terms)
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var result = new List<string>();
             foreach (var raw in terms)
             {
-                string t = raw?.Trim() ?? "";
+                string t = Whitespace.Replace((raw ?? "").Replace(',', ' ').Trim(), "_");
                 if (t.Length == 0 || !seen.Add(t)) continue;
                 result.Add(t);
                 if (result.Count == MistralMaxBiasTerms) break;
@@ -317,6 +323,7 @@ namespace WhisperInk
 
         private static string Fmt(double? s) => s?.ToString("F1", CultureInfo.InvariantCulture) ?? "?";
 
+        private static readonly Regex Whitespace = new(@"\s+", RegexOptions.Compiled);
         private static readonly Regex Ellipsis = new(@"\.{3,}", RegexOptions.Compiled);
         private static readonly Regex LineBreaks = new(@"[\r\n]+", RegexOptions.Compiled);
         private static readonly Regex Spaces = new(@" {2,}", RegexOptions.Compiled);

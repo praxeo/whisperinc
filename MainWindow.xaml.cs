@@ -1920,9 +1920,13 @@ namespace WhisperInk
             foreach (var provider in _providers)
             {
                 string pid = provider.Id; // capture for the closure
+                // Said up front: picking a keyless provider by mistake is how
+                // 2026-09-29's dead dictations started.
+                bool keyless = provider.RequiresApiKey && string.IsNullOrWhiteSpace(provider.ApiKey);
                 children.Add(new MenuNode
                 {
-                    Header = provider.Name,
+                    Header = keyless ? $"{provider.Name} (no key)" : provider.Name,
+                    ToolTip = keyless ? "No API key: nothing can be recorded with it until one is added in ⚙ Configure Providers." : null,
                     IsChecked = pid == _activeProviderId,
                     Action = () => SwitchProvider(pid),
                 });

@@ -879,19 +879,26 @@ var mistralP = new ApiProvider
     TranscriptionModel = "voxtral-mini-latest", Language = "en", BiasMechanism = "mistral_context_bias",
 };
 reply = "{\"text\":\"Hematochezia.\"}";
-var mistralTerms = new List<string> { " hematochezia ", "Mag citrate", "HEMATOCHEZIA", "", "melena" };
+var mistralTerms = new List<string> { " hematochezia ", "Mag  citrate", "HEMATOCHEZIA", "", "melena, black" };
 for (int i = 0; i < 120; i++) mistralTerms.Add($"term{i}");
 await new HttpTranscriber(mistralP, http, Log).TranscribeAsync(speech, mistralTerms);
 var qm = LastRequest();
 var cb = qm.Fields.Where(f => f.Name == "context_bias").Select(f => f.Value).ToList();
 Check(qm.Authorization == "Bearer mk" && qm.Get("model") == "voxtral-mini-latest" && qm.Get("language") == "en",
       "Mistral: Bearer auth, model, language=en");
-Check(cb.Count == 100 && cb[0] == "hematochezia" && cb[1] == "Mag citrate" && cb[2] == "melena" && !cb.Contains(""),
+Check(cb.Count == 100 && cb[0] == "hematochezia" && cb[1] == "Mag_citrate" && cb[2] == "melena_black" && !cb.Contains(""),
       $"Mistral: one context_bias field per term, trimmed, deduped in any case, blanks dropped, capped at 100 ({cb.Count}: {string.Join(" | ", cb.Take(3))} …)");
+Check(cb.All(t => !t.Any(char.IsWhiteSpace) && !t.Contains(',')),
+      "Mistral: no term holds a space or a comma (it refuses the whole request, code 3051); a phrase goes with underscores");
 Check(!qm.Fields.Any(f => f.Name is "timestamp_granularities" or "keyterms" or "language_code" or "diarize"),
       "Mistral: no timestamp_granularities (refused together with language) and no ElevenLabs fields");
 Check(qm.Fields.Count > 0 && qm.Fields[^1].Name == "file" && Logged(@"\[context_bias\] sending 100 terms"),
       "Mistral: the file part is last, and the term count is logged");
+mistralP.Language = "auto";
+await new HttpTranscriber(mistralP, http, Log).TranscribeAsync(speech, Array.Empty<string>());
+Check(!LastRequest().Fields.Any(f => f.Name is "language" or "language_code"),
+      "Language=auto sends no language field to an OpenAI-style provider either (it used to send the literal \"auto\")");
+mistralP.Language = "en";
 
 // Deadline: the per-take token ends a slow request, loudly.
 reply = "{\"text\":\"late\",\"words\":[]}";

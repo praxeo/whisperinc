@@ -52,6 +52,9 @@ var roster = new (string Id, string Run, string[] Conditions, int Reps)[]
     ("google-chirp3",      "google chirp 3",               new[] { "none", "BIAS" }, 1),
     ("elevenlabs",         "elevenlabs scribe v2",         new[] { "none", "BIAS" }, 2),
     ("elevenlabs-medical", "elevenlabs scribe v2 medical", new[] { "none", "BIAS" }, 2),
+    // Added 2026-09-29. Mistral keeps API inputs 30 days and offers no BAA: run it on the scripted sets
+    // (--wav <script2 wav>), not on real dictations, unless the owner says otherwise.
+    ("mistral",            "mistral voxtral mini transcribe 2", new[] { "none", "BIAS" }, 1),
 };
 if (ArgInt("--reps", 0) > 0) roster = roster.Select(r => (r.Id, r.Run, r.Conditions, ArgInt("--reps", 1))).ToArray();
 if (only.Count > 0) roster = roster.Where(r => only.Contains(r.Id)).ToArray();
@@ -60,14 +63,14 @@ if (only.Count > 0) roster = roster.Where(r => only.Contains(r.Id)).ToArray();
 string? elevenConds = ArgStr("--eleven-conds");
 if (elevenConds != null)
     roster = roster.Select(r => r.Id.StartsWith("elevenlabs") ? (r.Id, r.Run, elevenConds.Split(','), r.Reps) : r).ToArray();
-// --terms <file> [--terms-name x]: a keyterm list to try on the ElevenLabs runs, one term per line, sent INSTEAD of both the shared
-// list and the provider's own keyterms. Only the ElevenLabs runs are made, as condition "custom", written to the CSV as custom-<name>.
+// --terms <file> [--terms-name x]: a keyterm list to try on the ElevenLabs and Mistral runs, one term per line, sent INSTEAD of both the
+// shared list and the provider's own keyterms. Only those runs are made, as condition "custom", written to the CSV as custom-<name>.
 string? termsFile = ArgStr("--terms");
 string termsName = ArgStr("--terms-name") ?? "custom";
 var customTerms = termsFile == null ? new List<string>()
     : File.ReadAllLines(termsFile).Select(l => l.Trim()).Where(l => l.Length > 0).ToList();
 if (termsFile != null)
-    roster = roster.Where(r => r.Id.StartsWith("elevenlabs")).Select(r => (r.Id, r.Run, new[] { "custom" }, r.Reps)).ToArray();
+    roster = roster.Where(r => r.Id.StartsWith("elevenlabs") || r.Id == "mistral").Select(r => (r.Id, r.Run, new[] { "custom" }, r.Reps)).ToArray();
 
 using var cfg = JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "config.json")));
 var shared = cfg.RootElement.GetProperty("ContextBiasTerms").EnumerateArray()
