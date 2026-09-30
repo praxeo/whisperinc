@@ -224,6 +224,18 @@ namespace WhisperInk
                 // "none" (incl. Cohere v2 — no native biasing field exists) sends nothing.
             }
 
+            if (IsMistral)
+            {
+                // Segment timestamps, on every take. Measured live 2026-09-29
+                // on the owner's clips: with them, context_bias fixed
+                // "ureterolithiasis" on the clip alone 3 times in 3; without
+                // them 0 in 3 ("ureter with ISIS"), the rest unchanged. They
+                // also give the incomplete-transcript check its end time.
+                // Mistral's docs say they can't be combined with `language`;
+                // the API takes both. Word granularity dropped a comma.
+                content.Add(new StringContent("segment"), "timestamp_granularities");
+            }
+
             if (eleven)
             {
                 // A dictation is one voice. Without these Scribe may split
@@ -258,6 +270,11 @@ namespace WhisperInk
             if (!doc.RootElement.TryGetProperty("text", out var textEl))
                 return null;
             string? text = textEl.GetString();
+            if (IsMistral)
+            {
+                ReadSegmentTiming(doc.RootElement);
+                return text?.Trim();
+            }
             if (!_provider.IsElevenLabs) return text;
 
             ReadWordTiming(doc.RootElement);
@@ -319,6 +336,33 @@ namespace WhisperInk
                 if (result.Count == MistralMaxBiasTerms) break;
             }
             return result;
+        }
+
+        /// <summary>Mistral's transcription API (its preset's baked bias
+        /// mechanism marks it): timestamps are asked for and read.</summary>
+        private bool IsMistral => _provider.ResolvedBiasMechanism == "mistral_context_bias";
+
+        /// <summary>Where Mistral's last segment ends, for the incomplete-
+        /// transcript check. Its usage.prompt_audio_seconds is not used as the
+        /// decoded length: it came back short of the audio (3 s for a 4.0 s
+        /// clip, 109 for 110.9) and may leave silence out, which a long hold
+        /// would turn into a false "incomplete" warning.</summary>
+        private void ReadSegmentTiming(JsonElement root)
+        {
+            try
+            {
+                if (root.TryGetProperty("segments", out var segs) && segs.ValueKind == JsonValueKind.Array)
+                {
+                    double last = 0;
+                    foreach (var s in segs.EnumerateArray())
+                        if (s.TryGetProperty("end", out var end) && end.ValueKind == JsonValueKind.Number
+                            && double.IsFinite(end.GetDouble()) && end.GetDouble() > last)
+                            last = end.GetDouble();
+                    if (last > 0) LastWordEndSeconds = last;
+                }
+                _log($"[{_provider.Id}] last segment ends at {Fmt(LastWordEndSeconds)} s");
+            }
+            catch (Exception ex) { _log($"[{_provider.Id}] segment timing unreadable: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         private static string Fmt(double? s) => s?.ToString("F1", CultureInfo.InvariantCulture) ?? "?";

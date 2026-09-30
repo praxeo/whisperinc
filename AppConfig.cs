@@ -386,6 +386,11 @@ namespace WhisperInk
         /// with the bias list (see the preset).</summary>
         public const string QwenLocalChunkSeconds = "60";
 
+        /// <summary>Mistral's transcription model, pinned: Voxtral Mini
+        /// Transcribe 2 (Feb 2026), what "voxtral-mini-latest" pointed at on
+        /// 2026-09-29. A newer one gets an A/B on the clips before it ships.</summary>
+        public const string MistralModel = "voxtral-mini-2602";
+
         /// <summary>Repairs a value this app once shipped in CreateDefaults that
         /// turned out to be wrong. Only an exact match on the old shipped value
         /// is rewritten, so anything the user set by hand is left alone. The
@@ -404,6 +409,11 @@ namespace WhisperInk
             {
                 p.LocalExtraParams = new() { ["chunk_seconds"] = QwenLocalChunkSeconds };
                 return $"LocalExtraParams chunk_seconds={QwenLocalChunkSeconds} (in 30 s pieces a long take could end in a silent piece, which Qwen3 filled with the bias list)";
+            }
+            if (p.Id == "mistral" && p.TranscriptionModel == "voxtral-mini-latest")
+            {
+                p.TranscriptionModel = MistralModel;
+                return $"TranscriptionModel voxtral-mini-latest -> {MistralModel} (pinned, so a new model behind the alias can't change the text unmeasured)";
             }
             return null;
         }
@@ -437,7 +447,10 @@ namespace WhisperInk
                 BiasMechanism = "mistral_context_bias",
                 Name = "Mistral",
                 BaseUrl = "https://api.mistral.ai",
-                TranscriptionModel = "voxtral-mini-latest",
+                // Pinned, not "voxtral-mini-latest": a new model behind the
+                // alias would change clinical text without an A/B. On
+                // 2026-09-29 the two gave identical text on every clip.
+                TranscriptionModel = MistralModel,
                 SupportsTranscription = true,
                 TranscriptionTemperature = null,
                 ContextBiasMode = "none",

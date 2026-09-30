@@ -477,6 +477,14 @@ Check(ApiProvider.RepairSupersededDefault(handQwen) == null && handQwen.LocalExt
       "extra params the user set by hand are left alone");
 Check(defs.Where(p => p.Id != "qwen3-asr-1.7b-local").All(p => ApiProvider.RepairSupersededDefault(p) == null),
       "no other shipped preset is touched by a repair");
+// Mistral pinned: "voxtral-mini-latest" was the shipped value until 2026-09-29.
+Check(defs.Single(p => p.Id == "mistral").TranscriptionModel == ApiProvider.MistralModel, "the Mistral preset pins voxtral-mini-2602");
+var oldMistral = new ApiProvider { Id = "mistral", TranscriptionModel = "voxtral-mini-latest" };
+Check(ApiProvider.RepairSupersededDefault(oldMistral) != null && oldMistral.TranscriptionModel == ApiProvider.MistralModel,
+      "a config still on voxtral-mini-latest is moved to the pinned model");
+var handMistral = new ApiProvider { Id = "mistral", TranscriptionModel = "voxtral-mini-2507" };
+Check(ApiProvider.RepairSupersededDefault(handMistral) == null && handMistral.TranscriptionModel == "voxtral-mini-2507",
+      "a Mistral model set by hand is left alone");
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 0h. Drop-in local models: GGUF headers, providers, the folder scanner ==");
@@ -878,11 +886,18 @@ var mistralP = new ApiProvider
     Id = "mistral", Name = "Mistral", ApiKey = "mk", BaseUrl = Prefix.TrimEnd('/'),
     TranscriptionModel = "voxtral-mini-latest", Language = "en", BiasMechanism = "mistral_context_bias",
 };
-reply = "{\"text\":\"Hematochezia.\"}";
+// The shape Mistral answers with when timestamps are asked for (seen live 2026-09-29).
+reply = "{\"model\":\"voxtral-mini-2602\",\"text\":\" Hematochezia noted. \",\"language\":null,"
+      + "\"segments\":[{\"type\":\"transcription_segment\",\"text\":\"Hematochezia\",\"start\":0.2,\"end\":1.1},"
+      + "{\"type\":\"transcription_segment\",\"text\":\" noted.\",\"start\":1.2,\"end\":2.7}],"
+      + "\"usage\":{\"prompt_audio_seconds\":2}}";
 var mistralTerms = new List<string> { " hematochezia ", "Mag  citrate", "HEMATOCHEZIA", "", "melena, black" };
 for (int i = 0; i < 120; i++) mistralTerms.Add($"term{i}");
-await new HttpTranscriber(mistralP, http, Log).TranscribeAsync(speech, mistralTerms);
+var tm = new HttpTranscriber(mistralP, http, Log);
+string? rm = await tm.TranscribeAsync(speech, mistralTerms);
 var qm = LastRequest();
+Check(rm == "Hematochezia noted." && ((ITranscriptCoverage)tm).LastWordEndSeconds == 2.7 && ((ITranscriptCoverage)tm).DecodedAudioSeconds == null,
+      $"Mistral: text trimmed, the last segment's end read for the coverage check, prompt_audio_seconds not taken as the decoded length (\"{rm}\", {((ITranscriptCoverage)tm).LastWordEndSeconds})");
 var cb = qm.Fields.Where(f => f.Name == "context_bias").Select(f => f.Value).ToList();
 Check(qm.Authorization == "Bearer mk" && qm.Get("model") == "voxtral-mini-latest" && qm.Get("language") == "en",
       "Mistral: Bearer auth, model, language=en");
@@ -890,8 +905,8 @@ Check(cb.Count == 100 && cb[0] == "hematochezia" && cb[1] == "Mag_citrate" && cb
       $"Mistral: one context_bias field per term, trimmed, deduped in any case, blanks dropped, capped at 100 ({cb.Count}: {string.Join(" | ", cb.Take(3))} …)");
 Check(cb.All(t => !t.Any(char.IsWhiteSpace) && !t.Contains(',')),
       "Mistral: no term holds a space or a comma (it refuses the whole request, code 3051); a phrase goes with underscores");
-Check(!qm.Fields.Any(f => f.Name is "timestamp_granularities" or "keyterms" or "language_code" or "diarize"),
-      "Mistral: no timestamp_granularities (refused together with language) and no ElevenLabs fields");
+Check(qm.Get("timestamp_granularities") == "segment" && !qm.Fields.Any(f => f.Name is "keyterms" or "language_code" or "diarize"),
+      "Mistral: timestamp_granularities=segment beside language=en (they made its list work), and no ElevenLabs fields");
 Check(qm.Fields.Count > 0 && qm.Fields[^1].Name == "file" && Logged(@"\[context_bias\] sending 100 terms"),
       "Mistral: the file part is last, and the term count is logged");
 mistralP.Language = "auto";
