@@ -69,6 +69,13 @@ namespace WhisperInk
         private bool _captureInterrupted;
         private ManualResetEventSlim? _drainSignal;
 
+        // The loudest buffer (RMS, 0..1) of the take in progress since
+        // TakeLevel last read it; NoLevel when no buffer has arrived since.
+        // Written by the capture thread under _gate, taken lock-free by the
+        // UI's level bars.
+        private const float NoLevel = -1f;
+        private float _level = NoLevel;
+
         private bool _disposed;
 
         public MicCapture(Func<int> deviceNumber, Func<int> preRollMs, Action<string>? log = null, Action? onCaptureLost = null)
@@ -86,6 +93,13 @@ namespace WhisperInk
         /// mic did. It used to be handed on as if complete, so everything said
         /// after an unplug or driver reset simply wasn't in the note.</summary>
         public bool LastCaptureInterrupted { get; private set; }
+
+        /// <summary>How loud the take in progress has been since the last
+        /// call: the RMS (0..1) of its loudest buffer, which is then forgotten.
+        /// Negative when no buffer has arrived since, so the bars can hold
+        /// their last value instead of dipping between buffers. Never blocks;
+        /// it's read on the UI thread while recording.</summary>
+        public float TakeLevel() => Interlocked.Exchange(ref _level, NoLevel);
 
         /// <summary>Opens the capture device if it isn't already streaming.
         /// Returns false if the device could not be opened.</summary>
@@ -174,6 +188,7 @@ namespace WhisperInk
                     });
 
                 _captureInterrupted = false;
+                Volatile.Write(ref _level, NoLevel);
                 _capturing = true;
                 return preRollBytes / BytesPerMs;
             }
@@ -238,6 +253,10 @@ namespace WhisperInk
                 {
                     try { _writer?.Write(a.Buffer, 0, a.BytesRecorded); } catch { }
                     FeedSinkLocked(a.Buffer, 0, a.BytesRecorded);
+                    // Only reads the buffer (800 samples), after the WAV and
+                    // the sink have had it.
+                    float rms = SpeechDetector.BlockRms(a.Buffer, a.BytesRecorded);
+                    if (rms > Volatile.Read(ref _level)) Volatile.Write(ref _level, rms);
                 }
                 _ring.Write(a.Buffer, a.BytesRecorded);
                 // Signals EndCapture that the in-flight tail has landed.

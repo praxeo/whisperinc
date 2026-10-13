@@ -131,5 +131,41 @@ namespace WhisperInk
             }
             catch { return Unmeasured; }
         }
+
+        // ── The level bars shown while recording ─────────────────────────
+        // Decibels, because loudness is heard that way: on a linear scale the
+        // owner's quiet speech (frames around 0.01) would barely lift a bar.
+        // The bottom of the scale sits under a live microphone's own noise
+        // (frames of 0.0003-0.0012 measured here), so a working mic shimmers
+        // even in a silent room, and an input that delivers nothing draws a
+        // flat line however much is said into it. On 2026-10-12 the dictation
+        // mic had dropped off USB and every take came from another input at
+        // 0.00002 RMS, while the bars, then a random animation, kept dancing.
+        public const double MeterFloorDb = -80;   // 0.0001 RMS: an empty bar
+        public const double MeterFullDb = -20;    // 0.1 RMS: a full one
+
+        /// <summary>Where a level (RMS, 0..1 of full scale) sits on the
+        /// recording bars: 0 for an empty bar, 1 for a full one.</summary>
+        public static double MeterFraction(double rms)
+        {
+            if (!(rms > 0)) return 0;
+            double db = 20 * Math.Log10(rms);
+            return Math.Clamp((db - MeterFloorDb) / (MeterFullDb - MeterFloorDb), 0, 1);
+        }
+
+        /// <summary>RMS (0..1 of full scale) of a block of 16-bit mono PCM,
+        /// such as one capture buffer.</summary>
+        public static float BlockRms(byte[] pcm, int count)
+        {
+            int samples = Math.Min(count, pcm.Length) / 2;
+            if (samples <= 0) return 0f;
+            double sumSquares = 0;
+            for (int i = 0; i < samples; i++)
+            {
+                double norm = (short)(pcm[2 * i] | (pcm[2 * i + 1] << 8)) / (double)short.MaxValue;
+                sumSquares += norm * norm;
+            }
+            return (float)Math.Sqrt(sumSquares / samples);
+        }
     }
 }

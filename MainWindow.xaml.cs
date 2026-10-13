@@ -228,7 +228,10 @@ namespace WhisperInk
         private DispatcherTimer? _statusFlashTimer;
 
         private DispatcherTimer _animationTimer = null!;
-        private readonly Random _rng = new();
+        // The recording bars: heights in pixels, and the level (0..1) the
+        // newest bar last showed.
+        private const double BarMinHeight = 2, BarMaxHeight = 22;
+        private double _meterLevel;
 
         // ── Responsiveness tuning (all config.json-overridable) ───────
         // Keep the mic open between dictations. Off = the pre-v2 behaviour:
@@ -947,6 +950,7 @@ namespace WhisperInk
             lblStatus.Content = "🎙 REC";
             lblStatus.Opacity = 1;
             HistogramPanel.Visibility = Visibility.Visible;
+            _meterLevel = 0;
             _animationTimer.Start();
 
             // An ElevenLabs take starts uploading now, its audio following as it
@@ -1793,19 +1797,26 @@ namespace WhisperInk
             MainBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(64, 64, 64));
 
             foreach (var child in HistogramPanel.Children)
-                if (child is Border bar) bar.Height = 2;
+                if (child is Border bar) bar.Height = BarMinHeight;
         }
 
+        /// <summary>The bars are the microphone's real level, newest on the
+        /// right: each tick they move one place left and the last one shows how
+        /// loud the mic has been since the tick before
+        /// (SpeechDetector.MeterFraction). A dead or muted input draws a flat
+        /// line while you talk. They used to be a random animation, which
+        /// danced just the same over an input that was recording nothing.</summary>
         private void UpdateHistogram()
         {
-            foreach (var child in HistogramPanel.Children)
-            {
-                if (child is Border bar)
-                {
-                    double target = IsRecording ? _rng.Next(4, 22) : 2;
-                    bar.Height = bar.Height + (target - bar.Height) * 0.4;
-                }
-            }
+            float heard = _mic?.TakeLevel() ?? -1f;
+            if (heard >= 0) _meterLevel = SpeechDetector.MeterFraction(heard);
+            double level = IsRecording ? _meterLevel : 0;
+
+            var bars = HistogramPanel.Children;
+            for (int i = 0; i + 1 < bars.Count; i++)
+                if (bars[i] is Border bar && bars[i + 1] is Border next) bar.Height = next.Height;
+            if (bars.Count > 0 && bars[bars.Count - 1] is Border newest)
+                newest.Height = BarMinHeight + level * (BarMaxHeight - BarMinHeight);
         }
 
         /// <summary>Chirp. Delegates to the persistent output device in

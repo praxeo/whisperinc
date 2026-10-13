@@ -376,6 +376,25 @@ var garbage = SpeechDetector.Measure(new byte[] { 1, 2, 3, 4, 5 });
 Check(!garbage.Measured && garbage.Peak == 1.0 && !SpeechDetector.IsSilent(garbage, Gate), "unreadable audio fails open: full scale, never silent");
 Check(!SpeechDetector.IsSilent(SpeechDetector.Measure(NoisyWav(0.00022, (2.1, 0))), 0), "threshold 0 (gate disabled) never calls a take silent");
 
+// The recording bars: MeterFraction of each 50 ms capture buffer's BlockRms.
+// On 2026-10-12 the dictation mic had dropped off USB and every take came from
+// another input at RMS 0.00002 (peak 0.0001), while the bars, then a random
+// animation, danced regardless.
+double Bars(byte[] wav) => SpeechDetector.MeterFraction(SpeechDetector.BlockRms(wav[44..], wav.Length - 44));
+Check(Bars(NoisyWav(0.00002, (0.05, 0))) == 0 && Bars(Wav((0.05, 0))) == 0 && SpeechDetector.MeterFraction(0) == 0,
+      "bars: a dead input (that evening's 0.00002 RMS, and digital zero) draws a flat line");
+double roomBars = Bars(NoisyWav(0.0003, (0.05, 0))), fanBars = Bars(NoisyWav(0.0012, (0.05, 0)));
+Check(roomBars > 0.05 && fanBars > roomBars && fanBars < 0.45,
+      $"bars: a live mic's own noise shows, low ({roomBars:F2} in a quiet room, {fanBars:F2} with a fan)");
+double quietBars = Bars(Wav((0.05, 0.006))), speechBars = Bars(Wav((0.05, 0.05)));
+Check(quietBars > fanBars + 0.1 && speechBars > quietBars + 0.1 && Bars(Wav((0.05, 0.5))) == 1,
+      $"bars: quiet speech stands clear of the noise ({quietBars:F2}), normal speech above it ({speechBars:F2}), a loud tone fills the bar");
+var toneBlock = Wav((0.05, 0.5))[44..];
+Check(Math.Abs(SpeechDetector.BlockRms(toneBlock, toneBlock.Length) - 0.5 / Math.Sqrt(2)) < 0.001
+      && SpeechDetector.BlockRms(toneBlock, 0) == 0 && SpeechDetector.BlockRms(new byte[] { 7 }, 1) == 0
+      && SpeechDetector.BlockRms(toneBlock, toneBlock.Length + 99) > 0.35,
+      "bars: a buffer's RMS matches the take meter's; an empty buffer, a stray byte and a count past the end are safe");
+
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 0g. UnsentTakes: takes judged silent ==");
 string qfolder = Path.Combine(dir, "unsent-quiet-test");
