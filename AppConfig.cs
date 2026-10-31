@@ -21,6 +21,7 @@ namespace WhisperInk
         Smallest,             // Smallest.ai Waves STT: raw-body POST, Bearer auth, query-param options (SmallestTranscriber)
         Reson8,               // Reson8 prerecorded STT: raw-body POST, "ApiKey" auth, query-param options, RFC 7807 errors (Reson8Transcriber)
         Omi,                  // Omi Health medical STT: OpenAI-style multipart, JSON-array vocabulary, 202 job + long poll past 60 s (OmiTranscriber)
+        ZoomScribe,           // Zoom AI Services Scribe, Fast mode: multipart file + JSON `config` field, locale languages (ZoomScribeTranscriber)
     }
 
     public class ApiProvider
@@ -102,6 +103,8 @@ namespace WhisperInk
         //                            to 1,000 terms, of which Omi keeps the 50
         //                            most relevant (handled natively; the
         //                            omi-medical-1 flagship only).
+        //   "zoom_vocabulary"      — Zoom Scribe config.vocabulary.phrases, up
+        //                            to 100 (handled natively).
         //
         // Blank → derived from the legacy ContextBiasMode via ResolvedBiasMechanism.
         public string BiasMechanism { get; set; } = "";
@@ -1104,6 +1107,33 @@ namespace WhisperInk
                 ContextBiasMode = "none",
                 Language = "en",
                 TranscriberKind = TranscriberKind.Omi,
+            },
+            new ApiProvider
+            {
+                // Zoom Scribe Pro — Zoom AI Services' speech-to-text ("Scribe
+                // API", not ElevenLabs Scribe), Fast mode: one synchronous
+                // request per take. ZoomScribeTranscriber sends the WAV as a
+                // multipart file with a JSON `config` field, the shared list as
+                // vocabulary.phrases (≤100), and the language as a locale
+                // (en → en-US; "en" alone is a 400).
+                //
+                // Pro (zoom-scribe-en-pro, premium access) rather than the
+                // standard zoom-scribe-en: on the owner's clips (2026-10-30)
+                // the standard model deleted "rectum" from "blood per rectum"
+                // and wrote "ureterocolic" for "ureteral colic"; Pro got both.
+                // The key is a Platform Studio API key (platform.zoom.us →
+                // Credentials → API keys).
+                Id = "zoom-scribe",
+                BiasMechanism = "zoom_vocabulary",
+                Name = "Zoom Scribe Pro",
+                BaseUrl = ZoomScribeTranscriber.DefaultBaseUrl,
+                TranscriptionEndpoint = ZoomScribeTranscriber.DefaultBaseUrl + ZoomScribeTranscriber.PathTranscribe,
+                TranscriptionModel = ZoomScribeTranscriber.ModelPro,
+                SupportsTranscription = true,
+                TranscriptionTemperature = null,
+                ContextBiasMode = "none",
+                Language = "en",
+                TranscriberKind = TranscriberKind.ZoomScribe,
             }
         };
 
@@ -1130,6 +1160,7 @@ namespace WhisperInk
             "smallest-pulse-pro" or "smallest-pulse"                       => TranscriberKind.Smallest,
             "reson8"                                                       => TranscriberKind.Reson8,
             "omi-medical" or "omi-medical-edge"                            => TranscriberKind.Omi,
+            "zoom-scribe"                                                  => TranscriberKind.ZoomScribe,
             _                                                              => TranscriberKind.Http,
         };
     }

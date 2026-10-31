@@ -818,7 +818,8 @@ _ = Task.Run(async () =>
                 var req = new FakeRequest(ctx.Request.Url!.AbsolutePath, ctx.Request.Headers["xi-api-key"],
                     ctx.Request.Headers["X-API-Key"], ctx.Request.Headers["Authorization"], fields, file,
                     Chunked: ctx.Request.ContentLength64 < 0, Method: ctx.Request.HttpMethod,
-                    Query: ctx.Request.Url.Query, Host: ctx.Request.Url.Host);
+                    Query: ctx.Request.Url.Query, Host: ctx.Request.Url.Host,
+                    Body: (ctx.Request.ContentType ?? "").StartsWith("application/json") ? Encoding.UTF8.GetString(ms.ToArray()) : "");
                 lock (requests) requests.Add(req);
                 var (status, body, retryAfter) = route?.Invoke(req) ?? (replyStatus, reply, null);
                 if (replyDelayMs > 0) await Task.Delay(replyDelayMs);
@@ -1185,6 +1186,161 @@ using (var cto = new CancellationTokenSource(500))
 }
 replyDelayMs = 0;
 
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 1d. ZoomScribeTranscriber vs the fake server ==");
+var zoomPreset = ApiProvider.CreateDefaults().First(p => p.Id == "zoom-scribe");
+Check(zoomPreset is { TranscriberKind: TranscriberKind.ZoomScribe, Language: "en", TranscriptionModel: "zoom-scribe-en-pro", BiasMechanism: "zoom_vocabulary" }
+      && zoomPreset.ResolvedTranscriptionUrl == "https://api.zoom.us/v2/aiservices/scribe/transcribe" && zoomPreset.RequiresApiKey
+      && ApiProvider.InferKindFromLegacyId("zoom-scribe") == TranscriberKind.ZoomScribe,
+      "preset: zoom-scribe, Pro model, English, Zoom's Fast endpoint, a key required");
+var zoomNoKey = new ZoomScribeTranscriber(zoomPreset, http, Log);
+Check(!zoomNoKey.IsReady(out var zoomDiag) && zoomDiag == "Zoom API key not set", "no key -> not ready, and says so");
+zoomPreset.ApiKey = "zoom-key";
+zoomPreset.TranscriptionEndpoint = Prefix + "v2/aiservices/scribe/transcribe";
+var zoom = new ZoomScribeTranscriber(zoomPreset, http, Log);
+
+// The shape measured live (2026-10-30): punctuation is its own zero-length "word".
+reply = "{\"request_id\":\"r1\",\"duration_sec\":6.62,\"result\":{\"text_display\":\"  On exam there was bright red blood per rectum, consistent with hematochezia.  \","
+      + "\"segments\":[{\"id\":\"utt_0000\",\"start\":0.2,\"end\":6.1,\"channel\":0,\"speaker\":\"\",\"text\":\"On exam ...\",\"words\":["
+      + "{\"word\":\"rectum,\",\"start\":2.9,\"end\":3.4},{\"word\":\"hematochezia\",\"start\":5.0,\"end\":5.84},{\"word\":\".\",\"start\":6.1,\"end\":6.1}]}]},"
+      + "\"model\":\"zoom-scribe-en-pro\",\"metrics\":{},\"usage\":{\"input_units\":6.62,\"unit_type\":\"seconds\"}}";
+string? z1 = await zoom.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis", "Hematochezia", "  " });
+var zq1 = LastRequest();
+Console.WriteLine("   fields: " + string.Join(", ", zq1.Fields.Select(f => f.Name + "=" + f.Value)));
+Check(z1 == "On exam there was bright red blood per rectum, consistent with hematochezia.", $"text_display comes back trimmed (\"{z1}\")");
+Check(zq1.Path == "/v2/aiservices/scribe/transcribe" && zq1.Authorization == "Bearer zoom-key" && zq1.XApiKey == null,
+      "POST /v2/aiservices/scribe/transcribe with Bearer auth");
+Check(zq1.Fields.Select(f => f.Name).SequenceEqual(new[] { "config", "file" }) && zq1.File != null && zq1.File.SequenceEqual(speech),
+      "a multipart upload: the `config` field, then the WAV byte for byte as `file`");
+using (var zc = JsonDocument.Parse(zq1.Get("config") ?? "{}"))
+{
+    var c = zc.RootElement;
+    string Prop(string n) => c.TryGetProperty(n, out var v) ? v.ToString() : "<none>";
+    var phrases = c.TryGetProperty("vocabulary", out var voc) ? voc.GetProperty("phrases").EnumerateArray().Select(e => e.GetString()).ToArray() : Array.Empty<string?>();
+    Check(Prop("language") == "en-US" && Prop("model") == "zoom-scribe-en-pro" && Prop("word_time_offsets") == "True",
+          "config: language en-US (\"en\" is a 400), model zoom-scribe-en-pro, word_time_offsets on");
+    Check(phrases.SequenceEqual(new[] { "hematochezia", "ureterolithiasis" }), $"config.vocabulary.phrases: the list, deduped, blanks dropped ({string.Join(" | ", phrases)})");
+    Check(Prop("segmentation_mode") == "none" && !c.TryGetProperty("text_polishing", out _) && !c.TryGetProperty("diarization", out _)
+          && !c.TryGetProperty("language_detection", out _),
+          "segmentation_mode none (Zoom's own detection clipped a first word), no Text Polishing (an LLM rewrite), no diarization");
+}
+var zcov = (ITranscriptCoverage)zoom;
+Check(zcov.LastWordEndSeconds == 5.84 && zcov.DecodedAudioSeconds == 6.62,
+      $"coverage: the last real word's end (the \".\" token skipped) and duration_sec ({zcov.LastWordEndSeconds}, {zcov.DecodedAudioSeconds})");
+
+await zoom.TranscribeAsync(speech, Enumerable.Range(1, 150).Select(i => $"term{i}").ToArray());
+using (var zc = JsonDocument.Parse(LastRequest().Get("config") ?? "{}"))
+    Check(zc.RootElement.GetProperty("vocabulary").GetProperty("phrases").GetArrayLength() == 100 && Logged(@"\[zoom\] vocabulary truncated to 100 phrases \(had 150\)"),
+          "150 terms -> the first 100 sent (Zoom's cap), logged");
+await zoom.TranscribeAsync(speech, Array.Empty<string>());
+Check(!(LastRequest().Get("config") ?? "").Contains("vocabulary"), "no list -> no vocabulary");
+
+zoomPreset.Language = "auto";
+await zoom.TranscribeAsync(speech, Array.Empty<string>());
+using (var zc = JsonDocument.Parse(LastRequest().Get("config") ?? "{}"))
+    Check(zc.RootElement.TryGetProperty("language_detection", out var ld) && ld.GetProperty("mode").GetString() == "once"
+          && !zc.RootElement.TryGetProperty("language", out _) && !zc.RootElement.TryGetProperty("model", out _),
+          "Language=auto -> language_detection once, and no model (Zoom refuses a model with `once`)");
+zoomPreset.Language = "es";
+await zoom.TranscribeAsync(speech, Array.Empty<string>());
+using (var zc = JsonDocument.Parse(LastRequest().Get("config") ?? "{}"))
+    Check(zc.RootElement.GetProperty("language").GetString() == "es-ES" && !zc.RootElement.TryGetProperty("model", out _)
+          && Logged(@"\[zoom\] zoom-scribe-en-pro is English only; for es-ES Zoom picks the model"),
+          "Language=es -> es-ES, and the English-only model is left out, logged");
+zoomPreset.Language = "en";
+
+reply = "{\"request_id\":\"r2\",\"duration_sec\":5.0,\"result\":{\"text_display\":\"\",\"segments\":[]},\"model\":\"zoom-scribe-en-pro\"}";
+int zBefore;
+lock (requests) zBefore = requests.Count;
+string? z2 = await zoom.TranscribeAsync(speech, Array.Empty<string>());
+Check(z2 == "" && zcov.LastWordEndSeconds == null && zcov.DecodedAudioSeconds == 5.0, "empty text is \"\" (nothing heard), not a failed request; no word, no word end");
+List<FakeRequest> zEmpty;
+lock (requests) zEmpty = requests.Skip(zBefore).ToList();
+Check(zEmpty.Count == 2 && (zEmpty[0].Get("config") ?? "").Contains("\"segmentation_mode\":\"none\"") && !(zEmpty[1].Get("config") ?? "").Contains("segmentation_mode")
+      && Logged(@"\[zoom\] nothing came back with Zoom's voice-activity detection off; asking again with it on"),
+      "an empty answer with Zoom's detection off is asked for once more with it on, logged");
+route = r => (r.Get("config") ?? "").Contains("segmentation_mode")
+    ? (200, "{\"duration_sec\":2.9,\"result\":{\"text_display\":\"\"}}", null)
+    : (200, "{\"duration_sec\":2.9,\"result\":{\"text_display\":\"The patient is a 16 year old male.\"}}", null);
+Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == "The patient is a 16 year old male.",
+      "... and its text is used: the case measured live (three 2.7-3.1 s takes empty with it off, right with it on)");
+route = null;
+
+// A take over 29 s: Zoom refuses segmentation_mode none from 30 s, so it's cut at its pauses
+// and the pieces go out at once. Each answer names its piece by size, since they can arrive in any order.
+var (zLong, _) = Bursts(12, 0.8, 1.0);   // 69.8 s
+var zSplit = LocalTakeSplitter.Cut(zLong, ZoomScribeTranscriber.MaxPiece)!;
+lock (requests) zBefore = requests.Count;
+route = r => (200, $"{{\"duration_sec\":{((r.File?.Length ?? 44) - 44) / 32000.0},\"result\":{{\"text_display\":\"{r.File?.Length} bytes.\","
+                   + "\"segments\":[{\"words\":[{\"word\":\"bytes\",\"start\":4.0,\"end\":4.5}]}]}}", null);
+string? zl = await zoom.TranscribeAsync(zLong, new[] { "hematochezia" });
+List<FakeRequest> zPieces;
+lock (requests) zPieces = requests.Skip(zBefore).ToList();
+Check(zSplit.Pieces.Count >= 3 && zPieces.Count == zSplit.Pieces.Count && zSplit.Pieces.All(p => p.Length <= 29 * 16000)
+      && zPieces.All(q => (q.Get("config") ?? "").Contains("\"segmentation_mode\":\"none\"") && (q.Get("config") ?? "").Contains("hematochezia")),
+      $"a 69.8 s take goes out as {zPieces.Count} pieces of at most 29 s, each with segmentation_mode none and the list");
+Check(zl == string.Join(" ", zSplit.Wavs.Select(w => $"{w.Length} bytes.")) && Logged(@"\[zoom\] 69\.8 s take sent in \d pieces cut at pauses"),
+      $"their texts are joined in the take's order, whatever order they came back in; logged ({zl})");
+Check(Math.Abs((zcov.LastWordEndSeconds ?? 0) - (zSplit.Seconds(zSplit.Pieces[^1].Start) + 4.5)) < 1e-6
+      && Math.Abs((zcov.DecodedAudioSeconds ?? 0) - zSplit.Seconds(zSplit.Pieces[^1].End)) < 1e-6,
+      $"coverage in the take's own time: the last piece's start plus its last word, and plus its duration_sec ({zcov.LastWordEndSeconds:F2} s of {zcov.DecodedAudioSeconds:F2})");
+int zFailLen = zSplit.Wavs[1].Length;
+route = r => r.File?.Length == zFailLen ? (500, "{\"code\":500,\"reason\":\"INTERNAL\",\"message\":\"boom\"}", null) : (200, "{\"result\":{\"text_display\":\"ok\"}}", null);
+Check(await zoom.TranscribeAsync(zLong, Array.Empty<string>()) == null && Logged(@"\[zoom\] 1 of \d pieces failed, so the take did"),
+      "one failed piece fails the take (it stays journaled), logged");
+route = null;
+reply = "{\"result\":{\"text_display\":\"\"}}";
+await zoom.TranscribeAsync(NoisyWav(0.0025, (40, 0)), Array.Empty<string>());
+Check(!(LastRequest().Get("config") ?? "").Contains("segmentation_mode") && Logged(@"\[zoom\] 40\.0 s take with no pause to cut at: sent whole, with Zoom's own voice-activity detection"),
+      "a 40 s take with no speech to cut at goes out whole with Zoom's detection on (\"none\" would only be refused), logged");
+
+// The undocumented upload refused: the documented data URL, once.
+int zPosts = 0;
+route = r => ++zPosts == 1
+    ? (400, "{\"code\":400,\"reason\":\"UNSUPPORTED_CONTENT_TYPE\",\"message\":\"multipart/form-data is not supported\",\"metadata\":{}}", null)
+    : (200, "{\"duration_sec\":4.0,\"result\":{\"text_display\":\"Sent the documented way.\",\"segments\":[]}}", null);
+string? z3 = await zoom.TranscribeAsync(speech, new[] { "hematochezia" });
+var zq3 = LastRequest();
+string zFile = "";
+string zConfigLang = "";
+try
+{
+    using var zb = JsonDocument.Parse(zq3.Body);
+    zFile = zb.RootElement.GetProperty("file").GetString() ?? "";
+    zConfigLang = zb.RootElement.GetProperty("config").GetProperty("language").GetString() ?? "";
+}
+catch { }
+Check(z3 == "Sent the documented way." && zPosts == 2 && zq3.Fields.Count == 0 && zFile.StartsWith("data:audio/wav;base64,")
+      && Convert.FromBase64String(zFile["data:audio/wav;base64,".Length..]).SequenceEqual(speech) && zConfigLang == "en-US"
+      && Logged(@"\[zoom\] the file upload was refused \(HTTP 400: \[UNSUPPORTED_CONTENT_TYPE\].*sending the take as a data URL instead"),
+      $"upload refused -> sent once more as JSON with the WAV as a data URL and the same config, logged ({zPosts} posts)");
+
+zPosts = 0;
+route = _ => { zPosts++; return (400, "{\"code\":400,\"reason\":\"UNSUPPORTED_LANGUAGE\",\"message\":\"Language 'xx' is not supported.\",\"metadata\":{}}", null); };
+Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == null && zPosts == 1
+      && Logged(@"\[zoom\] HTTP 400: \[UNSUPPORTED_LANGUAGE\] Language 'xx' is not supported\."),
+      "any other 400 -> null, no second try, logged with Zoom's reason");
+route = _ => (401, "{\"code\":401,\"reason\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid token.\"}", null);
+Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == null
+      && Logged(@"\[zoom\] HTTP 401: \[INVALID_CREDENTIALS\] Invalid token\. \(check the Zoom API key in Provider Settings\)"),
+      "401 -> null, logged with what to do about it");
+route = _ => (200, "{\"request_id\":\"r3\",\"result\":{}}", null);
+Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == null && Logged(@"\[zoom\] the response had no transcript"),
+      "a 200 with no text_display -> null (a broken answer, not silence), logged");
+route = null;
+
+reply = "{\"result\":{\"text_display\":\"late\"}}";
+replyDelayMs = 3000;
+var swz = Stopwatch.StartNew();
+using (var ctz = new CancellationTokenSource(500))
+{
+    string? z7 = await zoom.TranscribeAsync(speech, Array.Empty<string>(), ctz.Token);
+    swz.Stop();
+    Check(z7 == null && swz.ElapsedMilliseconds < 2500 && Logged(@"ZoomScribeTranscriber\(zoom-scribe\): stopped at the take's deadline"),
+          $"the take's deadline ends a slow request, logged as the deadline ({swz.ElapsedMilliseconds} ms)");
+}
+replyDelayMs = 0;
+
 listener.Stop();
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1500,7 +1656,7 @@ static (List<(string Name, string Value)> Fields, byte[]? File) ParseMultipart(s
 
 record FakeRequest(string Path, string? XiApiKey, string? XApiKey, string? Authorization,
                    List<(string Name, string Value)> Fields, byte[]? File, bool Chunked,
-                   string Method = "POST", string Query = "", string Host = "")
+                   string Method = "POST", string Query = "", string Host = "", string Body = "")
 {
     public string? Get(string name) => Fields.FirstOrDefault(f => f.Name == name).Value;
 }

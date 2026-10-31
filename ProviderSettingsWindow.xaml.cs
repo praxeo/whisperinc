@@ -151,6 +151,7 @@ namespace WhisperInk
             "modulate_custom_terms" => "Domain vocabulary → Modulate custom_terms (native; Velma 2 Multilingual batch only — the Fast endpoints ignore it).",
             "reson8_phrases"       => "Domain vocabulary → Reson8 phrases (native; ≤250 terms). Keep the list tight — an over-long or off-topic list degrades accuracy here rather than being ignored.",
             "omi_vocabulary"       => "Domain vocabulary → Omi vocabulary (native; omi-medical-1 only). Over 50 terms, Omi keeps the 50 it judges most relevant.",
+            "zoom_vocabulary"      => "Domain vocabulary → Zoom Scribe vocabulary phrases (native; ≤100 terms).",
             _                      => "No native biasing — context-bias terms have no effect for this provider.",
         };
 

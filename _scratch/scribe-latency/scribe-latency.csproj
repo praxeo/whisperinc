@@ -22,6 +22,9 @@
     <Compile Include="$(Repo)\SmallestTranscriber.cs" />
     <Compile Include="$(Repo)\Reson8Transcriber.cs" />
     <Compile Include="$(Repo)\OmiTranscriber.cs" />
+    <Compile Include="$(Repo)\ZoomScribeTranscriber.cs" />
+    <Compile Include="$(Repo)\LocalTakeSplitter.cs" />
+    <Compile Include="$(Repo)\SpeechDetector.cs" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="NAudio.Core" Version="2.2.1" />

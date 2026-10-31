@@ -52,9 +52,10 @@ var roster = new (string Id, string Run, string[] Conditions, int Reps)[]
     ("google-chirp3",      "google chirp 3",               new[] { "none", "BIAS" }, 1),
     ("elevenlabs",         "elevenlabs scribe v2",         new[] { "none", "BIAS" }, 2),
     ("elevenlabs-medical", "elevenlabs scribe v2 medical", new[] { "none", "BIAS" }, 2),
-    // Added 2026-09-29. Mistral keeps API inputs 30 days and offers no BAA: run it on the scripted sets
-    // (--wav <script2 wav>), not on real dictations, unless the owner says otherwise.
+    // Added 2026-09-29. Mistral keeps API inputs 30 days. The owner has a BAA with every provider here (2026-10-30).
     ("mistral",            "mistral voxtral mini transcribe 2", new[] { "none", "BIAS" }, 1),
+    // Added 2026-10-30, the Pro model the preset ships.
+    ("zoom-scribe",        "zoom scribe pro",              new[] { "none", "BIAS" }, 1),
 };
 if (ArgInt("--reps", 0) > 0) roster = roster.Select(r => (r.Id, r.Run, r.Conditions, ArgInt("--reps", 1))).ToArray();
 if (only.Count > 0) roster = roster.Where(r => only.Contains(r.Id)).ToArray();
@@ -96,6 +97,9 @@ double corpusSeconds = clips.Sum(c => WavSeconds(c.Bytes));
 ApiProvider Build(string id, bool keytermsOn)
 {
     var p = ApiProvider.CreateDefaults().Single(x => x.Id == id);
+    // A key not yet in config.json can wait in <root>\zoom-api-key.txt (the first word of the id); config.json wins.
+    string keyFile = Path.Combine(root, id.Split('-')[0] + "-api-key.txt");
+    if (File.Exists(keyFile)) p.ApiKey = File.ReadAllText(keyFile).Trim();
     var e = entries.FirstOrDefault(x => x.TryGetProperty("Id", out var i) && i.GetString() == id);
     if (e.ValueKind != JsonValueKind.Object) return p;
     string S(string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
@@ -149,6 +153,7 @@ ITranscriber Make(ApiProvider p) => p.TranscriberKind switch
     TranscriberKind.Deepgram => new DeepgramTranscriber(p, http, Log),
     TranscriberKind.Soniox => new SonioxTranscriber(p, http, Log),
     TranscriberKind.GoogleChirp3 => new GoogleChirp3Transcriber(p, Log),
+    TranscriberKind.ZoomScribe => new ZoomScribeTranscriber(p, http, Log),
     _ => new HttpTranscriber(p, http, Log),
 };
 

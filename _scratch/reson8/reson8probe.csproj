@@ -35,6 +35,15 @@
     <!-- AppConfig.CreateDefaults() builds preset URLs from consts on these. -->
     <Compile Include="..\..\ModulateTranscriber.cs" />
     <Compile Include="..\..\SmallestTranscriber.cs" />
+    <Compile Include="..\..\OmiTranscriber.cs" />
+    <Compile Include="..\..\ZoomScribeTranscriber.cs" />
+    <Compile Include="..\..\LocalTakeSplitter.cs" />
+    <Compile Include="..\..\SpeechDetector.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- LocalTakeSplitter (which ZoomScribeTranscriber uses) reads WAVs with NAudio. -->
+    <PackageReference Include="NAudio.Core" Version="2.2.1" />
   </ItemGroup>
 
 </Project>
