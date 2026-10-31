@@ -14,6 +14,40 @@ namespace WhisperInk
                 ".WhisperInk",
                 "debug.log");
 
+        /// <summary>Held for the app's whole life. Null only if the guard itself failed.</summary>
+        internal static SingleInstance? Guard { get; private set; }
+
+        /// <summary>Why the guard failed, for MainWindow to log once debug.log has been rotated.</summary>
+        internal static string? GuardProblem { get; private set; }
+
+        protected override void OnStartup(System.Windows.StartupEventArgs e)
+        {
+            // First of all: MainWindow's start rotates debug.log and installs
+            // the keyboard hook, and a second copy must do neither. So this
+            // exits at once rather than going through StartupUri's window.
+            try
+            {
+                Guard = SingleInstance.Claim(SingleInstance.AppName, TimeSpan.FromSeconds(3));
+                if (Guard == null)
+                {
+                    Environment.Exit(0);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                // A broken guard must not cost a dictation: run without it.
+                GuardProblem = ex.Message;
+            }
+            base.OnStartup(e);
+        }
+
+        protected override void OnExit(System.Windows.ExitEventArgs e)
+        {
+            try { Guard?.Dispose(); } catch { }
+            base.OnExit(e);
+        }
+
         private static void WriteCrash(string source, Exception? ex)
         {
             try

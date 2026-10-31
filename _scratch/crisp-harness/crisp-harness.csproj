@@ -34,6 +34,7 @@
     <Compile Include="..\..\LocalModelDiscovery.cs" />
     <Compile Include="..\..\LocalTakeSplitter.cs" />
     <Compile Include="..\..\TranscriptGuard.cs" />
+    <Compile Include="..\..\SingleInstance.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- TranscriptCoverage reads WAVs with NAudio's WaveFileReader. -->

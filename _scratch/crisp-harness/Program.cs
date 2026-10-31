@@ -785,6 +785,82 @@ Check(gvp.Kind == TranscriptGuard.Kind.ListInText && gvp.Terms == 4, "four terms
 Check(GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic", "dorsal") == "ListRecital"
       && GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic") == "None", "a term listed twice counts once: five entries, four distinct is a recital, five entries, three distinct is off");
 
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0l. SingleInstance: one copy at a time ==");
+// A mutex belongs to a thread, and its owner can take it again, so each "copy"
+// here is its own thread, as a real copy is its own process. The name is this
+// run's own: the running app's guard is never touched.
+string siName = @"Local\WhisperInk-harness-" + Guid.NewGuid().ToString("N");
+(SingleInstance? Guard, ManualResetEventSlim Leave, Thread Thread) StartCopy(TimeSpan wait, bool releaseOnLeave = true)
+{
+    var leave = new ManualResetEventSlim();
+    var claimed = new ManualResetEventSlim();
+    SingleInstance? g = null;
+    var t = new Thread(() =>
+    {
+        g = SingleInstance.Claim(siName, wait);
+        claimed.Set();
+        leave.Wait();
+        if (releaseOnLeave) g?.Dispose();
+    }) { IsBackground = true };
+    t.Start();
+    claimed.Wait();
+    return (g, leave, t);
+}
+void Leave((SingleInstance? Guard, ManualResetEventSlim Leave, Thread Thread) copy) { copy.Leave.Set(); copy.Thread.Join(); }
+var siNoWait = TimeSpan.Zero;
+var siShort = TimeSpan.FromMilliseconds(100);
+
+var siFirst = StartCopy(siNoWait);
+Check(siFirst.Guard != null, "the first copy gets the guard");
+int siKnocks = 0;
+siFirst.Guard!.WhenAnotherCopyStarts(() => Interlocked.Increment(ref siKnocks));
+var siClock = System.Diagnostics.Stopwatch.StartNew();
+var siSecond = StartCopy(siShort);
+siClock.Stop();
+Check(siSecond.Guard == null, "a second copy is refused while the first runs");
+Check(siClock.ElapsedMilliseconds >= 90 && siClock.ElapsedMilliseconds < 1500, $"a refused copy gives up after its wait ({siClock.ElapsedMilliseconds} ms for 100)");
+Check(SpinWait.SpinUntil(() => Volatile.Read(ref siKnocks) == 1, 2000), "the first copy hears the second one's knock");
+var siThird = StartCopy(siShort);
+Check(siThird.Guard == null && SpinWait.SpinUntil(() => Volatile.Read(ref siKnocks) == 2, 2000), "so does each copy after it, once each");
+Leave(siSecond);
+Leave(siThird);
+
+_ = Task.Run(async () => { await Task.Delay(300); siFirst.Leave.Set(); });
+siClock.Restart();
+var siNext = StartCopy(TimeSpan.FromSeconds(3));
+siClock.Stop();
+Check(siNext.Guard != null && siClock.ElapsedMilliseconds >= 250 && siClock.ElapsedMilliseconds < 2500, $"a copy started while the last one is closing takes over instead of leaving no app ({siClock.ElapsedMilliseconds} ms)");
+siFirst.Thread.Join();
+int siStale = 0;
+siNext.Guard!.WhenAnotherCopyStarts(() => Interlocked.Increment(ref siStale));
+Thread.Sleep(200);
+Check(Volatile.Read(ref siStale) == 0, "and doesn't mistake its own knock for a later copy");
+Leave(siNext);
+
+var siAfterQuit = StartCopy(siNoWait);
+Check(siAfterQuit.Guard != null, "a copy that quit normally leaves the way clear");
+Leave(siAfterQuit);
+
+var siKilled = StartCopy(siNoWait, releaseOnLeave: false);
+Check(siKilled.Guard != null, "(a copy that will die holding the guard)");
+Leave(siKilled);
+var siAfterKill = StartCopy(siNoWait);
+Check(siAfterKill.Guard != null, "a copy that was killed holding the guard (a deploy, a crash) doesn't block the next one");
+
+var siLate = StartCopy(siShort);
+Check(siLate.Guard == null, "(a copy that knocks before the first copy is listening)");
+Leave(siLate);
+int siEarly = 0;
+siAfterKill.Guard!.WhenAnotherCopyStarts(() => Interlocked.Increment(ref siEarly));
+Check(SpinWait.SpinUntil(() => Volatile.Read(ref siEarly) == 1, 2000), "a knock from before the first copy was ready isn't lost");
+
+bool siThrew = false;
+try { siAfterKill.Guard!.Dispose(); siAfterKill.Guard!.Dispose(); } catch { siThrew = true; }
+Check(!siThrew, "closing the guard from another thread, or twice, doesn't throw");
+Leave(siAfterKill);
+Check(SingleInstance.AppName.StartsWith(@"Local\"), "the app's guard is per Windows session");
+
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");

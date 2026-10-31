@@ -379,6 +379,10 @@ namespace WhisperInk
             }
             try { File.WriteAllText(LogFile, $"=== WhisperInk started {DateTime.Now:yyyy-MM-dd HH:mm:ss} === (previous session: {Path.GetFileName(PreviousLogFile)})\n"); } catch { }
 
+            if (App.GuardProblem != null)
+                Log($"[startup] the one-copy guard failed, so a second copy could start: {App.GuardProblem}");
+            App.Guard?.WhenAnotherCopyStarts(() => Dispatcher.BeginInvoke(() => OnAnotherCopyStarted()));
+
             Topmost = true;
             var screen = SystemParameters.WorkArea;
             Left = screen.Width - Width - 10;
@@ -2352,6 +2356,22 @@ namespace WhisperInk
                 ApplyGpuBackendChange(value);
                 SaveConfig();
             });
+        }
+
+        /// <summary>
+        /// Someone started WhisperInk again, usually from a pinned icon, and that
+        /// copy has closed itself (App.OnStartup). They wanted to see the app.
+        /// </summary>
+        private void OnAnotherCopyStarted()
+        {
+            Log("[startup] another copy was started; it closed itself and this one keeps running");
+            // Not ShowMainWindow: that takes the focus, and the next take's
+            // target is whichever window has it.
+            ShowActivated = false;
+            if (!IsVisible) Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Topmost = true;
+            FlashStatus("Already running", 2000);
         }
 
         public void ShowMainWindow()
