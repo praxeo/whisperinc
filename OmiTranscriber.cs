@@ -56,7 +56,7 @@
 // "safety_fallback": true, "hinted output was not retained": every list term
 // dropped, and the plain transcript wrote hematemesis for every
 // hematochezia. Such a take is still delivered, but through
-// ITranscriptWarning: the Warn cue, "⚠ Check terms!", and the take kept for a
+// ITranscriptWarning: the Warn cue, "⚠ Check the text!", and the take kept for a
 // retry. application_status reads "partial" even on a right transcript, so
 // it isn't a signal.
 

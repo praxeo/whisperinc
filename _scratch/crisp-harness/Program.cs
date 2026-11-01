@@ -1300,6 +1300,8 @@ using (var zc = JsonDocument.Parse(zq1.Get("config") ?? "{}"))
           && !c.TryGetProperty("language_detection", out _),
           "segmentation_mode none (Zoom's own detection clipped a first word), no Text Polishing (an LLM rewrite), no diarization");
 }
+var zwarn = (ITranscriptWarning)zoom;
+Check(zwarn.LastWarning == null, "a normal take has no warning");
 var zcov = (ITranscriptCoverage)zoom;
 Check(zcov.LastWordEndSeconds == 5.84 && zcov.DecodedAudioSeconds == 6.62,
       $"coverage: the last real word's end (the \".\" token skipped) and duration_sec ({zcov.LastWordEndSeconds}, {zcov.DecodedAudioSeconds})");
@@ -1335,11 +1337,13 @@ lock (requests) zEmpty = requests.Skip(zBefore).ToList();
 Check(zEmpty.Count == 2 && (zEmpty[0].Get("config") ?? "").Contains("\"segmentation_mode\":\"none\"") && !(zEmpty[1].Get("config") ?? "").Contains("segmentation_mode")
       && Logged(@"\[zoom\] nothing came back with Zoom's voice-activity detection off; asking again with it on"),
       "an empty answer with Zoom's detection off is asked for once more with it on, logged");
+Check(zwarn.LastWarning == null, "nothing back either way: no text to warn about");
 route = r => (r.Get("config") ?? "").Contains("segmentation_mode")
     ? (200, "{\"duration_sec\":2.9,\"result\":{\"text_display\":\"\"}}", null)
     : (200, "{\"duration_sec\":2.9,\"result\":{\"text_display\":\"The patient is a 16 year old male.\"}}", null);
 Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == "The patient is a 16 year old male.",
       "... and its text is used: the case measured live (three 2.7-3.1 s takes empty with it off, right with it on)");
+Check(zwarn.LastWarning?.Contains("silence detection") == true, $"... with a warning, since that detection can leave words out ({zwarn.LastWarning})");
 route = null;
 
 // A take over 29 s: Zoom refuses segmentation_mode none from 30 s, so it's cut at its pauses
@@ -1357,6 +1361,7 @@ Check(zSplit.Pieces.Count >= 3 && zPieces.Count == zSplit.Pieces.Count && zSplit
       $"a 69.8 s take goes out as {zPieces.Count} pieces of at most 29 s, each with segmentation_mode none and the list");
 Check(zl == string.Join(" ", zSplit.Wavs.Select(w => $"{w.Length} bytes.")) && Logged(@"\[zoom\] 69\.8 s take sent in \d pieces cut at pauses"),
       $"their texts are joined in the take's order, whatever order they came back in; logged ({zl})");
+Check(zwarn.LastWarning == null, "the next take clears the warning: none of its pieces needed the retry");
 Check(Math.Abs((zcov.LastWordEndSeconds ?? 0) - (zSplit.Seconds(zSplit.Pieces[^1].Start) + 4.5)) < 1e-6
       && Math.Abs((zcov.DecodedAudioSeconds ?? 0) - zSplit.Seconds(zSplit.Pieces[^1].End)) < 1e-6,
       $"coverage in the take's own time: the last piece's start plus its last word, and plus its duration_sec ({zcov.LastWordEndSeconds:F2} s of {zcov.DecodedAudioSeconds:F2})");
@@ -1364,11 +1369,20 @@ int zFailLen = zSplit.Wavs[1].Length;
 route = r => r.File?.Length == zFailLen ? (500, "{\"code\":500,\"reason\":\"INTERNAL\",\"message\":\"boom\"}", null) : (200, "{\"result\":{\"text_display\":\"ok\"}}", null);
 Check(await zoom.TranscribeAsync(zLong, Array.Empty<string>()) == null && Logged(@"\[zoom\] 1 of \d pieces failed, so the take did"),
       "one failed piece fails the take (it stays journaled), logged");
+route = r => r.File?.Length == zFailLen && (r.Get("config") ?? "").Contains("segmentation_mode")
+    ? (200, "{\"result\":{\"text_display\":\"\"}}", null)
+    : (200, "{\"result\":{\"text_display\":\"ok\"}}", null);
+string? zr = await zoom.TranscribeAsync(zLong, Array.Empty<string>());
+Check(zr == string.Join(" ", zSplit.Wavs.Select(_ => "ok")) && zwarn.LastWarning != null, "one piece needing the retry: the take comes back whole, with the warning");
 route = null;
 reply = "{\"result\":{\"text_display\":\"\"}}";
 await zoom.TranscribeAsync(NoisyWav(0.0025, (40, 0)), Array.Empty<string>());
 Check(!(LastRequest().Get("config") ?? "").Contains("segmentation_mode") && Logged(@"\[zoom\] 40\.0 s take with no pause to cut at: sent whole, with Zoom's own voice-activity detection"),
       "a 40 s take with no speech to cut at goes out whole with Zoom's detection on (\"none\" would only be refused), logged");
+reply = "{\"result\":{\"text_display\":\"A long take.\"}}";
+await zoom.TranscribeAsync(NoisyWav(0.0025, (40, 0)), Array.Empty<string>());
+Check(zwarn.LastWarning != null, "... and any text that comes back that way has the warning too");
+reply = "{\"result\":{\"text_display\":\"\"}}";
 
 // The undocumented upload refused: the documented data URL, once.
 int zPosts = 0;

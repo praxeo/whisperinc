@@ -1194,7 +1194,7 @@ namespace WhisperInk
                     if (take != null)
                     {
                         if (shortfall is { } sf) _unsent!.Keep(take, UnsentTakes.Incomplete, "incomplete: " + sf.Describe(), text);
-                        else if (result.Warning is { } w) _unsent!.Keep(take, UnsentTakes.Unchecked, "check the terms: " + w, text);
+                        else if (result.Warning is { } w) _unsent!.Keep(take, UnsentTakes.Unchecked, "check the text: " + w, text);
                         else _unsent!.Delivered(take, text);
                     }
 
@@ -1206,8 +1206,8 @@ namespace WhisperInk
                         WarnDelivered("⚠ Check the end!", "Transcript may be incomplete",
                             $"{result.ProviderName} {missing.Describe()}. {(pasted ? "It was pasted" : "It's on the clipboard")} — check the end of the note. The audio is saved: ↻ Unsent dictations can retry it.");
                     else if (result.Warning is { } warning)
-                        WarnDelivered("⚠ Check terms!", "Check the medical terms",
-                            $"{result.ProviderName} {warning}. {(pasted ? "It was pasted" : "It's on the clipboard")} — check the medical terms before it goes in a chart. The audio is saved: ↻ Unsent dictations can retry it with another provider.");
+                        WarnDelivered("⚠ Check the text!", "Check the text",
+                            $"{result.ProviderName} {warning}. {(pasted ? "It was pasted" : "It's on the clipboard")} — check it before it goes in a chart. The audio is saved: ↻ Unsent dictations can retry it with another provider.");
                     else if (micCutOut)
                         WarnDelivered("⚠ Mic cut out!", "Microphone stopped mid-dictation",
                             $"Only the first {audioMs / 1000.0:F0}s of a {holdMs / 1000.0:F0}s hold were recorded. {(pasted ? "That part was pasted" : "That part is on the clipboard")} — anything said after it is missing.");
@@ -1670,22 +1670,22 @@ namespace WhisperInk
                 HistoryService.Add(text);
                 string? warning = result.Warning;
                 if (shortfall is { } sf) _unsent?.Keep(take, UnsentTakes.Incomplete, "retry incomplete: " + sf.Describe(), text);
-                else if (warning != null) _unsent?.Keep(take, UnsentTakes.Unchecked, "retry: check the terms: " + warning, text);
+                else if (warning != null) _unsent?.Keep(take, UnsentTakes.Unchecked, "retry: check the text: " + warning, text);
                 else _unsent?.Remove(take, text, provider);
-                Log($"[retry] {take.Id}: {text.Length} chars on the clipboard{(localFallback ? " (LOCAL FALLBACK)" : "")}{(shortfall != null ? " (incomplete)" : "")}{(warning != null ? " (check the terms)" : "")}");
+                Log($"[retry] {take.Id}: {text.Length} chars on the clipboard{(localFallback ? " (LOCAL FALLBACK)" : "")}{(shortfall != null ? " (incomplete)" : "")}{(warning != null ? " (check the text)" : "")}");
 
                 string who = localFallback
                     ? $"Transcribed by {result.ProviderName} — a LOCAL FALLBACK, not your usual provider. Check it before it goes in a chart."
                     : $"Transcribed by {result.ProviderName}.";
                 string body = $"{who} It's on the clipboard — paste it where it belongs."
                               + (shortfall is { } s ? $" It may be incomplete: {s.Describe()}." : "")
-                              + (warning != null ? $" {result.ProviderName} {warning}: check the medical terms." : "");
+                              + (warning != null ? $" {result.ProviderName} {warning}: check it before it goes in a chart." : "");
                 if (localFallback || shortfall != null || warning != null)
                 {
                     PlayUiSound(UiSound.Warn);
-                    FlashStatus(localFallback ? "Fallback — copied" : shortfall != null ? "⚠ Copied — check end" : "⚠ Copied — check terms", 4000);
+                    FlashStatus(localFallback ? "Fallback — copied" : shortfall != null ? "⚠ Copied — check end" : "⚠ Copied — check text", 4000);
                     _tray?.ShowBalloon(shortfall != null ? "Recovered — may be incomplete"
-                                       : warning != null ? "Recovered — check the terms"
+                                       : warning != null ? "Recovered — check the text"
                                        : "Recovered with a local fallback", body, warning: true);
                 }
                 else

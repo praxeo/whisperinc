@@ -46,7 +46,8 @@ namespace WhisperInk
         public const string Failed = "failed";
         public const string Incomplete = "incomplete";
         // Delivered, but the provider itself said the text needs checking
-        // (ITranscriptWarning: Omi dropping the term list). Kept for a retry.
+        // (ITranscriptWarning: Omi dropping the term list, Zoom's text coming
+        // from its own silence detection). Kept for a retry.
         public const string Unchecked = "unchecked";
         public const string Interrupted = "interrupted";
         // Judged silent and never sent. Kept (the newest few) because that

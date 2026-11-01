@@ -38,7 +38,10 @@
 // most 29 s that each hold speech. The pieces go out at once and their texts
 // are joined. One failed piece fails the take, which stays journaled. A long
 // take that can't be cut (no speech found, or not 16-bit mono) goes out whole
-// with Zoom's detection on, since "none" would only be refused.
+// with Zoom's detection on, since "none" would only be refused. Text that came
+// from Zoom's detection either way is delivered with a warning
+// (ITranscriptWarning): it has also dropped a whole first sentence of a real
+// take (2026-10-30), and a missing word doesn't show.
 //
 // ── Models ────────────────────────────────────────────────────────────────
 // zoom-scribe-en (standard) and zoom-scribe-en-pro ("Scribe API Pro
@@ -79,7 +82,7 @@ using System.Threading.Tasks;
 
 namespace WhisperInk
 {
-    public sealed class ZoomScribeTranscriber : ITranscriber, ITranscriptCoverage
+    public sealed class ZoomScribeTranscriber : ITranscriber, ITranscriptCoverage, ITranscriptWarning
     {
         // Public so AppConfig.CreateDefaults builds its preset from the same
         // strings this class posts to.
@@ -113,8 +116,9 @@ namespace WhisperInk
 
         /// <summary>One request's answer: the text, its last real word's end and
         /// the seconds Zoom says it decoded, both from the start of the audio
-        /// that request carried.</summary>
-        private sealed record Answer(string Text, double? LastWordEnd, double? Duration);
+        /// that request carried. FromDetection: the text came with Zoom's own
+        /// voice-activity detection on, which can leave words out.</summary>
+        private sealed record Answer(string Text, double? LastWordEnd, double? Duration, bool FromDetection = false);
 
         private readonly ApiProvider _provider;
         private readonly HttpClient _http;
@@ -124,6 +128,11 @@ namespace WhisperInk
 
         public double? LastWordEndSeconds { get; private set; }
         public double? DecodedAudioSeconds { get; private set; }
+
+        /// <summary>Set when any of the last take's text came from Zoom's own detection.</summary>
+        public string? LastWarning { get; private set; }
+
+        private const string DetectionWarning = "used its own silence detection for this take, which can leave out words";
 
         public ZoomScribeTranscriber(ApiProvider provider, HttpClient http, Action<string> log)
         {
@@ -152,6 +161,7 @@ namespace WhisperInk
         {
             LastWordEndSeconds = null;
             DecodedAudioSeconds = null;
+            LastWarning = null;
             if (wavBytes == null || wavBytes.Length == 0) return null;
 
             try
@@ -170,6 +180,7 @@ namespace WhisperInk
                     if (one == null) return null;
                     LastWordEndSeconds = one.LastWordEnd;
                     DecodedAudioSeconds = one.Duration;
+                    if (one.FromDetection) LastWarning = DetectionWarning;
                     return one.Text;
                 }
 
@@ -193,6 +204,7 @@ namespace WhisperInk
                         LastWordEndSeconds = split.Seconds(split.Pieces[i].Start) + end;
                 if (answers[^1]!.Duration is double decoded)
                     DecodedAudioSeconds = split.Seconds(split.Pieces[^1].Start) + decoded;
+                if (answers.Any(a => a!.FromDetection)) LastWarning = DetectionWarning;
                 return string.Join(" ", answers.Select(a => a!.Text).Where(t => t.Length > 0));
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -223,11 +235,14 @@ namespace WhisperInk
         private async Task<Answer?> SendPieceAsync(byte[] wav, string? locale, string? model, List<string> phrases, bool vadOff, CancellationToken ct)
         {
             var answer = await SendAsync(wav, ConfigJson(locale, model, phrases, vadOff), ct).ConfigureAwait(false);
-            if (!vadOff || answer is not { Text.Length: 0 }) return answer;
+            if (!vadOff) return MarkDetected(answer);
+            if (answer is not { Text.Length: 0 }) return answer;
 
             _log("[zoom] nothing came back with Zoom's voice-activity detection off; asking again with it on");
-            return await SendAsync(wav, ConfigJson(locale, model, phrases, vadOff: false), ct).ConfigureAwait(false) ?? answer;
+            return MarkDetected(await SendAsync(wav, ConfigJson(locale, model, phrases, vadOff: false), ct).ConfigureAwait(false)) ?? answer;
         }
+
+        private static Answer? MarkDetected(Answer? a) => a is { Text.Length: > 0 } ? a with { FromDetection = true } : a;
 
         /// <summary>One request: the multipart upload, or the documented data
         /// URL if Zoom refuses that shape. Null on any failure, logged.</summary>

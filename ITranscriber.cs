@@ -68,7 +68,9 @@ namespace WhisperInk
     /// <see cref="ITranscriber.TranscribeAsync"/> call, or null. The text is
     /// still delivered, with the Warn cue and the take kept for a retry, the
     /// way an incomplete transcript is. Omi's is the first: its own audit says
-    /// when it dropped the term list for a take (OmiTranscriber).
+    /// when it dropped the term list for a take (OmiTranscriber). Zoom's says
+    /// the text came from its own silence detection, which can leave out words
+    /// (ZoomScribeTranscriber).
     /// </summary>
     public interface ITranscriptWarning
     {
