@@ -861,6 +861,63 @@ Check(!siThrew, "closing the guard from another thread, or twice, doesn't throw"
 Leave(siAfterKill);
 Check(SingleInstance.AppName.StartsWith(@"Local\"), "the app's guard is per Windows session");
 
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0m. MicLevel: the mic's input level, Windows' own setting ==");
+{
+    string vec = "Microphone (2- VEC GN-USB)", realtek = "Microphone (Realtek USB2.0 Audio)";
+    var eps = new List<string> { vec, realtek };
+    Check(MicLevel.MatchByName(vec, eps) == 0, "a winmm name finds the endpoint of the same name");
+    Check(realtek.Length > MicLevel.WaveInNameLimit && MicLevel.MatchByName(realtek[..MicLevel.WaveInNameLimit], eps) == 1,
+          "a name winmm cut at 31 characters finds the endpoint it was cut from");
+    Check(MicLevel.MatchByName("Microphone", eps) == -1, "a short name that is only the start of one isn't taken for it");
+    Check(MicLevel.MatchByName("Headset Microphone (Jabra)", eps) == -1 && MicLevel.MatchByName("", eps) == -1,
+          "a name Windows doesn't list, or none, finds nothing");
+    Check(MicLevel.MatchByName(vec, new List<string> { vec, realtek, vec }) == -1,
+          "two endpoints of one name: neither, so the wrong mic is never set");
+    Check(MicLevel.MatchByName(realtek[..MicLevel.WaveInNameLimit], new List<string> { realtek, realtek + " 2" }) == -1,
+          "a cut name that fits two endpoints: neither");
+    Check(MicLevel.IsCurrent(100, 1f) && MicLevel.IsCurrent(95, 0.948f) && !MicLevel.IsCurrent(90, 0.94f),
+          "the menu ticks the step within half a percent of the level, and only that one");
+    Check(MicLevel.Steps[0] == 100 && MicLevel.Steps.Zip(MicLevel.Steps.Skip(1)).All(p => p.First > p.Second && p.Second > 0),
+          "the steps run down from 100%, each one lower");
+    Check(MicLevel.Describe(new MicLevelInfo("m", 1f, 22.5039f, -8f, 22.5f, false)) == "100% (+22.5 dB)"
+          && MicLevel.Describe(new MicLevelInfo("m", 0.55f, 0f, -17.25f, 12f, false)) == "55% (0.0 dB)"
+          && MicLevel.Describe(new MicLevelInfo("m", 0.3f, -3f, -8f, 22.5f, false)) == "30% (-3.0 dB)",
+          "the level reads as Windows' percent with its dB");
+    Check(new MicLevelInfo("m", 0.996f, 22.4f, -8f, 22.5f, false).AtMax && !new MicLevelInfo("m", 0.95f, 19f, -8f, 22.5f, false).AtMax,
+          "100% is the top of the mic's range");
+
+    // This machine's own microphones, read only. The level is set only to the
+    // value it already has, so a dictation in progress can't be disturbed.
+    int nIn = NAudio.Wave.WaveInEvent.DeviceCount;
+    if (nIn == 0) Console.WriteLine("   (no capture devices on this machine: skipped the live reads)");
+    for (int i = 0; i < nIn; i++)
+    {
+        string wname = NAudio.Wave.WaveInEvent.GetCapabilities(i).ProductName;
+        string? id = MicLevel.EndpointIdOf(i);
+        var sw = Stopwatch.StartNew();
+        var lv = MicLevel.Read(i, wname, Log);
+        long ms = sw.ElapsedMilliseconds;
+        Console.WriteLine($"   [{i}] {wname}: endpoint {(id ?? "<driver didn't say>")}, {(lv == null ? "no level" : MicLevel.Describe(lv) + (lv.Muted ? " muted" : ""))}, read in {ms} ms");
+        Check(id != null && id.StartsWith("{0.0.1."), $"[{i}] the driver names the capture endpoint behind winmm device {i}");
+        string? idName = null;
+        if (id != null) { using var en = new NAudio.CoreAudioApi.MMDeviceEnumerator(); using var dv = en.GetDevice(id); idName = dv.FriendlyName; }
+        Check(lv != null && idName != null && idName.StartsWith(wname), $"[{i}] the endpoint the driver names is the mic of the same name ({idName})");
+        sw.Restart();
+        for (int k = 0; k < 5; k++) MicLevel.Read(i, wname, Log);
+        double warm = sw.Elapsed.TotalMilliseconds / 5;
+        Check(warm < 15, $"[{i}] a warm read is quick enough for a menu open on the UI thread ({warm:F1} ms; the first, {ms} ms)");
+        // Only at a whole percent: 55% read back as 0.0 dB and set back as -0.1 dB.
+        if (lv != null && Math.Abs(lv.Scalar * 100f - lv.Percent) < 0.01f)
+        {
+            var again = MicLevel.Set(i, wname, lv.Percent, Log);
+            Check(again != null && Math.Abs(again.Scalar - lv.Scalar) < 0.005f, $"[{i}] setting the level it already has ({lv.Percent}%) reads back the same");
+        }
+    }
+    Check(MicLevel.Read(nIn + 5, "", Log) == null && Logged(@"\[mic\] couldn't read the input level"),
+          "a device Windows doesn't have: no level, and the log says why");
+}
+
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");

@@ -35,10 +35,13 @@
     <Compile Include="..\..\LocalTakeSplitter.cs" />
     <Compile Include="..\..\TranscriptGuard.cs" />
     <Compile Include="..\..\SingleInstance.cs" />
+    <Compile Include="..\..\MicLevel.cs" />
   </ItemGroup>
   <ItemGroup>
     <!-- TranscriptCoverage reads WAVs with NAudio's WaveFileReader. -->
     <PackageReference Include="NAudio.Core" Version="2.2.1" />
+    <PackageReference Include="NAudio.Wasapi" Version="2.2.1" />
+    <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
   </ItemGroup>
   <ItemGroup>
     <None Include="speech.wav" CopyToOutputDirectory="PreserveNewest" Condition="Exists('speech.wav')" />

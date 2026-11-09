@@ -2095,6 +2095,7 @@ namespace WhisperInk
             }
 
             children.Add(MenuNode.Separator());
+            children.Add(BuildMicLevelMenu());
             children.Add(new MenuNode
             {
                 // Holding the device open is what removes the ~130 ms open from
@@ -2111,6 +2112,78 @@ namespace WhisperInk
             });
 
             return new MenuNode { Header = "🎙 Microphone", Children = children };
+        }
+
+        /// <summary>🎙 Microphone ▸ 🎚 Level: the input level of the mic being
+        /// recorded from, Windows' own setting (MicLevel). Read each time the
+        /// menu opens, so a change made in Windows' Sound settings shows here.</summary>
+        private MenuNode BuildMicLevelMenu()
+        {
+            int index = _selectedDeviceNumber;
+            string name = index >= 0 && index < WaveIn.DeviceCount ? WaveIn.GetCapabilities(index).ProductName : "";
+            var level = MicLevel.Read(index, name, Log);
+            if (level == null)
+                return new MenuNode
+                {
+                    Header = "🎚 Level: not available",
+                    IsEnabled = false,
+                    ToolTip = "Windows didn't report an input level for this microphone; debug.log says why.",
+                };
+
+            var children = new List<MenuNode>();
+            if (level.Muted)
+                children.Add(new MenuNode
+                {
+                    Header = "🔇 Muted in Windows: unmute",
+                    Action = () =>
+                    {
+                        var after = MicLevel.Unmute(index, name, Log);
+                        if (after == null || after.Muted) { PlayUiSound(UiSound.Error); FlashStatus("⚠ Still muted", 2500); return; }
+                        Log($"[mic] unmuted {after.EndpointName}");
+                        FlashStatus("🎚 Mic unmuted", 2000);
+                    },
+                });
+            foreach (int step in MicLevel.Steps)
+            {
+                int percent = step; // capture for the closure
+                children.Add(new MenuNode
+                {
+                    Header = percent == 100 ? "100% (the most this mic allows)" : $"{percent}%",
+                    IsChecked = MicLevel.IsCurrent(percent, level.Scalar),
+                    Action = () => SetMicLevel(index, name, percent),
+                });
+            }
+            children.Add(MenuNode.Separator());
+            children.Add(new MenuNode
+            {
+                Header = "Windows sound settings…",
+                ToolTip = "For any level in between: Input → this microphone → Input volume.",
+                Action = () => OpenUrl("ms-settings:sound"),
+            });
+
+            return new MenuNode
+            {
+                Header = $"🎚 Level: {level.Percent}%" + (level.Muted ? " (muted)" : level.AtMax ? " (max)" : ""),
+                ToolTip = $"{level.EndpointName}: {MicLevel.Describe(level)}, of {level.MinDb:+0.0;-0.0} to {level.MaxDb:+0.0;-0.0} dB. " +
+                          "The same setting as Windows' input volume. Lower it if loud words distort; " +
+                          "the recording bars show the result.",
+                Children = children,
+            };
+        }
+
+        private void SetMicLevel(int index, string name, int percent)
+        {
+            var after = MicLevel.Set(index, name, percent, Log);
+            if (after == null || !MicLevel.IsCurrent(percent, after.Scalar))
+            {
+                // MicLevel logged the reason if Core Audio failed outright.
+                if (after != null) Log($"[mic] asked for {percent}%, but Windows reports {MicLevel.Describe(after)} on {after.EndpointName}");
+                PlayUiSound(UiSound.Error);
+                FlashStatus("⚠ Level not set", 2500);
+                return;
+            }
+            Log($"[mic] input level set to {MicLevel.Describe(after)} on {after.EndpointName}");
+            FlashStatus($"🎚 Mic {after.Percent}%", 2000);
         }
 
         private MenuNode BuildGpuBackendMenu()
