@@ -41,10 +41,16 @@
            pwsh .\_local_bias_ab.ps1 -OutDir <dir>       # server logs here instead of .\results\. Use it, under %APPDATA%,
                                                          # for real dictations: the logs name each file it was sent
                                                          # (see _score_corpus.ps1)
+           pwsh .\_local_bias_ab.ps1 -ModelDir <dir>     # also look for a run's GGUF here, for a model kept out of the
+                                                         # model folder (the running app would offer it under +)
+
+  A run may also set Conds (which conditions to send: $false = no list,
+  $true = the list) and PromptHasList (the list is already in its server
+  prompt, as Granite's --ask runs below, so no hotwords field is sent).
   NEEDS    the user's own recordings in .\clips\ (see RECORD_THESE.md), and
            the listed GGUFs in %APPDATA%\.WhisperInk\cohere-gguf\
 #>
-param([string[]]$Only, [string[]]$Extra, [string[]]$Drop, [string]$Fields, [string]$Exe, [string]$Csv, [string]$Label, [string]$OutDir, [int]$Reps = 2)
+param([string[]]$Only, [string[]]$Extra, [string[]]$Drop, [string]$Fields, [string]$Exe, [string]$Csv, [string]$Label, [string]$OutDir, [string]$ModelDir, [int]$Reps = 2)
 $ErrorActionPreference = 'Stop'
 $dir   = Join-Path $env:APPDATA '.WhisperInk\cohere-gguf'
 $exe   = if ($Exe) { (Resolve-Path $Exe).Path } else { Join-Path $dir 'crispasr.exe' }
@@ -72,11 +78,35 @@ $runs = @(
   @{ Name = 'cohere q6_k';         Model = 'cohere-transcribe-q6_k.gguf';          Backend = 'cohere';     Port = 18209 },
   @{ Name = 'parakeet rnnt 1.1b';  Model = 'parakeet-rnnt-1.1b-q4_k.gguf';         Backend = '';           Port = 18210; Args = @('--punc-model', 'fullstop') },
   @{ Name = 'qwen3-asr 1.7b';      Model = 'qwen3-asr-1.7b-q4_k.gguf';             Backend = 'qwen3-1.7b'; Port = 18212; Fields = @{ chunk_seconds = '60' } },
+  # cstr's Q8_0 of the same model (2026-11-23): does the shipped Q4_K cost accuracy? Keep it out of cohere-gguf (-ModelDir).
+  @{ Name = 'qwen3-asr 1.7b q8_0'; Model = 'qwen3-asr-1.7b-q8_0.gguf';             Backend = 'qwen3-1.7b'; Port = 18227; Fields = @{ chunk_seconds = '60' } },
+  # Musci-ASR-qwen-1019: a weights-only GRPO fine-tune of Qwen3-ASR 1.7B, run exactly as the Qwen3 preset is.
+  @{ Name = 'musci-asr qwen 1019'; Model = 'musci-asr-qwen-1019-q4_k.gguf';        Backend = 'qwen3-1.7b'; Port = 18223; Fields = @{ chunk_seconds = '60' } },
+  # yuriyvnv/Qwen3-ASR-1.7B-EN-Medical: a full fine-tune of Qwen3-ASR 1.7B (MultiMed English + Common Voice 17),
+  # converted with CrispASR's convert-qwen3-asr-to-gguf.py and quantized to Q4_K; run as the Qwen3 preset is.
+  @{ Name = 'qwen3-asr en-medical'; Model = 'qwen3-asr-1.7b-en-medical-q4_k.gguf'; Backend = 'qwen3-1.7b'; Port = 18224; Fields = @{ chunk_seconds = '60' } },
+  # The same conversion unquantized (F16) and at Q8_0, to tell the quantization's loss from the conversion's.
+  @{ Name = 'qwen3-asr en-medical f16'; Model = 'qwen3-asr-1.7b-en-medical-f16.gguf'; Backend = 'qwen3-1.7b'; Port = 18225; Fields = @{ chunk_seconds = '60' } },
+  @{ Name = 'qwen3-asr en-medical q8_0'; Model = 'qwen3-asr-1.7b-en-medical-q8_0.gguf'; Backend = 'qwen3-1.7b'; Port = 18226; Fields = @{ chunk_seconds = '60' } },
   @{ Name = 'parakeet tdt 0.6b v3'; Model = 'parakeet-tdt-0.6b-v3-q4_k.gguf';      Backend = '';           Port = 18213 },
   @{ Name = 'orukeet';             Model = 'orukeet-q4_k.gguf';                    Backend = '';           Port = 18214 },
   @{ Name = 'parakeet ultra';      Model = 'parakeet-ultra-q4_k.gguf';             Backend = '';           Port = 18215 },
   @{ Name = 'voxtral mini 3b';     Model = 'voxtral-mini-3b-2507-q4_k.gguf';       Backend = 'voxtral';    Port = 18216 },
-  @{ Name = 'voxtral 4b realtime'; Model = 'voxtral-mini-4b-realtime-q4_k.gguf';   Backend = 'voxtral4b';  Port = 18217 }
+  @{ Name = 'voxtral 4b realtime'; Model = 'voxtral-mini-4b-realtime-q4_k.gguf';   Backend = 'voxtral4b';  Port = 18217 },
+  # Granite Speech 5.0 2B (CrispASR v0.8.45+). The first run is what WhisperInk would send: CrispASR builds the
+  # 4.1-era prompt ("can you transcribe the speech into English?", + " Keywords: a,b,c"). IBM's card for 5.0 calls
+  # that the raw-transcript prompt, so the --ask runs use its own prompts. --ask replaces the prompt for every
+  # request and turns hotwords off, so the list goes into the prompt itself.
+  @{ Name = 'granite 5.0 2b';                Model = 'granite-speech-5.0-2b-f16.gguf'; Backend = ''; Port = 18218 },
+  @{ Name = 'granite 5.0 2b card-punct';     Model = 'granite-speech-5.0-2b-f16.gguf'; Backend = ''; Port = 18219; Conds = @($false)
+     Args = @('--ask', '"transcribe the speech with proper punctuation and capitalization."') },
+  @{ Name = 'granite 5.0 2b card-kwb';       Model = 'granite-speech-5.0-2b-f16.gguf'; Backend = ''; Port = 18220; Conds = @($true); PromptHasList = $true
+     Args = @('--ask', ('"transcribe the speech to text. Keywords: ' + ($terms -join ', ') + '"')) },
+  @{ Name = 'granite 5.0 2b card-punct-kwb'; Model = 'granite-speech-5.0-2b-f16.gguf'; Backend = ''; Port = 18221; Conds = @($true); PromptHasList = $true
+     Args = @('--ask', ('"transcribe the speech with proper punctuation and capitalization. Keywords: ' + ($terms -join ', ') + '"')) },
+  # With the list Granite 5 writes no capitals or punctuation, so: the keyword prompt plus Parakeet RNNT's punctuation model.
+  @{ Name = 'granite 5.0 2b card-kwb+fullstop'; Model = 'granite-speech-5.0-2b-f16.gguf'; Backend = ''; Port = 18222; Conds = @($true); PromptHasList = $true
+     Args = @('--ask', ('"transcribe the speech to text. Keywords: ' + ($terms -join ', ') + '"'), '--punc-model', 'fullstop') }
 )
 # `pwsh -File` hands "orukeet,tdt" over as one string, so split it here.
 $Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
@@ -86,6 +116,7 @@ foreach ($kv in @($Fields -split ';' | Where-Object { $_ })) { $k, $v = $kv -spl
 
 foreach ($run in $runs) {
   $model = Join-Path $dir $run.Model
+  if (-not (Test-Path $model) -and $ModelDir) { $model = Join-Path $ModelDir $run.Model }
   if (-not (Test-Path $model)) { "`n=== $($run.Name): $($run.Model) not on disk, skipped"; continue }
   $argList = @('--server','--host','127.0.0.1','--port',"$($run.Port)",'-m',$model,'-t','8','-np','--gpu-backend','cuda')
   if ($run.Backend) { $argList += @('--backend', $run.Backend) }
@@ -110,10 +141,11 @@ foreach ($run in $runs) {
     $shown = if ($sent.Count) { ", $(($sent.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')" } else { '' }
     "`n=== $($run.Name)  ($($run.Model), backend $backend$shown, ready in $([int]$sw.Elapsed.TotalSeconds) s)"
     :clips foreach ($clip in $clips) {
-      foreach ($bias in $false, $true) {
+      # $null test, not truthiness: a one-element @($false) is falsy in PowerShell.
+      foreach ($bias in $(if ($null -ne $run.Conds) { $run.Conds } else { @($false, $true) })) {
         foreach ($rep in 1..$Reps) {
           $form = @{ language = 'en'; response_format = 'json'; file = Get-Item $clip.FullName }
-          if ($bias) { $form.hotwords = $hot }
+          if ($bias -and -not $run.PromptHasList) { $form.hotwords = $hot }
           foreach ($e in $sent.GetEnumerator()) { $form[$e.Key] = $e.Value }
           $mode = if ($bias) { 'BIAS' } else { 'none' }
           $t = [Diagnostics.Stopwatch]::StartNew()

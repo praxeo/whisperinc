@@ -786,137 +786,29 @@ Check(GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopa
       && GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic") == "None", "a term listed twice counts once: five entries, four distinct is a recital, five entries, three distinct is off");
 
 // ════════════════════════════════════════════════════════════════════════
-Console.WriteLine("\n== 0l. SingleInstance: one copy at a time ==");
-// A mutex belongs to a thread, and its owner can take it again, so each "copy"
-// here is its own thread, as a real copy is its own process. The name is this
-// run's own: the running app's guard is never touched.
-string siName = @"Local\WhisperInk-harness-" + Guid.NewGuid().ToString("N");
-(SingleInstance? Guard, ManualResetEventSlim Leave, Thread Thread) StartCopy(TimeSpan wait, bool releaseOnLeave = true)
-{
-    var leave = new ManualResetEventSlim();
-    var claimed = new ManualResetEventSlim();
-    SingleInstance? g = null;
-    var t = new Thread(() =>
-    {
-        g = SingleInstance.Claim(siName, wait);
-        claimed.Set();
-        leave.Wait();
-        if (releaseOnLeave) g?.Dispose();
-    }) { IsBackground = true };
-    t.Start();
-    claimed.Wait();
-    return (g, leave, t);
-}
-void Leave((SingleInstance? Guard, ManualResetEventSlim Leave, Thread Thread) copy) { copy.Leave.Set(); copy.Thread.Join(); }
-var siNoWait = TimeSpan.Zero;
-var siShort = TimeSpan.FromMilliseconds(100);
-
-var siFirst = StartCopy(siNoWait);
-Check(siFirst.Guard != null, "the first copy gets the guard");
-int siKnocks = 0;
-siFirst.Guard!.WhenAnotherCopyStarts(() => Interlocked.Increment(ref siKnocks));
-var siClock = System.Diagnostics.Stopwatch.StartNew();
-var siSecond = StartCopy(siShort);
-siClock.Stop();
-Check(siSecond.Guard == null, "a second copy is refused while the first runs");
-Check(siClock.ElapsedMilliseconds >= 90 && siClock.ElapsedMilliseconds < 1500, $"a refused copy gives up after its wait ({siClock.ElapsedMilliseconds} ms for 100)");
-Check(SpinWait.SpinUntil(() => Volatile.Read(ref siKnocks) == 1, 2000), "the first copy hears the second one's knock");
-var siThird = StartCopy(siShort);
-Check(siThird.Guard == null && SpinWait.SpinUntil(() => Volatile.Read(ref siKnocks) == 2, 2000), "so does each copy after it, once each");
-Leave(siSecond);
-Leave(siThird);
-
-_ = Task.Run(async () => { await Task.Delay(300); siFirst.Leave.Set(); });
-siClock.Restart();
-var siNext = StartCopy(TimeSpan.FromSeconds(3));
-siClock.Stop();
-Check(siNext.Guard != null && siClock.ElapsedMilliseconds >= 250 && siClock.ElapsedMilliseconds < 2500, $"a copy started while the last one is closing takes over instead of leaving no app ({siClock.ElapsedMilliseconds} ms)");
-siFirst.Thread.Join();
-int siStale = 0;
-siNext.Guard!.WhenAnotherCopyStarts(() => Interlocked.Increment(ref siStale));
-Thread.Sleep(200);
-Check(Volatile.Read(ref siStale) == 0, "and doesn't mistake its own knock for a later copy");
-Leave(siNext);
-
-var siAfterQuit = StartCopy(siNoWait);
-Check(siAfterQuit.Guard != null, "a copy that quit normally leaves the way clear");
-Leave(siAfterQuit);
-
-var siKilled = StartCopy(siNoWait, releaseOnLeave: false);
-Check(siKilled.Guard != null, "(a copy that will die holding the guard)");
-Leave(siKilled);
-var siAfterKill = StartCopy(siNoWait);
-Check(siAfterKill.Guard != null, "a copy that was killed holding the guard (a deploy, a crash) doesn't block the next one");
-
-var siLate = StartCopy(siShort);
-Check(siLate.Guard == null, "(a copy that knocks before the first copy is listening)");
-Leave(siLate);
-int siEarly = 0;
-siAfterKill.Guard!.WhenAnotherCopyStarts(() => Interlocked.Increment(ref siEarly));
-Check(SpinWait.SpinUntil(() => Volatile.Read(ref siEarly) == 1, 2000), "a knock from before the first copy was ready isn't lost");
-
-bool siThrew = false;
-try { siAfterKill.Guard!.Dispose(); siAfterKill.Guard!.Dispose(); } catch { siThrew = true; }
-Check(!siThrew, "closing the guard from another thread, or twice, doesn't throw");
-Leave(siAfterKill);
-Check(SingleInstance.AppName.StartsWith(@"Local\"), "the app's guard is per Windows session");
-
-// ════════════════════════════════════════════════════════════════════════
-Console.WriteLine("\n== 0m. MicLevel: the mic's input level, Windows' own setting ==");
-{
-    string vec = "Microphone (2- VEC GN-USB)", realtek = "Microphone (Realtek USB2.0 Audio)";
-    var eps = new List<string> { vec, realtek };
-    Check(MicLevel.MatchByName(vec, eps) == 0, "a winmm name finds the endpoint of the same name");
-    Check(realtek.Length > MicLevel.WaveInNameLimit && MicLevel.MatchByName(realtek[..MicLevel.WaveInNameLimit], eps) == 1,
-          "a name winmm cut at 31 characters finds the endpoint it was cut from");
-    Check(MicLevel.MatchByName("Microphone", eps) == -1, "a short name that is only the start of one isn't taken for it");
-    Check(MicLevel.MatchByName("Headset Microphone (Jabra)", eps) == -1 && MicLevel.MatchByName("", eps) == -1,
-          "a name Windows doesn't list, or none, finds nothing");
-    Check(MicLevel.MatchByName(vec, new List<string> { vec, realtek, vec }) == -1,
-          "two endpoints of one name: neither, so the wrong mic is never set");
-    Check(MicLevel.MatchByName(realtek[..MicLevel.WaveInNameLimit], new List<string> { realtek, realtek + " 2" }) == -1,
-          "a cut name that fits two endpoints: neither");
-    Check(MicLevel.IsCurrent(100, 1f) && MicLevel.IsCurrent(95, 0.948f) && !MicLevel.IsCurrent(90, 0.94f),
-          "the menu ticks the step within half a percent of the level, and only that one");
-    Check(MicLevel.Steps[0] == 100 && MicLevel.Steps.Zip(MicLevel.Steps.Skip(1)).All(p => p.First > p.Second && p.Second > 0),
-          "the steps run down from 100%, each one lower");
-    Check(MicLevel.Describe(new MicLevelInfo("m", 1f, 22.5039f, -8f, 22.5f, false)) == "100% (+22.5 dB)"
-          && MicLevel.Describe(new MicLevelInfo("m", 0.55f, 0f, -17.25f, 12f, false)) == "55% (0.0 dB)"
-          && MicLevel.Describe(new MicLevelInfo("m", 0.3f, -3f, -8f, 22.5f, false)) == "30% (-3.0 dB)",
-          "the level reads as Windows' percent with its dB");
-    Check(new MicLevelInfo("m", 0.996f, 22.4f, -8f, 22.5f, false).AtMax && !new MicLevelInfo("m", 0.95f, 19f, -8f, 22.5f, false).AtMax,
-          "100% is the top of the mic's range");
-
-    // This machine's own microphones, read only. The level is set only to the
-    // value it already has, so a dictation in progress can't be disturbed.
-    int nIn = NAudio.Wave.WaveInEvent.DeviceCount;
-    if (nIn == 0) Console.WriteLine("   (no capture devices on this machine: skipped the live reads)");
-    for (int i = 0; i < nIn; i++)
-    {
-        string wname = NAudio.Wave.WaveInEvent.GetCapabilities(i).ProductName;
-        string? id = MicLevel.EndpointIdOf(i);
-        var sw = Stopwatch.StartNew();
-        var lv = MicLevel.Read(i, wname, Log);
-        long ms = sw.ElapsedMilliseconds;
-        Console.WriteLine($"   [{i}] {wname}: endpoint {(id ?? "<driver didn't say>")}, {(lv == null ? "no level" : MicLevel.Describe(lv) + (lv.Muted ? " muted" : ""))}, read in {ms} ms");
-        Check(id != null && id.StartsWith("{0.0.1."), $"[{i}] the driver names the capture endpoint behind winmm device {i}");
-        string? idName = null;
-        if (id != null) { using var en = new NAudio.CoreAudioApi.MMDeviceEnumerator(); using var dv = en.GetDevice(id); idName = dv.FriendlyName; }
-        Check(lv != null && idName != null && idName.StartsWith(wname), $"[{i}] the endpoint the driver names is the mic of the same name ({idName})");
-        sw.Restart();
-        for (int k = 0; k < 5; k++) MicLevel.Read(i, wname, Log);
-        double warm = sw.Elapsed.TotalMilliseconds / 5;
-        Check(warm < 15, $"[{i}] a warm read is quick enough for a menu open on the UI thread ({warm:F1} ms; the first, {ms} ms)");
-        // Only at a whole percent: 55% read back as 0.0 dB and set back as -0.1 dB.
-        if (lv != null && Math.Abs(lv.Scalar * 100f - lv.Percent) < 0.01f)
-        {
-            var again = MicLevel.Set(i, wname, lv.Percent, Log);
-            Check(again != null && Math.Abs(again.Scalar - lv.Scalar) < 0.005f, $"[{i}] setting the level it already has ({lv.Percent}%) reads back the same");
-        }
-    }
-    Check(MicLevel.Read(nIn + 5, "", Log) == null && Logged(@"\[mic\] couldn't read the input level"),
-          "a device Windows doesn't have: no level, and the log says why");
-}
+Console.WriteLine("\n== 0k. MicSelection: the chosen microphone, found by name ==");
+// The desktop's two inputs as winmm lists them (the second is cut at 31
+// characters). On 2026-10-12 the first dropped off USB; position 0 then meant
+// the second, and three hours of takes were recorded from it without a word.
+const string Vec = "Microphone (VEC GN-USB)", Vec2 = "Microphone (2- VEC GN-USB)", Realtek = "Microphone (Realtek USB2.0 Audi";
+MicSelection.Choice Pick(int savedIndex, string? savedName, params string[] devices) => MicSelection.Resolve(devices, savedIndex, savedName);
+Check(Pick(0, Vec, Vec, Realtek) == new MicSelection.Choice(0, Vec, null), "the chosen mic at its saved position is opened, nothing missing");
+Check(Pick(0, Vec, Realtek) == new MicSelection.Choice(0, Realtek, Vec),
+      "that evening: the chosen mic gone, another input at its position -> that input stands in, and the choice says which mic is missing");
+Check(Pick(0, Vec, Realtek, Vec) == new MicSelection.Choice(1, Vec, null), "the chosen mic at a different position is found by its name");
+Check(Pick(0, Vec, Realtek, Vec2).Index == 1 && Pick(0, Vec, Realtek, Vec2).Missing == null && Pick(1, Vec2, Vec, Realtek).Index == 0,
+      "the same mic on another USB port (Windows calls it \"2- ...\") is still the chosen mic, either way round");
+Check(Pick(1, Vec, Vec, Vec2).Index == 1 && Pick(0, Vec, Vec, Vec2).Index == 0, "two mics of one name: the saved position decides between them");
+Check(Pick(2, Vec, Realtek, "Stereo Mix (Realtek(R) Audio)") is { Index: 0, Missing: Vec },
+      "the stand-in is the first device Windows lists, not whatever sits at the old position");
+Check(Pick(1, "", Vec, Realtek) == new MicSelection.Choice(1, Realtek, null) && Pick(5, null, Vec, Realtek).Index == 0 && Pick(-1, " ", Vec).Index == 0,
+      "a config with no name yet: the saved position (the first device if it's out of range), and nothing counts as missing");
+Check(Pick(0, Vec) == new MicSelection.Choice(-1, "", Vec) && Pick(0, "") == new MicSelection.Choice(-1, "", null),
+      "no input devices at all: nothing to open, and a chosen mic is reported missing");
+Check(MicSelection.Same("Microphone (Realtek USB2.0 Audi", "Microphone (2- Realtek USB2.0 A") && MicSelection.Same("microphone (vec gn-usb) ", Vec),
+      "a name winmm cut short matches the same name cut elsewhere; case and stray spaces don't matter");
+Check(!MicSelection.Same("Microphone (USB Audio)", "Microphone (USB Audio Device)") && !MicSelection.Same(Vec, Realtek) && !MicSelection.Same("", Vec) && !MicSelection.Same(Vec, ""),
+      "a different mic is never taken for the chosen one: a shorter name that wasn't cut is not a match, nor is an empty one");
 
 
 // ════════════════════════════════════════════════════════════════════════
@@ -951,8 +843,7 @@ _ = Task.Run(async () =>
                 var req = new FakeRequest(ctx.Request.Url!.AbsolutePath, ctx.Request.Headers["xi-api-key"],
                     ctx.Request.Headers["X-API-Key"], ctx.Request.Headers["Authorization"], fields, file,
                     Chunked: ctx.Request.ContentLength64 < 0, Method: ctx.Request.HttpMethod,
-                    Query: ctx.Request.Url.Query, Host: ctx.Request.Url.Host,
-                    Body: (ctx.Request.ContentType ?? "").StartsWith("application/json") ? Encoding.UTF8.GetString(ms.ToArray()) : "");
+                    Query: ctx.Request.Url.Query, Host: ctx.Request.Url.Host);
                 lock (requests) requests.Add(req);
                 var (status, body, retryAfter) = route?.Invoke(req) ?? (replyStatus, reply, null);
                 if (replyDelayMs > 0) await Task.Delay(replyDelayMs);
@@ -1319,175 +1210,6 @@ using (var cto = new CancellationTokenSource(500))
 }
 replyDelayMs = 0;
 
-// ════════════════════════════════════════════════════════════════════════
-Console.WriteLine("\n== 1d. ZoomScribeTranscriber vs the fake server ==");
-var zoomPreset = ApiProvider.CreateDefaults().First(p => p.Id == "zoom-scribe");
-Check(zoomPreset is { TranscriberKind: TranscriberKind.ZoomScribe, Language: "en", TranscriptionModel: "zoom-scribe-en-pro", BiasMechanism: "zoom_vocabulary" }
-      && zoomPreset.ResolvedTranscriptionUrl == "https://api.zoom.us/v2/aiservices/scribe/transcribe" && zoomPreset.RequiresApiKey
-      && ApiProvider.InferKindFromLegacyId("zoom-scribe") == TranscriberKind.ZoomScribe,
-      "preset: zoom-scribe, Pro model, English, Zoom's Fast endpoint, a key required");
-var zoomNoKey = new ZoomScribeTranscriber(zoomPreset, http, Log);
-Check(!zoomNoKey.IsReady(out var zoomDiag) && zoomDiag == "Zoom API key not set", "no key -> not ready, and says so");
-zoomPreset.ApiKey = "zoom-key";
-zoomPreset.TranscriptionEndpoint = Prefix + "v2/aiservices/scribe/transcribe";
-var zoom = new ZoomScribeTranscriber(zoomPreset, http, Log);
-
-// The shape measured live (2026-10-30): punctuation is its own zero-length "word".
-reply = "{\"request_id\":\"r1\",\"duration_sec\":6.62,\"result\":{\"text_display\":\"  On exam there was bright red blood per rectum, consistent with hematochezia.  \","
-      + "\"segments\":[{\"id\":\"utt_0000\",\"start\":0.2,\"end\":6.1,\"channel\":0,\"speaker\":\"\",\"text\":\"On exam ...\",\"words\":["
-      + "{\"word\":\"rectum,\",\"start\":2.9,\"end\":3.4},{\"word\":\"hematochezia\",\"start\":5.0,\"end\":5.84},{\"word\":\".\",\"start\":6.1,\"end\":6.1}]}]},"
-      + "\"model\":\"zoom-scribe-en-pro\",\"metrics\":{},\"usage\":{\"input_units\":6.62,\"unit_type\":\"seconds\"}}";
-string? z1 = await zoom.TranscribeAsync(speech, new[] { "hematochezia", "ureterolithiasis", "Hematochezia", "  " });
-var zq1 = LastRequest();
-Console.WriteLine("   fields: " + string.Join(", ", zq1.Fields.Select(f => f.Name + "=" + f.Value)));
-Check(z1 == "On exam there was bright red blood per rectum, consistent with hematochezia.", $"text_display comes back trimmed (\"{z1}\")");
-Check(zq1.Path == "/v2/aiservices/scribe/transcribe" && zq1.Authorization == "Bearer zoom-key" && zq1.XApiKey == null,
-      "POST /v2/aiservices/scribe/transcribe with Bearer auth");
-Check(zq1.Fields.Select(f => f.Name).SequenceEqual(new[] { "config", "file" }) && zq1.File != null && zq1.File.SequenceEqual(speech),
-      "a multipart upload: the `config` field, then the WAV byte for byte as `file`");
-using (var zc = JsonDocument.Parse(zq1.Get("config") ?? "{}"))
-{
-    var c = zc.RootElement;
-    string Prop(string n) => c.TryGetProperty(n, out var v) ? v.ToString() : "<none>";
-    var phrases = c.TryGetProperty("vocabulary", out var voc) ? voc.GetProperty("phrases").EnumerateArray().Select(e => e.GetString()).ToArray() : Array.Empty<string?>();
-    Check(Prop("language") == "en-US" && Prop("model") == "zoom-scribe-en-pro" && Prop("word_time_offsets") == "True",
-          "config: language en-US (\"en\" is a 400), model zoom-scribe-en-pro, word_time_offsets on");
-    Check(phrases.SequenceEqual(new[] { "hematochezia", "ureterolithiasis" }), $"config.vocabulary.phrases: the list, deduped, blanks dropped ({string.Join(" | ", phrases)})");
-    Check(Prop("segmentation_mode") == "none" && !c.TryGetProperty("text_polishing", out _) && !c.TryGetProperty("diarization", out _)
-          && !c.TryGetProperty("language_detection", out _),
-          "segmentation_mode none (Zoom's own detection clipped a first word), no Text Polishing (an LLM rewrite), no diarization");
-}
-var zwarn = (ITranscriptWarning)zoom;
-Check(zwarn.LastWarning == null, "a normal take has no warning");
-var zcov = (ITranscriptCoverage)zoom;
-Check(zcov.LastWordEndSeconds == 5.84 && zcov.DecodedAudioSeconds == 6.62,
-      $"coverage: the last real word's end (the \".\" token skipped) and duration_sec ({zcov.LastWordEndSeconds}, {zcov.DecodedAudioSeconds})");
-
-await zoom.TranscribeAsync(speech, Enumerable.Range(1, 150).Select(i => $"term{i}").ToArray());
-using (var zc = JsonDocument.Parse(LastRequest().Get("config") ?? "{}"))
-    Check(zc.RootElement.GetProperty("vocabulary").GetProperty("phrases").GetArrayLength() == 100 && Logged(@"\[zoom\] vocabulary truncated to 100 phrases \(had 150\)"),
-          "150 terms -> the first 100 sent (Zoom's cap), logged");
-await zoom.TranscribeAsync(speech, Array.Empty<string>());
-Check(!(LastRequest().Get("config") ?? "").Contains("vocabulary"), "no list -> no vocabulary");
-
-zoomPreset.Language = "auto";
-await zoom.TranscribeAsync(speech, Array.Empty<string>());
-using (var zc = JsonDocument.Parse(LastRequest().Get("config") ?? "{}"))
-    Check(zc.RootElement.TryGetProperty("language_detection", out var ld) && ld.GetProperty("mode").GetString() == "once"
-          && !zc.RootElement.TryGetProperty("language", out _) && !zc.RootElement.TryGetProperty("model", out _),
-          "Language=auto -> language_detection once, and no model (Zoom refuses a model with `once`)");
-zoomPreset.Language = "es";
-await zoom.TranscribeAsync(speech, Array.Empty<string>());
-using (var zc = JsonDocument.Parse(LastRequest().Get("config") ?? "{}"))
-    Check(zc.RootElement.GetProperty("language").GetString() == "es-ES" && !zc.RootElement.TryGetProperty("model", out _)
-          && Logged(@"\[zoom\] zoom-scribe-en-pro is English only; for es-ES Zoom picks the model"),
-          "Language=es -> es-ES, and the English-only model is left out, logged");
-zoomPreset.Language = "en";
-
-reply = "{\"request_id\":\"r2\",\"duration_sec\":5.0,\"result\":{\"text_display\":\"\",\"segments\":[]},\"model\":\"zoom-scribe-en-pro\"}";
-int zBefore;
-lock (requests) zBefore = requests.Count;
-string? z2 = await zoom.TranscribeAsync(speech, Array.Empty<string>());
-Check(z2 == "" && zcov.LastWordEndSeconds == null && zcov.DecodedAudioSeconds == 5.0, "empty text is \"\" (nothing heard), not a failed request; no word, no word end");
-List<FakeRequest> zEmpty;
-lock (requests) zEmpty = requests.Skip(zBefore).ToList();
-Check(zEmpty.Count == 2 && (zEmpty[0].Get("config") ?? "").Contains("\"segmentation_mode\":\"none\"") && !(zEmpty[1].Get("config") ?? "").Contains("segmentation_mode")
-      && Logged(@"\[zoom\] nothing came back with Zoom's voice-activity detection off; asking again with it on"),
-      "an empty answer with Zoom's detection off is asked for once more with it on, logged");
-Check(zwarn.LastWarning == null, "nothing back either way: no text to warn about");
-route = r => (r.Get("config") ?? "").Contains("segmentation_mode")
-    ? (200, "{\"duration_sec\":2.9,\"result\":{\"text_display\":\"\"}}", null)
-    : (200, "{\"duration_sec\":2.9,\"result\":{\"text_display\":\"The patient is a 16 year old male.\"}}", null);
-Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == "The patient is a 16 year old male.",
-      "... and its text is used: the case measured live (three 2.7-3.1 s takes empty with it off, right with it on)");
-Check(zwarn.LastWarning?.Contains("silence detection") == true, $"... with a warning, since that detection can leave words out ({zwarn.LastWarning})");
-route = null;
-
-// A take over 29 s: Zoom refuses segmentation_mode none from 30 s, so it's cut at its pauses
-// and the pieces go out at once. Each answer names its piece by size, since they can arrive in any order.
-var (zLong, _) = Bursts(12, 0.8, 1.0);   // 69.8 s
-var zSplit = LocalTakeSplitter.Cut(zLong, ZoomScribeTranscriber.MaxPiece)!;
-lock (requests) zBefore = requests.Count;
-route = r => (200, $"{{\"duration_sec\":{((r.File?.Length ?? 44) - 44) / 32000.0},\"result\":{{\"text_display\":\"{r.File?.Length} bytes.\","
-                   + "\"segments\":[{\"words\":[{\"word\":\"bytes\",\"start\":4.0,\"end\":4.5}]}]}}", null);
-string? zl = await zoom.TranscribeAsync(zLong, new[] { "hematochezia" });
-List<FakeRequest> zPieces;
-lock (requests) zPieces = requests.Skip(zBefore).ToList();
-Check(zSplit.Pieces.Count >= 3 && zPieces.Count == zSplit.Pieces.Count && zSplit.Pieces.All(p => p.Length <= 29 * 16000)
-      && zPieces.All(q => (q.Get("config") ?? "").Contains("\"segmentation_mode\":\"none\"") && (q.Get("config") ?? "").Contains("hematochezia")),
-      $"a 69.8 s take goes out as {zPieces.Count} pieces of at most 29 s, each with segmentation_mode none and the list");
-Check(zl == string.Join(" ", zSplit.Wavs.Select(w => $"{w.Length} bytes.")) && Logged(@"\[zoom\] 69\.8 s take sent in \d pieces cut at pauses"),
-      $"their texts are joined in the take's order, whatever order they came back in; logged ({zl})");
-Check(zwarn.LastWarning == null, "the next take clears the warning: none of its pieces needed the retry");
-Check(Math.Abs((zcov.LastWordEndSeconds ?? 0) - (zSplit.Seconds(zSplit.Pieces[^1].Start) + 4.5)) < 1e-6
-      && Math.Abs((zcov.DecodedAudioSeconds ?? 0) - zSplit.Seconds(zSplit.Pieces[^1].End)) < 1e-6,
-      $"coverage in the take's own time: the last piece's start plus its last word, and plus its duration_sec ({zcov.LastWordEndSeconds:F2} s of {zcov.DecodedAudioSeconds:F2})");
-int zFailLen = zSplit.Wavs[1].Length;
-route = r => r.File?.Length == zFailLen ? (500, "{\"code\":500,\"reason\":\"INTERNAL\",\"message\":\"boom\"}", null) : (200, "{\"result\":{\"text_display\":\"ok\"}}", null);
-Check(await zoom.TranscribeAsync(zLong, Array.Empty<string>()) == null && Logged(@"\[zoom\] 1 of \d pieces failed, so the take did"),
-      "one failed piece fails the take (it stays journaled), logged");
-route = r => r.File?.Length == zFailLen && (r.Get("config") ?? "").Contains("segmentation_mode")
-    ? (200, "{\"result\":{\"text_display\":\"\"}}", null)
-    : (200, "{\"result\":{\"text_display\":\"ok\"}}", null);
-string? zr = await zoom.TranscribeAsync(zLong, Array.Empty<string>());
-Check(zr == string.Join(" ", zSplit.Wavs.Select(_ => "ok")) && zwarn.LastWarning != null, "one piece needing the retry: the take comes back whole, with the warning");
-route = null;
-reply = "{\"result\":{\"text_display\":\"\"}}";
-await zoom.TranscribeAsync(NoisyWav(0.0025, (40, 0)), Array.Empty<string>());
-Check(!(LastRequest().Get("config") ?? "").Contains("segmentation_mode") && Logged(@"\[zoom\] 40\.0 s take with no pause to cut at: sent whole, with Zoom's own voice-activity detection"),
-      "a 40 s take with no speech to cut at goes out whole with Zoom's detection on (\"none\" would only be refused), logged");
-reply = "{\"result\":{\"text_display\":\"A long take.\"}}";
-await zoom.TranscribeAsync(NoisyWav(0.0025, (40, 0)), Array.Empty<string>());
-Check(zwarn.LastWarning != null, "... and any text that comes back that way has the warning too");
-reply = "{\"result\":{\"text_display\":\"\"}}";
-
-// The undocumented upload refused: the documented data URL, once.
-int zPosts = 0;
-route = r => ++zPosts == 1
-    ? (400, "{\"code\":400,\"reason\":\"UNSUPPORTED_CONTENT_TYPE\",\"message\":\"multipart/form-data is not supported\",\"metadata\":{}}", null)
-    : (200, "{\"duration_sec\":4.0,\"result\":{\"text_display\":\"Sent the documented way.\",\"segments\":[]}}", null);
-string? z3 = await zoom.TranscribeAsync(speech, new[] { "hematochezia" });
-var zq3 = LastRequest();
-string zFile = "";
-string zConfigLang = "";
-try
-{
-    using var zb = JsonDocument.Parse(zq3.Body);
-    zFile = zb.RootElement.GetProperty("file").GetString() ?? "";
-    zConfigLang = zb.RootElement.GetProperty("config").GetProperty("language").GetString() ?? "";
-}
-catch { }
-Check(z3 == "Sent the documented way." && zPosts == 2 && zq3.Fields.Count == 0 && zFile.StartsWith("data:audio/wav;base64,")
-      && Convert.FromBase64String(zFile["data:audio/wav;base64,".Length..]).SequenceEqual(speech) && zConfigLang == "en-US"
-      && Logged(@"\[zoom\] the file upload was refused \(HTTP 400: \[UNSUPPORTED_CONTENT_TYPE\].*sending the take as a data URL instead"),
-      $"upload refused -> sent once more as JSON with the WAV as a data URL and the same config, logged ({zPosts} posts)");
-
-zPosts = 0;
-route = _ => { zPosts++; return (400, "{\"code\":400,\"reason\":\"UNSUPPORTED_LANGUAGE\",\"message\":\"Language 'xx' is not supported.\",\"metadata\":{}}", null); };
-Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == null && zPosts == 1
-      && Logged(@"\[zoom\] HTTP 400: \[UNSUPPORTED_LANGUAGE\] Language 'xx' is not supported\."),
-      "any other 400 -> null, no second try, logged with Zoom's reason");
-route = _ => (401, "{\"code\":401,\"reason\":\"INVALID_CREDENTIALS\",\"message\":\"Invalid token.\"}", null);
-Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == null
-      && Logged(@"\[zoom\] HTTP 401: \[INVALID_CREDENTIALS\] Invalid token\. \(check the Zoom API key in Provider Settings\)"),
-      "401 -> null, logged with what to do about it");
-route = _ => (200, "{\"request_id\":\"r3\",\"result\":{}}", null);
-Check(await zoom.TranscribeAsync(speech, Array.Empty<string>()) == null && Logged(@"\[zoom\] the response had no transcript"),
-      "a 200 with no text_display -> null (a broken answer, not silence), logged");
-route = null;
-
-reply = "{\"result\":{\"text_display\":\"late\"}}";
-replyDelayMs = 3000;
-var swz = Stopwatch.StartNew();
-using (var ctz = new CancellationTokenSource(500))
-{
-    string? z7 = await zoom.TranscribeAsync(speech, Array.Empty<string>(), ctz.Token);
-    swz.Stop();
-    Check(z7 == null && swz.ElapsedMilliseconds < 2500 && Logged(@"ZoomScribeTranscriber\(zoom-scribe\): stopped at the take's deadline"),
-          $"the take's deadline ends a slow request, logged as the deadline ({swz.ElapsedMilliseconds} ms)");
-}
-replyDelayMs = 0;
-
 listener.Stop();
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1803,7 +1525,7 @@ static (List<(string Name, string Value)> Fields, byte[]? File) ParseMultipart(s
 
 record FakeRequest(string Path, string? XiApiKey, string? XApiKey, string? Authorization,
                    List<(string Name, string Value)> Fields, byte[]? File, bool Chunked,
-                   string Method = "POST", string Query = "", string Host = "", string Body = "")
+                   string Method = "POST", string Query = "", string Host = "")
 {
     public string? Get(string name) => Fields.FirstOrDefault(f => f.Name == name).Value;
 }

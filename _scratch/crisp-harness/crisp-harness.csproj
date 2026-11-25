@@ -24,6 +24,7 @@
     <Compile Include="..\..\TranscriptCoverage.cs" />
     <Compile Include="..\..\UnsentTakes.cs" />
     <Compile Include="..\..\SpeechDetector.cs" />
+    <Compile Include="..\..\MicSelection.cs" />
     <Compile Include="..\..\AppConfig.cs" />
     <Compile Include="..\..\ITranscriber.cs" />
     <Compile Include="..\..\ModulateTranscriber.cs" />
