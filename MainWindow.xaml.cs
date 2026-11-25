@@ -52,7 +52,22 @@ namespace WhisperInk
         private bool IsStopping  => Volatile.Read(ref _recState) == 2;
 
         private bool _isSoundEnabled = true;
+        // The chosen microphone: its name as Windows lists it, which is what
+        // it's found by (MicSelection), and its position, kept as a tie-break
+        // and for configs older than the name. The name is "" until a mic is
+        // picked, or adopted at the first open.
         private int _selectedDeviceNumber;
+        private string _selectedDeviceName = "";
+        // While the chosen mic isn't connected and another input is standing
+        // in for it: the chosen mic's name. Null otherwise.
+        private string? _micMissing;
+        private string _micInUse = "";
+        private DispatcherTimer? _micWatchTimer;
+        private bool _micWatchBusy;
+        // True once config.json has been read to the end (or didn't exist).
+        // A load that stopped partway holds only part of the providers and
+        // their keys, and must not be written back by a save nobody asked for.
+        private bool _configLoaded;
 
         private List<string> _contextBiasTerms = new();
 
@@ -403,9 +418,10 @@ namespace WhisperInk
             // Audio devices are created after LoadConfig so they see the
             // configured mic index and pre-roll length.
             _sounds = new UiSoundPlayer(Log);
-            _mic = new MicCapture(() => _selectedDeviceNumber, () => _preRollMs, Log,
+            _mic = new MicCapture(ResolveMicDevice, () => _preRollMs, Log,
                 onCaptureLost: () => Dispatcher.BeginInvoke(OnMicLostMidDictation));
             WarmMic();
+            StartMicWatch();
 
             _unsent = new UnsentTakes(Path.Combine(ConfigFolder, "unsent"), Log);
             if (_keepAudio)
@@ -580,7 +596,12 @@ namespace WhisperInk
         private void UpdateStatusLabel()
         {
             var provider = GetActiveProvider();
-            lblStatus.Content = provider?.Name ?? "?";
+            // A missing microphone outranks the provider's name: it's the one
+            // thing on the bar that says the next dictation may record nothing.
+            lblStatus.Content = _micMissing != null ? "⚠ Mic not connected" : provider?.Name ?? "?";
+            lblStatus.ToolTip = _micMissing != null
+                ? $"{_micMissing} isn't connected. Recording from {_micInUse} instead. Plug it back in, or pick another under 🎙 Microphone."
+                : null;
             UpdateHealthDot();
         }
 
@@ -624,6 +645,8 @@ namespace WhisperInk
                     if (root.TryGetProperty("MistralApiKey", out var key)) legacyMistralKey = key.GetString() ?? "";
                     if (root.TryGetProperty("IsSoundEnabled", out var snd)) _isSoundEnabled = snd.GetBoolean();
                     if (root.TryGetProperty("SelectedDevice", out var dev)) _selectedDeviceNumber = dev.GetInt32();
+                    if (root.TryGetProperty("SelectedDeviceName", out var devName) && devName.ValueKind == JsonValueKind.String)
+                        _selectedDeviceName = devName.GetString() ?? "";
 
                     // ── Responsiveness tuning ──
                     // Clamped, not trusted: a hand-edited 0 ms pre-roll or a
@@ -831,6 +854,7 @@ namespace WhisperInk
                     SaveConfig();
                     MessageBox.Show($"Config created at:\n{ConfigFile}\n\nOpen provider settings (right-click → 🔌 API Providers) to configure your API key.", "WhisperInk");
                 }
+                _configLoaded = true;
             }
             catch (Exception ex) { Log($"Config error: {ex.Message}"); }
 
@@ -853,6 +877,7 @@ namespace WhisperInk
                     MistralApiKey = legacyKey,
                     IsSoundEnabled = _isSoundEnabled,
                     SelectedDevice = _selectedDeviceNumber,
+                    SelectedDeviceName = _selectedDeviceName,
                     ContextBiasTerms = _contextBiasTerms,
                     Providers = _providers,
                     ActiveProviderId = _activeProviderId,
@@ -961,6 +986,11 @@ namespace WhisperInk
             // the pre-roll ring, so this just attaches a writer and seeds it with
             // audio from before the keypress. On a cold device it falls back to
             // opening one (the old ~130 ms path) and preRoll comes back 0.
+            // Only while another input is standing in for the chosen mic: it
+            // may have been plugged back in a moment ago, sooner than the
+            // watch acts, and the natural next move is to press and talk.
+            if (_micMissing != null) ReturnToChosenMicIfBack();
+            bool micWasMissing = _micMissing != null;
             int preRoll = _mic?.BeginCapture(streamed == null ? null : streamed.Append) ?? -1;
             if (preRoll < 0)
             {
@@ -975,7 +1005,18 @@ namespace WhisperInk
 
             _streamedTake = streamed;
 
-            Log($"[diag] StartBatchDictation: capturing (pre-roll {preRoll}ms, mic was {(preRoll > 0 ? "warm" : "cold")}{(streamed != null ? ", upload streaming" : "")})");
+            if (_micMissing != null)
+            {
+                // The chosen mic isn't connected and this take is coming from
+                // another input. Said at every press while that lasts, where
+                // it's seen while talking. A press that has only just found
+                // the mic gone (a cold open) gets the Error tone and balloon
+                // from AnnounceMicMissing instead of this Warn.
+                lblStatus.Content = "🎙 REC ⚠ other mic";
+                if (micWasMissing) PlayUiSound(UiSound.Warn);
+            }
+
+            Log($"[diag] StartBatchDictation: capturing (pre-roll {preRoll}ms, mic was {(preRoll > 0 ? "warm" : "cold")}{(streamed != null ? ", upload streaming" : "")}{(_micMissing != null ? $", from {_micInUse} in place of {_micMissing}" : "")})");
 
             // Otherwise the connection is at least opened while the user talks.
             if (streamed == null) PrewarmConnection(startProvider);
@@ -1142,6 +1183,18 @@ namespace WhisperInk
                         _unsent?.KeepQuiet(wav, GetActiveProvider(), audioMs / 1000.0, "silent after the mic cut out");
                         PlayUiSound(UiSound.Error);
                         FlashStatus("Mic lost!", 3000);
+                        return;
+                    }
+                    if (_micMissing != null)
+                    {
+                        // Silence from an input that is only standing in for
+                        // the chosen mic: far likelier the wrong microphone
+                        // than a pause, and "Too quiet?" sent the owner off
+                        // switching providers for a mic that wasn't plugged in.
+                        Log($"[error] {audioMs:F0}ms of silence (RMS {level.Rms:F5}, peak {level.Peak:F4}) from {_micInUse}, standing in for {_micMissing}, which is not connected — nothing to transcribe; kept under ↻ Unsent → Judged silent");
+                        _unsent?.KeepQuiet(wav, GetActiveProvider(), audioMs / 1000.0, $"silent: recorded from {_micInUse} while {_micMissing} was not connected");
+                        PlayUiSound(UiSound.Error);
+                        FlashStatus("Mic missing!", 3000);
                         return;
                     }
                     Log($"[skip] {audioMs:F0}ms of audio, RMS {level.Rms:F5} < {_silenceThreshold:F5} and no sustained speech (peak {level.Peak:F4}, floor {level.NoiseFloor:F5}) — nothing said, no transcription; kept under ↻ Unsent → Judged silent");
@@ -1406,6 +1459,166 @@ namespace WhisperInk
         {
             if (!_warmMicEnabled || _mic == null) return;
             if (_mic.EnsureOpen()) RestartMicIdleTimer();
+        }
+
+        // ── Which microphone ────────────────────────────────────────────
+        // The chosen mic is found by name each time the device is opened, and
+        // a missing one is announced, not silently replaced. Until 2026-10-12
+        // the choice was a position in Windows' list: the desktop's dictation
+        // mic dropped off USB, position 0 became an input with nothing on it,
+        // and three hours of takes were recorded from that as "Too quiet?".
+
+        private const int MicWatchSeconds = 3;
+
+        /// <summary>The capture devices as Windows lists them now, by
+        /// position. About 0.3 ms for two devices (measured 2026-10-12).</summary>
+        private static List<string> ListMicNames()
+        {
+            var names = new List<string>();
+            try
+            {
+                int count = WaveIn.DeviceCount;
+                for (int i = 0; i < count; i++) names.Add(WaveIn.GetCapabilities(i).ProductName ?? "");
+            }
+            catch { }
+            return names;
+        }
+
+        /// <summary>The device MicCapture opens, asked for each time it opens
+        /// one (inside its lock, so this only decides, logs and records; what
+        /// the user is told is queued behind the caller).</summary>
+        private int ResolveMicDevice()
+        {
+            var choice = MicSelection.Resolve(ListMicNames(), _selectedDeviceNumber, _selectedDeviceName);
+            if (choice.Index >= 0)
+                Log($"[mic] opening [{choice.Index}] {choice.Name}"
+                    + (choice.Missing != null ? $", standing in for {choice.Missing}, which is not connected" : ""));
+            if (Dispatcher.CheckAccess()) ApplyMicChoice(choice);
+            else Dispatcher.BeginInvoke(new Action(() => ApplyMicChoice(choice)));
+            return choice.Index;
+        }
+
+        /// <summary>Records which mic is in use and whether it is the chosen
+        /// one, and queues the announcement when that has just changed. The
+        /// state is set at once, so a press that finds the mic missing already
+        /// shows it; the tone, balloon and label wait at Background priority,
+        /// behind the press itself and, at startup, the tray's creation.</summary>
+        private void ApplyMicChoice(MicSelection.Choice choice)
+        {
+            string? wasMissing = _micMissing;
+            _micInUse = choice.Name;
+            _micMissing = choice.Missing;
+
+            if (choice.Missing == null && choice.Index >= 0)
+            {
+                _selectedDeviceNumber = choice.Index;
+                if (string.IsNullOrWhiteSpace(_selectedDeviceName))
+                {
+                    // A config from before names were saved: the mic at the
+                    // saved position becomes the chosen one, and is saved now
+                    // so the next launch can tell if it has gone.
+                    _selectedDeviceName = choice.Name;
+                    Log($"[mic] remembering {choice.Name} as the chosen microphone");
+                    if (_configLoaded) Dispatcher.BeginInvoke(new Action(SaveConfig), DispatcherPriority.ApplicationIdle);
+                }
+            }
+
+            if (choice.Missing != null && wasMissing == null)
+            {
+                string missing = choice.Missing, inUse = choice.Name;
+                Dispatcher.BeginInvoke(new Action(() => AnnounceMicMissing(missing, inUse)), DispatcherPriority.Background);
+            }
+            else if (choice.Missing == null && wasMissing != null && choice.Index >= 0)
+            {
+                string name = choice.Name;
+                Dispatcher.BeginInvoke(new Action(() => AnnounceMicBack(name)), DispatcherPriority.Background);
+            }
+        }
+
+        private void AnnounceMicMissing(string missing, string inUse)
+        {
+            bool standIn = inUse.Length > 0;
+            Log($"[error] the chosen microphone, {missing}, is not connected — "
+                + (standIn ? $"recording from {inUse} instead" : "and there is no other input to record from"));
+            PlayUiSound(UiSound.Error);
+            _tray?.ShowBalloon("Microphone not connected",
+                standIn
+                    ? $"{missing} isn't connected. WhisperInk is recording from {inUse} instead, which may hear nothing. Plug the microphone back in, or pick another under 🎙 Microphone."
+                    : $"{missing} isn't connected, and there is no other input to record from. Plug it back in.",
+                warning: true);
+            if (!IsRecording && !IsStopping) UpdateStatusLabel();
+        }
+
+        /// <summary>At a press made while a stand-in is in use: if the chosen
+        /// mic is listed again, go back to it before recording. Reopening
+        /// costs this one take its pre-roll and about 130 ms, against
+        /// recording it from the wrong input. With the mic still missing it is
+        /// one look at Windows' list, about 0.3 ms.</summary>
+        private void ReturnToChosenMicIfBack()
+        {
+            var choice = MicSelection.Resolve(ListMicNames(), _selectedDeviceNumber, _selectedDeviceName);
+            if (choice.Missing != null) return;
+            if (_mic?.IsWarm == true) _mic.DeviceChanged();
+            else ApplyMicChoice(choice);
+        }
+
+        private void AnnounceMicBack(string name)
+        {
+            Log($"[mic] {name} is connected again");
+            _tray?.ShowBalloon("Microphone connected", $"Recording from {name} again.");
+            if (!IsRecording && !IsStopping) UpdateStatusLabel();
+        }
+
+        /// <summary>Notices the chosen mic leaving or coming back between
+        /// dictations, so the warning arrives when it happens and not at the
+        /// next take, and a mic that is plugged back in is used again without
+        /// anyone re-picking it.</summary>
+        private void StartMicWatch()
+        {
+            _micWatchTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(MicWatchSeconds) };
+            _micWatchTimer.Tick += (_, _) => RunSafe(CheckMicAsync, "CheckMic");
+            _micWatchTimer.Start();
+        }
+
+        private int _micWatchChanges;
+
+        private async Task CheckMicAsync()
+        {
+            // Nothing chosen yet: the first open adopts a mic. Never under a
+            // take: a mic lost mid-dictation has its own alarm, and the device
+            // must not be reopened while it is being recorded from.
+            if (_micWatchBusy || _mic == null || string.IsNullOrWhiteSpace(_selectedDeviceName)) return;
+            if (IsRecording || IsStopping) return;
+            _micWatchBusy = true;
+            try
+            {
+                // winmm asks the audio service; that wait doesn't belong on the
+                // UI thread, which also runs the keyboard hook.
+                var names = await Task.Run(ListMicNames);
+                var choice = MicSelection.Resolve(names, _selectedDeviceNumber, _selectedDeviceName);
+                if ((choice.Missing != null) == (_micMissing != null))
+                {
+                    _micWatchChanges = 0;
+                    // With nothing open, this is the device a press would open.
+                    if (!_mic.IsWarm && !IsRecording && !IsStopping) _micInUse = choice.Name;
+                    return;
+                }
+
+                // Seen on consecutive checks before acting: Windows' list is in
+                // flux for a moment while a device arrives or leaves, and after
+                // a resume from sleep. One more look before raising the alarm
+                // than before standing it down.
+                if (++_micWatchChanges < (choice.Missing != null ? 3 : 2)) return;
+                _micWatchChanges = 0;
+                if (IsRecording || IsStopping) return;
+
+                // A warm device is reopened, which asks ResolveMicDevice again;
+                // a cold one has nothing open, so only the state changes and
+                // the next press opens the right device.
+                if (_mic.IsWarm) _mic.DeviceChanged();
+                else ApplyMicChoice(choice);
+            }
+            finally { _micWatchBusy = false; }
         }
 
         // ── Transcription dispatch ──────────────────────────────────────
@@ -2071,21 +2284,42 @@ namespace WhisperInk
         private MenuNode BuildMicMenu()
         {
             var children = new List<MenuNode>();
-            for (int i = 0; i < WaveIn.DeviceCount; i++)
+            var names = ListMicNames();
+            // The tick follows the chosen mic by name, as the open does; it
+            // used to follow the saved position, and so sat on the dictation
+            // mic while another input was being recorded from.
+            var choice = MicSelection.Resolve(names, _selectedDeviceNumber, _selectedDeviceName);
+            if (choice.Missing != null)
             {
-                int deviceIndex = i; // capture for the closure
-                var cap = WaveIn.GetCapabilities(i);
                 children.Add(new MenuNode
                 {
-                    Header = cap.ProductName,
-                    IsChecked = i == _selectedDeviceNumber,
+                    Header = $"⚠ {choice.Missing}: not connected",
+                    IsEnabled = false,
+                    ToolTip = "The microphone you chose. WhisperInk goes back to it by itself when it's plugged in again.",
+                });
+            }
+            for (int i = 0; i < names.Count; i++)
+            {
+                int deviceIndex = i; // capture for the closure
+                string deviceName = names[i];
+                bool standingIn = choice.Missing != null && i == choice.Index;
+                children.Add(new MenuNode
+                {
+                    Header = standingIn ? $"{deviceName} (in use meanwhile)" : deviceName,
+                    IsChecked = choice.Missing == null && i == choice.Index,
                     Action = () =>
                     {
                         _selectedDeviceNumber = deviceIndex;
+                        _selectedDeviceName = deviceName;
+                        // A deliberate pick, not the old mic coming back: no
+                        // "connected again" for it.
+                        _micMissing = null;
                         SaveConfig();
-                        // The warm mic is bound to the old index — reopen it on
+                        // The warm mic is bound to the old device — reopen it on
                         // the new one, or the user's choice silently does nothing.
-                        _mic?.DeviceChanged();
+                        if (_mic?.IsWarm == true) _mic.DeviceChanged();
+                        else ApplyMicChoice(MicSelection.Resolve(ListMicNames(), _selectedDeviceNumber, _selectedDeviceName));
+                        if (!IsRecording && !IsStopping) UpdateStatusLabel();
                     },
                 });
             }

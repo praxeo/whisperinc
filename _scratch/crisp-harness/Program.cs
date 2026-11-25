@@ -785,6 +785,31 @@ Check(gvp.Kind == TranscriptGuard.Kind.ListInText && gvp.Terms == 4, "four terms
 Check(GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic", "dorsal") == "ListRecital"
       && GK("Ascites, syncopal, pleuritic, dorsal.", "ascites", "ascites", "syncopal", "pleuritic") == "None", "a term listed twice counts once: five entries, four distinct is a recital, five entries, three distinct is off");
 
+// ════════════════════════════════════════════════════════════════════════
+Console.WriteLine("\n== 0k. MicSelection: the chosen microphone, found by name ==");
+// The desktop's two inputs as winmm lists them (the second is cut at 31
+// characters). On 2026-10-12 the first dropped off USB; position 0 then meant
+// the second, and three hours of takes were recorded from it without a word.
+const string Vec = "Microphone (VEC GN-USB)", Vec2 = "Microphone (2- VEC GN-USB)", Realtek = "Microphone (Realtek USB2.0 Audi";
+MicSelection.Choice Pick(int savedIndex, string? savedName, params string[] devices) => MicSelection.Resolve(devices, savedIndex, savedName);
+Check(Pick(0, Vec, Vec, Realtek) == new MicSelection.Choice(0, Vec, null), "the chosen mic at its saved position is opened, nothing missing");
+Check(Pick(0, Vec, Realtek) == new MicSelection.Choice(0, Realtek, Vec),
+      "that evening: the chosen mic gone, another input at its position -> that input stands in, and the choice says which mic is missing");
+Check(Pick(0, Vec, Realtek, Vec) == new MicSelection.Choice(1, Vec, null), "the chosen mic at a different position is found by its name");
+Check(Pick(0, Vec, Realtek, Vec2).Index == 1 && Pick(0, Vec, Realtek, Vec2).Missing == null && Pick(1, Vec2, Vec, Realtek).Index == 0,
+      "the same mic on another USB port (Windows calls it \"2- ...\") is still the chosen mic, either way round");
+Check(Pick(1, Vec, Vec, Vec2).Index == 1 && Pick(0, Vec, Vec, Vec2).Index == 0, "two mics of one name: the saved position decides between them");
+Check(Pick(2, Vec, Realtek, "Stereo Mix (Realtek(R) Audio)") is { Index: 0, Missing: Vec },
+      "the stand-in is the first device Windows lists, not whatever sits at the old position");
+Check(Pick(1, "", Vec, Realtek) == new MicSelection.Choice(1, Realtek, null) && Pick(5, null, Vec, Realtek).Index == 0 && Pick(-1, " ", Vec).Index == 0,
+      "a config with no name yet: the saved position (the first device if it's out of range), and nothing counts as missing");
+Check(Pick(0, Vec) == new MicSelection.Choice(-1, "", Vec) && Pick(0, "") == new MicSelection.Choice(-1, "", null),
+      "no input devices at all: nothing to open, and a chosen mic is reported missing");
+Check(MicSelection.Same("Microphone (Realtek USB2.0 Audi", "Microphone (2- Realtek USB2.0 A") && MicSelection.Same("microphone (vec gn-usb) ", Vec),
+      "a name winmm cut short matches the same name cut elsewhere; case and stray spaces don't matter");
+Check(!MicSelection.Same("Microphone (USB Audio)", "Microphone (USB Audio Device)") && !MicSelection.Same(Vec, Realtek) && !MicSelection.Same("", Vec) && !MicSelection.Same(Vec, ""),
+      "a different mic is never taken for the chosen one: a shorter name that wasn't cut is not a match, nor is an empty one");
+
 
 // ════════════════════════════════════════════════════════════════════════
 Console.WriteLine("\n== 1. HttpTranscriber vs a local fake server ==");
